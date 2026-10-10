@@ -13,6 +13,7 @@ export default function HyperionClient() {
   // Seed hasSave at first paint so the CONTINUE button never pops in late.
   const [state, setState] = useState<HudState>(() => ({ ...HUD_INITIAL, hasSave: hasSave() }));
   const [toast, setToast] = useState<string | null>(null);
+  const [game, setGame] = useState<HyperionGame | null>(null);
   const [showStart, setShowStart] = useState(true);
   const [paused, setPaused] = useState(false);
   const [inventoryOpen, setInventoryOpen] = useState(false);
@@ -62,6 +63,7 @@ export default function HyperionClient() {
           },
         });
         gameRef.current = game;
+        setGame(game); // state (not a ref read) so Hud can safely access it during render
         // Expose for browser-automation QA (harmless in production).
         (window as unknown as { __hyperion?: HyperionGame }).__hyperion = game;
         game.start();
@@ -159,6 +161,7 @@ export default function HyperionClient() {
       <Hud
         state={state}
         toast={toast}
+        game={game}
         onSlotClick={handleSlotClick}
         onInventorySwap={handleInventorySwap}
         onResume={handleResume}

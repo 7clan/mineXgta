@@ -10,6 +10,7 @@ import * as THREE from 'three';
 const MAX_DEBRIS = 700;
 const MAX_FIRE = 900;
 const MAX_SMOKE = 700;
+const MAX_WATER = 520;
 
 interface DebrisP {
   pos: THREE.Vector3;
@@ -79,20 +80,38 @@ const SMOKE_FRAG = /* glsl */ `
   }
 `;
 
+// Water spray: bright cyan-white droplets that thin out as they fly.
+const WATER_FRAG = /* glsl */ `
+  varying float vLife;
+  void main() {
+    vec2 uv = gl_PointCoord - 0.5;
+    float d = length(uv);
+    if (d > 0.5) discard;
+    float a = smoothstep(0.5, 0.08, d) * vLife * 0.72;
+    vec3 col = mix(vec3(0.62, 0.86, 0.98), vec3(0.92, 0.99, 1.0), vLife);
+    gl_FragColor = vec4(col, a);
+  }
+`;
+
 export class Particles {
   private scene: THREE.Scene;
   private debrisMesh: THREE.InstancedMesh;
   private debris: DebrisP[] = [];
   private fire: SparkP[] = [];
   private smoke: SparkP[] = [];
+  private water: SparkP[] = [];
   private firePoints: THREE.Points;
   private smokePoints: THREE.Points;
+  private waterPoints: THREE.Points;
   private firePos: Float32Array;
   private fireLife: Float32Array;
   private fireSize: Float32Array;
   private smokePos: Float32Array;
   private smokeLife: Float32Array;
   private smokeSize: Float32Array;
+  private waterPos: Float32Array;
+  private waterLife: Float32Array;
+  private waterSize: Float32Array;
   private emitters: FireEmitter[] = [];
   private flashLight: THREE.PointLight;
   private flashT = 0;
@@ -167,6 +186,13 @@ export class Particles {
       this.fire.push({ pos: new THREE.Vector3(), vel: new THREE.Vector3(), life: 0, maxLife: 1, size: 1, active: false });
     for (let i = 0; i < MAX_SMOKE; i++)
       this.smoke.push({ pos: new THREE.Vector3(), vel: new THREE.Vector3(), life: 0, maxLife: 1, size: 1, active: false });
+    const w = mkPoints(MAX_WATER, WATER_FRAG);
+    this.waterPoints = w.pts;
+    this.waterPos = w.p;
+    this.waterLife = w.l;
+    this.waterSize = w.s;
+    for (let i = 0; i < MAX_WATER; i++)
+      this.water.push({ pos: new THREE.Vector3(), vel: new THREE.Vector3(), life: 0, maxLife: 1, size: 1, active: false });
 
     // ---- Explosion flash light + shockwave ring ----
     this.flashLight = new THREE.PointLight(0xffb060, 0, 40, 1.8);
@@ -265,6 +291,23 @@ export class Particles {
     }
   }
 
+  /** Hydrant water jet: a column of bright droplets launched upward, spraying
+   *  outwards as they rise. Called every frame while a main is burst. */
+  waterJet(pos: THREE.Vector3, n: number, power = 1): void {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const up = (7.5 + Math.random() * 6.5) * power;
+      const out = (0.55 + Math.random() * 1.5) * power;
+      this.spawnSpark(
+        this.water,
+        new THREE.Vector3(pos.x + Math.cos(a) * 0.14, pos.y + 0.15, pos.z + Math.sin(a) * 0.14),
+        new THREE.Vector3(Math.cos(a) * out, up, Math.sin(a) * out),
+        0.75 + Math.random() * 0.75,
+        0.55 + Math.random() * 0.8
+      );
+    }
+  }
+
   explosion(pos: THREE.Vector3, radius: number): void {
     this.flashLight.position.copy(pos);
     this.flashLight.position.y += 1.2;
@@ -344,8 +387,10 @@ export class Particles {
     }
 
     // ---- Fire points ----
-    this.writePoints(this.fire, this.firePos, this.fireLife, this.fireSize, dt, -3.4);
-    this.writePoints(this.smoke, this.smokePos, this.smokeLife, this.smokeSize, dt, -1.1);
+    this.writePoints(this.fire, this.firePos, this.fireLife, this.fireSize, this.firePoints, dt, -3.4);
+    this.writePoints(this.smoke, this.smokePos, this.smokeLife, this.smokeSize, this.smokePoints, dt, -1.1);
+    // Water: strong gravity so jets arc over and rain back down.
+    this.writePoints(this.water, this.waterPos, this.waterLife, this.waterSize, this.waterPoints, dt, -16.5);
 
     // ---- Flash + ring ----
     if (this.flashT > 0) {
@@ -362,7 +407,7 @@ export class Particles {
     }
   }
 
-  private writePoints(list: SparkP[], pos: Float32Array, life: Float32Array, size: Float32Array, dt: number, gravity: number): void {
+  private writePoints(list: SparkP[], pos: Float32Array, life: Float32Array, size: Float32Array, pts: THREE.Points, dt: number, gravity: number): void {
     let n = 0;
     for (const p of list) {
       if (p.active) {
@@ -383,7 +428,7 @@ export class Particles {
         n++;
       }
     }
-    const g = (list === this.fire ? this.firePoints : this.smokePoints).geometry;
+    const g = pts.geometry;
     (g.attributes.position as THREE.BufferAttribute).updateRanges = [{ start: 0, count: n * 3 }];
     (g.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     (g.attributes.aLife as THREE.BufferAttribute).updateRanges = [{ start: 0, count: n }];
@@ -398,6 +443,6 @@ export class Particles {
   }
 
   dispose(): void {
-    this.scene.remove(this.debrisMesh, this.firePoints, this.smokePoints, this.flashLight, this.ring);
+    this.scene.remove(this.debrisMesh, this.firePoints, this.smokePoints, this.waterPoints, this.flashLight, this.ring);
   }
 }

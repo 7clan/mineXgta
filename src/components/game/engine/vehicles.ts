@@ -36,6 +36,10 @@ export interface Car {
   flashT: number;
   stuckT: number;
   reverseT: number;
+  /** Tire health 1 = fine, 0 = shredded by spike strips (tank tracks immune). */
+  tires: number;
+  /** Wobble phase accumulator while driving on shredded tires. */
+  wobbleT: number;
   /** Tank-only: rotating turret group (child of group). */
   turret?: THREE.Group;
   /** Tank-only: barrel pitch pivot (child of turret). */
@@ -340,6 +344,8 @@ export class Vehicles {
       flashT: 0,
       stuckT: 0,
       reverseT: 0,
+      tires: 1,
+      wobbleT: 0,
       turret,
       barrel,
       muzzle,
@@ -398,6 +404,18 @@ export class Vehicles {
     return null;
   }
 
+  /** Parked (non-AI) police cruiser for roadblocks — lightbars flashed by the game. */
+  makeParkedPolice(): Car {
+    return this.makeCar('police', 'parked');
+  }
+
+  /** Hard-despawn a car (roadblock cleanup): removes mesh + registry entry. */
+  removeCar(car: Car): void {
+    const i = this.cars.indexOf(car);
+    if (i >= 0) this.cars.splice(i, 1);
+    this.scene.remove(car.group);
+  }
+
   /** Deliver the Rhino Tank on a road point near the player (chain tier-2 reward). */
   spawnTank(playerPos: THREE.Vector3): Car {
     const car = this.makeCar('tank', 'parked');
@@ -442,8 +460,9 @@ export class Vehicles {
     }
   }
 
-  /** Police pursuit: seek the player, shove traffic aside, ram, unstick by reversing. */
-  private drivePolice(car: Car, dt: number, world: World, target: THREE.Vector3): void {
+  /** Police pursuit: seek the player, shove traffic aside, ram, unstick by reversing.
+   *  `playerCar` lets the AI trade paint with the Rhino instead of hurting the player directly. */
+  private drivePolice(car: Car, dt: number, world: World, target: THREE.Vector3, playerCar: Car | null): void {
     const p = car.group.position;
     // Flash the lightbar
     car.flashT += dt;
@@ -511,12 +530,23 @@ export class Vehicles {
       }
     }
 
-    // Ram the player on foot
+    // Ram the player on foot — or bounce off the Rhino's armor (GTA tank energy)
     if (dist < 2.7 && Math.abs(car.speed) > 5) {
-      world.damagePlayer(7);
-      world.shake(0.4);
-      world.audio.thud(0.05);
-      car.speed *= 0.45;
+      if (playerCar && playerCar.type === 'tank') {
+        // Cops break themselves against 30 tons of steel: they take the damage,
+        // the tank barely shudders.
+        car.health -= 24;
+        world.audio.thud(0.05);
+        world.shake(0.14);
+        car.reverseT = 0.85; // bounce off and regroup
+        car.speed *= -0.38;
+        if (car.health <= 0 && car.state !== 'burning' && car.state !== 'wrecked') this.ignite(car);
+      } else {
+        world.damagePlayer(7);
+        world.shake(0.4);
+        world.audio.thud(0.05);
+        car.speed *= 0.45;
+      }
     }
 
     car.group.rotation.y = car.yaw;
@@ -595,10 +625,12 @@ export class Vehicles {
   /** Drive as player: throttle/brake/steer arcade physics. */
   drivePlayer(car: Car, dt: number, throttle: number, steer: number, handbrake: boolean, world: World): void {
     const tank = car.type === 'tank';
+    const shredded = !tank && car.tires < 0.5;
+    if (shredded) car.wobbleT += dt;
     const accel = tank ? 5.5 : car.type === 'sports' ? 11 : car.type === 'suv' ? 7.5 : 8.5;
-    const maxSpeed = tank ? 16 : car.type === 'sports' ? 34 : car.type === 'suv' ? 24 : 27;
+    const maxSpeed = (tank ? 16 : car.type === 'sports' ? 34 : car.type === 'suv' ? 24 : 27) * (shredded ? 0.52 : 1);
     const maxRev = tank ? -5 : -9;
-    if (throttle > 0) car.speed += accel * throttle * dt;
+    if (throttle > 0) car.speed += accel * throttle * (shredded ? 0.65 : 1) * dt;
     else if (throttle < 0) car.speed -= (car.speed > 0 ? 26 : 10) * dt;
     car.speed = Math.max(maxRev, Math.min(maxSpeed, car.speed));
     const drag = handbrake ? 3.4 : tank ? 0.9 : 0.55;
@@ -607,6 +639,11 @@ export class Vehicles {
 
     const speedFactor = Math.min(1, Math.abs(car.speed) / (tank ? 11 : 14));
     car.yaw += steer * (tank ? 1.05 : 1.9) * speedFactor * dt * Math.sign(car.speed || 1) * (handbrake ? 1.5 : 1);
+    // Shredded tires pull hard to one side (flapping rubber on the rim)
+    if (shredded && Math.abs(car.speed) > 3) {
+      car.yaw += Math.sin(car.wobbleT * 8.5) * 0.62 * speedFactor * dt;
+      if (Math.random() < dt * 6) world.spawnDebris(car.group.position.clone().setY(0.25), 1, new THREE.Color(0x1a1a1a), 0.5);
+    }
     const heading = new THREE.Vector3(Math.sin(car.yaw), 0, Math.cos(car.yaw));
     const next = car.group.position.clone().addScaledVector(heading, car.speed * dt);
 
@@ -702,7 +739,7 @@ export class Vehicles {
         this.driveTraffic(car, dt, world, playerPos);
       }
       if (car.state === 'police' && car !== car0) {
-        this.drivePolice(car, dt, world, playerPos);
+        this.drivePolice(car, dt, world, playerPos, car0);
       }
       if (car.state !== 'wrecked') {
         p.y = Math.max(p.y, 0);

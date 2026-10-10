@@ -1,0 +1,700 @@
+     1→'use client';
+     2→
+     3→import { useMemo, type ReactNode } from 'react';
+     4→import { HudState, ItemStack, ItemId } from './engine/types';
+     5→import { ICON_URLS, ITEMS, UI_ICONS } from './engine/items';
+     6→
+     7→const SLOT_BASE =
+     8→  'relative flex items-center justify-center bg-[#8b8b8b] border-2 border-t-[#373737] border-l-[#373737] border-b-[#c6c6c6] border-r-[#c6c6c6]';
+     9→
+    10→function ItemIcon({ id, size = 40 }: { id: ItemId; size?: number }) {
+    11→  const src = ICON_URLS[id];
+    12→  if (!src) return null;
+    13→  return (
+    14→    <img
+    15→      src={src}
+    16→      alt={ITEMS[id].name}
+    17→      width={size}
+    18→      height={size}
+    19→      style={{ imageRendering: 'pixelated' }}
+    20→      className="drop-shadow-[2px_2px_0_rgba(0,0,0,0.45)]"
+    21→      draggable={false}
+    22→    />
+    23→  );
+    24→}
+    25→
+    26→function Slot({
+    27→  stack,
+    28→  selected,
+    29→  onClick,
+    30→  size = 48,
+    31→}: {
+    32→  stack: ItemStack | null;
+    33→  selected?: boolean;
+    34→  onClick?: () => void;
+    35→  size?: number;
+    36→}) {
+    37→  return (
+    38→    <button
+    39→      onClick={onClick}
+    40→      className={`${SLOT_BASE} ${selected ? 'outline outline-[3px] outline-white z-10 scale-110' : ''} transition-transform`}
+    41→      style={{ width: size, height: size }}
+    42→      aria-label={stack ? ITEMS[stack.id].name : 'empty slot'}
+    43→    >
+    44→      {stack && <ItemIcon id={stack.id} size={size - 14} />}
+    45→      {stack && stack.count > 1 && (
+    46→        <span className="absolute bottom-0 right-1 text-white text-[13px] font-bold leading-none [text-shadow:2px_2px_0_#000]">
+    47→          {stack.count}
+    48→        </span>
+    49→      )}
+    50→    </button>
+    51→  );
+    52→}
+    53→
+    54→function Hearts({ health }: { health: number }) {
+    55→  const hearts: ReactNode[] = [];
+    56→  for (let i = 0; i < 10; i++) {
+    57→    const full = health >= (i + 1) * 2;
+    58→    hearts.push(
+    59→      <img
+    60→        key={i}
+    61→        src={full ? UI_ICONS.heartFull : UI_ICONS.heartEmpty}
+    62→        alt={full ? 'heart' : 'empty heart'}
+    63→        width={22}
+    64→        height={22}
+    65→        style={{ imageRendering: 'pixelated' }}
+    66→        draggable={false}
+    67→      />
+    68→    );
+    69→  }
+    70→  return <div className="flex gap-[2px]">{hearts}</div>;
+    71→}
+    72→
+    73→function Stars({ count }: { count: number }) {
+    74→  const stars: ReactNode[] = [];
+    75→  for (let i = 0; i < 5; i++) {
+    76→    stars.push(
+    77→      <img
+    78→        key={i}
+    79→        src={i < count ? UI_ICONS.starFull : UI_ICONS.starEmpty}
+    80→        alt={i < count ? 'wanted star' : 'empty star'}
+    81→        width={30}
+    82→        height={30}
+    83→        style={{ imageRendering: 'auto' }}
+    84→        className={i < count ? 'drop-shadow-[0_0_6px_rgba(255,255,255,0.7)]' : 'opacity-60'}
+    85→        draggable={false}
+    86→      />
+    87→    );
+    88→  }
+    89→  return <div className="flex flex-col items-end gap-[2px]">{stars}</div>;
+    90→}
+    91→
+    92→export interface HudProps {
+    93→  state: HudState;
+    94→  toast: string | null;
+    95→  onSlotClick: (i: number) => void;
+    96→  onInventorySwap: (i: number) => void;
+    97→  onResume: () => void;
+    98→  onRespawn: () => void;
+    99→  onPlay: () => void;
+   100→  onContinue: () => void;
+   101→  onSave: () => void;
+   102→  paused: boolean;
+   103→  inventoryOpen: boolean;
+   104→  onCloseInventory: () => void;
+   105→  showStart: boolean;
+   106→}
+   107→
+   108→const CONTROLS: Array<[string, string]> = [
+   109→  ['W A S D', 'Move'],
+   110→  ['Mouse', 'Look'],
+   111→  ['LMB (hold)', 'Dig / carve micro-voxels'],
+   112→  ['RMB', 'Place block / use item'],
+   113→  ['LMB (tank)', 'Fire the cannon'],
+   114→  ['RMB (hold) 🚀', 'Jetpack thrust (selected)'],
+   115→  ['Space ×2', 'Toggle creative flight'],
+   116→  ['Space / C', 'Fly up / down'],
+   117→  ['Shift', 'Sprint'],
+   118→  ['1–9 / Wheel', 'Select hotbar slot'],
+   119→  ['E', 'Inventory'],
+   120→  ['F', 'Enter / exit car'],
+   121→  ['M', 'Accept / quit contract'],
+   122→  ['R', 'Car radio station'],
+   123→  ['F5', 'Third-person view'],
+   124→  ['F3', 'Debug overlay'],
+   125→  ['Esc', 'Pause'],
+   126→];
+   127→
+   128→/** Contract chain tier labels (3 contracts per tier). */
+   129→const CHAIN_TIERS: Array<{ label: string; icon: string }> = [
+   130→  { label: '→ Jetpack', icon: '🔥' },
+   131→  { label: '→ Tank', icon: '🪖' },
+   132→  { label: '→ TNT Mega', icon: '💥' },
+   133→];
+   134→
+   135→/** Contract tracker — GTA-style offer/active chip with progress + countdown. */
+   136→function MissionChip({ mission }: { mission: NonNullable<HudState['mission']> }) {
+   137→  const pct = mission.target > 0 ? Math.min(100, (mission.progress / mission.target) * 100) : 0;
+   138→  const offer = mission.offered;
+   139→  const tierIdx = Math.min(mission.chainTier, CHAIN_TIERS.length - 1);
+   140→  const tier = CHAIN_TIERS[tierIdx];
+   141→  return (
+   142→    <div
+   143→      className={`hyperion-missionchip absolute left-1/2 top-4 w-[300px] max-w-[80vw] -translate-x-1/2 rounded-lg border bg-black/70 px-3 py-2 backdrop-blur-[2px] ${
+   144→        offer ? 'hyperion-offer border-amber-400/70' : 'border-amber-400/25'
+   145→      }`}
+   146→    >
+   147→      <div className="flex items-center justify-between gap-2">
+   148→        <div className="flex items-center gap-1.5 text-[11px] font-black uppercase tracking-[0.16em] text-amber-300">
+   149→          <span className="text-[13px] leading-none">{offer ? '📡' : '🎯'}</span>
+   150→          {offer ? 'CONTRACT OFFER' : 'CONTRACT'} · {mission.title}
+   151→        </div>
+   152→        <div className={`text-[12px] font-black tabular-nums ${mission.timeLeft < 10 && !offer ? 'text-red-400' : 'text-white/90'}`}>
+   153→          {Math.ceil(mission.timeLeft)}s
+   154→        </div>
+   155→      </div>
+   156→      <div className="mt-1 text-[11px] font-bold text-white/80">
+   157→        {offer ? `${mission.desc} — press M to accept` : mission.desc}
+   158→      </div>
+   159→      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/10">
+   160→        <div
+   161→          className={`h-full rounded-full transition-[width] duration-200 ${offer ? 'w-full bg-amber-400/50' : 'bg-amber-400'}`}
+   162→          style={offer ? undefined : { width: `${pct}%` }}
+   163→        />
+   164→      </div>
+   165→      <div className="mt-1 flex items-center justify-between text-[9px] font-bold uppercase tracking-widest text-white/45">
+   166→        <span>
+   167→          {offer ? 'Reward' : `${mission.progress} / ${mission.target}`}
+   168→          {mission.marker && (
+   169→            <span className="ml-2 text-amber-300/90">◆ {Math.round(mission.marker.dist)}m</span>
+   170→          )}
+   171→        </span>
+   172→        <span>{mission.reward}</span>
+   173→      </div>
+   174→      {/* Contract chain — each 3 completions unlock the next tier reward */}
+   175→      <div className="mt-1 flex items-center justify-between border-t border-white/10 pt-1">
+   176→        <span className="text-[8px] font-black uppercase tracking-[0.22em] text-white/40">Chain bonus</span>
+   177→        <span className="flex items-center gap-1">
+   178→          {CHAIN_TIERS.slice(0, mission.chainTier).map((t, i) => (
+   179→            <span key={i} className="text-[10px] leading-none">{t.icon}</span>
+   180→          ))}
+   181→          {[0, 1, 2].map((i) => (
+   182→            <span
+   183→              key={i}
+   184→              className={`inline-block h-[7px] w-[7px] rotate-45 rounded-[1px] ${
+   185→                i < mission.chain ? 'bg-amber-400 shadow-[0_0_5px_rgba(251,191,36,0.8)]' : 'bg-white/15'
+   186→              }`}
+   187→            />
+   188→          ))}
+   189→          <span className="ml-1 text-[9px] font-black uppercase tracking-widest text-white/55">{tier.label}</span>
+   190→        </span>
+   191→      </div>
+   192→    </div>
+   193→  );
+   194→}
+   195→
+   196→/** Animated radio equalizer bars. */
+   197→function EqBars() {
+   198→  return (
+   199→    <span className="flex h-3 items-end gap-[2px]">
+   200→      {[0, 1, 2, 3].map((i) => (
+   201→        <span key={i} className="hyperion-eqbar block h-3 w-[3px] rounded-sm bg-emerald-400/90" />
+   202→      ))}
+   203→    </span>
+   204→  );
+   205→}
+   206→
+   207→/** Weather chip — clear / overcast / rain with animated droplets + wet-roads tag. */
+   208→function WeatherChip({ weather }: { weather: HudState['weather'] }) {
+   209→  const rain = weather.state === 'rain';
+   210→  const over = weather.state === 'overcast';
+   211→  const wet = weather.wet > 0.3;
+   212→  return (
+   213→    <div
+   214→      className={`flex items-center gap-2 rounded-lg border px-2.5 py-1 backdrop-blur-[2px] transition-colors duration-700 ${
+   215→        rain
+   216→          ? 'border-sky-300/30 bg-[#0d1420]/70'
+   217→          : over
+   218→            ? 'border-white/15 bg-black/55'
+   219→            : 'border-amber-300/20 bg-black/45'
+   220→      }`}
+   221→      title={`Weather: ${weather.state}${wet ? ' · wet roads' : ''}`}
+   222→    >
+   223→      {rain ? (
+   224→        <span className="relative block h-4 w-4 overflow-hidden">
+   225→          <span className="absolute left-[3px] top-0 hyperion-drop h-[5px] w-[2px] rounded-full bg-sky-300" />
+   226→          <span className="absolute left-[8px] top-0 hyperion-drop h-[5px] w-[2px] rounded-full bg-sky-300" style={{ animationDelay: '0.35s' }} />
+   227→          <span className="absolute left-[13px] top-0 hyperion-drop h-[5px] w-[2px] rounded-full bg-sky-300" style={{ animationDelay: '0.7s' }} />
+   228→        </span>
+   229→      ) : (
+   230→        <span className={`text-[13px] leading-none ${over ? 'opacity-70' : ''}`}>{over ? '☁️' : '☀️'}</span>
+   231→      )}
+   232→      <div className="leading-tight">
+   233→        <div className="text-[8px] font-bold uppercase tracking-[0.24em] text-white/45">Weather</div>
+   234→        <div className="flex items-center gap-1.5">
+   235→          <span className={`text-[10px] font-black uppercase tracking-wider ${rain ? 'text-sky-300' : over ? 'text-white/70' : 'text-amber-200/90'}`}>
+   236→            {weather.state}
+   237→          </span>
+   238→          {wet && !rain && (
+   239→            <span className="rounded bg-sky-400/15 px-1 text-[8px] font-black uppercase tracking-widest text-sky-300/90">💧 wet</span>
+   240→          )}
+   241→        </div>
+   242→      </div>
+   243→    </div>
+   244→  );
+   245→}
+   246→
+   247→/** "LOSING THEM" evade progress — amber sweep that fills as the cops lose sight. */
+   248→function EvadeChip({ evading }: { evading: number }) {
+   249→  return (
+   250→    <div className="hyperion-losing mt-1 w-32 rounded border border-amber-300/35 bg-black/65 px-2 py-1">
+   251→      <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-[0.18em] text-amber-300">
+   252→        <span>👁 LOSING THEM</span>
+   253→        <span className="tabular-nums">{Math.round(evading * 100)}%</span>
+   254→      </div>
+   255→      <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-white/10">
+   256→        <div
+   257→          className="h-full rounded-full bg-gradient-to-r from-amber-400 to-emerald-400 transition-[width] duration-200"
+   258→          style={{ width: `${Math.round(evading * 100)}%` }}
+   259→        />
+   260→      </div>
+   261→    </div>
+   262→  );
+   263→}
+   264→
+   265→/** Jetpack fuel gauge — shown while a Chaos Jetpack is selected (or thrusting). */
+   266→function JetFuelChip({ fuel, thrusting }: { fuel: number; thrusting: boolean }) {
+   267→  const pct = Math.round(fuel * 100);
+   268→  const low = fuel < 0.22;
+   269→  return (
+   270→    <div
+   271→      className={`mt-1 w-36 rounded border px-2 py-1 backdrop-blur-[2px] transition-colors duration-300 ${
+   272→        thrusting ? 'border-orange-400/70 bg-[#1d1005]/80 shadow-[0_0_14px_rgba(255,120,30,0.35)]' : 'border-white/15 bg-black/60'
+   273→      }`}
+   274→    >
+   275→      <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-[0.18em]">
+   276→        <span className={thrusting ? 'text-orange-300' : 'text-white/60'}>
+   277→          {thrusting ? <span className="hyperion-flame">🔥 BURNING</span> : '🚀 JETPACK'}
+   278→        </span>
+   279→        <span className={`tabular-nums ${low ? 'text-red-400' : 'text-white/85'}`}>{pct}%</span>
+   280→      </div>
+   281→      <div className="mt-0.5 h-1.5 overflow-hidden rounded-full bg-white/10">
+   282→        <div
+   283→          className={`h-full rounded-full transition-[width] duration-150 ${
+   284→            low ? 'bg-gradient-to-r from-red-500 to-orange-400' : 'bg-gradient-to-r from-orange-500 via-amber-400 to-yellow-300'
+   285→          }`}
+   286→          style={{ width: `${pct}%` }}
+   287→        />
+   288→      </div>
+   289→      <div className="mt-0.5 text-right text-[8px] font-bold uppercase tracking-widest text-white/35">Hold RMB — thrust</div>
+   290→    </div>
+   291→  );
+   292→}
+   293→
+   294→/** Air support chip — radar sweep + blinking border (5-star chopper). */
+   295→function HeliChip() {
+   296→  return (
+   297→    <div className="hyperion-policechip mt-1 flex items-center gap-2 rounded border border-red-400/45 bg-black/60 px-2 py-1">
+   298→      <span className="relative block h-4 w-4 overflow-hidden rounded-full border border-red-300/60 bg-black/60">
+   299→        <span className="hyperion-radar absolute inset-0" />
+   300→      </span>
+   301→      <span className="text-[10px] font-black uppercase tracking-[0.18em] text-red-300">🚁 Air support</span>
+   302→    </div>
+   303→  );
+   304→}
+   305→
+   306→/** Vehicle speedometer — SVG arc gauge + hull integrity + tank cannon reload. */
+   307→function Speedo({ driving }: { driving: NonNullable<HudState['driving']> }) {
+   308→  const max = driving.tank ? 60 : 130;
+   309→  const pct = Math.max(0, Math.min(1, driving.speed / max));
+   310→  const angle = (-90 + pct * 180) * (Math.PI / 180);
+   311→  const needleLen = 44;
+   312→  const nx = 75 + needleLen * Math.sin(angle);
+   313→  const ny = 74 - needleLen * Math.cos(angle);
+   314→  const hpct = Math.max(0, Math.min(1, driving.health / (driving.tank ? 400 : 100)));
+   315→  const lowHealth = hpct < 0.3;
+   316→  return (
+   317→    <div
+   318→      className={`mt-1 rounded-lg border px-2 pb-1.5 pt-1 backdrop-blur-[2px] ${
+   319→        driving.tank ? 'border-lime-400/40 bg-[#0d1206]/75' : 'border-white/15 bg-black/60'
+   320→      }`}
+   321→    >
+   322→      <svg width="150" height="88" viewBox="0 0 150 88">
+   323→        {/* gauge arc */}
+   324→        <path d="M 23 74 A 52 52 0 0 1 127 74" fill="none" stroke="rgba(255,255,255,0.13)" strokeWidth="7" strokeLinecap="round" />
+   325→        <path
+   326→          d="M 23 74 A 52 52 0 0 1 127 74"
+   327→          fill="none"
+   328→          stroke={driving.tank ? '#a3e635' : '#fbbf24'}
+   329→          strokeWidth="7"
+   330→          strokeLinecap="round"
+   331→          strokeDasharray={`${pct * 163.4} 400`}
+   332→        />
+   333→        {/* ticks */}
+   334→        {[0, 0.25, 0.5, 0.75, 1].map((t, i) => {
+   335→          const a = (-90 + t * 180) * (Math.PI / 180);
+   336→          const x1 = 75 + 40 * Math.sin(a);
+   337→          const y1 = 74 - 40 * Math.cos(a);
+   338→          const x2 = 75 + 45 * Math.sin(a);
+   339→          const y2 = 74 - 45 * Math.cos(a);
+   340→          return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="rgba(255,255,255,0.4)" strokeWidth="1.6" />;
+   341→        })}
+   342→        {/* needle */}
+   343→        <line x1="75" y1="74" x2={nx} y2={ny} stroke="#ffffff" strokeWidth="2.4" strokeLinecap="round" />
+   344→        <circle cx="75" cy="74" r="4" fill="#ffffff" />
+   345→        <text x="75" y="58" textAnchor="middle" fill="#ffffff" fontSize="19" fontWeight="800" className="tabular-nums">
+   346→          {Math.round(driving.speed)}
+   347→        </text>
+   348→        <text x="75" y="86" textAnchor="middle" fill="rgba(255,255,255,0.5)" fontSize="8" letterSpacing="3">
+   349→          KM/H
+   350→        </text>
+   351→      </svg>
+   352→      {/* hull integrity */}
+   353→      <div className="mt-0.5 h-1.5 overflow-hidden rounded-full bg-white/10">
+   354→        <div
+   355→          className={`h-full rounded-full transition-[width] duration-300 ${
+   356→            lowHealth ? 'bg-gradient-to-r from-red-600 to-orange-400' : 'bg-gradient-to-r from-sky-400/80 to-emerald-400'
+   357→          }`}
+   358→          style={{ width: `${hpct * 100}%` }}
+   359→        />
+   360→      </div>
+   361→      <div className="mt-1 flex items-center justify-between">
+   362→        <span className={`text-[9px] font-black uppercase tracking-[0.14em] ${driving.tank ? 'text-lime-300/90' : 'text-amber-300/90'}`}>
+   363→          {driving.name}
+   364→        </span>
+   365→        {driving.tank && (
+   366→          <span
+   367→            className={`rounded px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest ${
+   368→              driving.reload >= 1 ? 'bg-lime-400/20 text-lime-300' : 'bg-white/10 text-white/45'
+   369→            }`}
+   370→          >
+   371→            {driving.reload >= 1 ? '● LMB · FIRE' : `RELOAD ${Math.round(driving.reload * 100)}%`}
+   372→          </span>
+   373→        )}
+   374→      </div>
+   375→      {driving.tank && driving.reload < 1 && (
+   376→        <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-white/10">
+   377→          <div className="h-full rounded-full bg-lime-400/70 transition-[width] duration-100" style={{ width: `${driving.reload * 100}%` }} />
+   378→        </div>
+   379→      )}
+   380→    </div>
+   381→  );
+   382→}
+   383→
+   384→export function Hud(props: HudProps) {
+   385→  const { state, toast } = props;
+   386→
+   387→  const itemName = useMemo(() => {
+   388→    const it = state.hotbar[state.slot];
+   389→    return it ? ITEMS[it.id].name : null;
+   390→  }, [state.hotbar, state.slot]);
+   391→
+   392→  return (
+   393→    <div className="pointer-events-none fixed inset-0 select-none font-mono">
+   394→      {/* damage vignette */}
+   395→      <div
+   396→        className="absolute inset-0 transition-opacity duration-200"
+   397→        style={{
+   398→          opacity: state.hurt * 0.55,
+   399→          background: 'radial-gradient(ellipse at center, rgba(255,0,0,0) 40%, rgba(180,0,0,0.85) 100%)',
+   400→        }}
+   401→      />
+   402→
+   403→      {/* cinematic vignette (always on while playing) */}
+   404→      {state.playing && (
+   405→        <div
+   406→          className="absolute inset-0"
+   407→          style={{ background: 'radial-gradient(ellipse at center, rgba(0,0,0,0) 58%, rgba(0,0,0,0.3) 100%)' }}
+   408→        />
+   409→      )}
+   410→
+   411→      {/* Crosshair */}
+   412→      {state.playing && !state.dead && (
+   413→        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 mix-blend-difference">
+   414→          <div className="relative h-5 w-5">
+   415→            <div className="absolute left-1/2 top-0 h-5 w-[2px] -translate-x-1/2 bg-white" />
+   416→            <div className="absolute top-1/2 left-0 h-[2px] w-5 -translate-y-1/2 bg-white" />
+   417→          </div>
+   418→        </div>
+   419→      )}
+   420→
+   421→      {/* Hit marker — remounts per hit via key, replaying the pop animation */}
+   422→      {state.playing && !state.dead && state.hitMark > 0 && (
+   423→        <div key={state.hitMark} className="hyperion-hitmark absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+   424→          <svg width="26" height="26" viewBox="0 0 26 26">
+   425→            <g stroke="#ffffff" strokeWidth="2.6" strokeLinecap="round">
+   426→              <line x1="4" y1="4" x2="10" y2="10" />
+   427→              <line x1="22" y1="4" x2="16" y2="10" />
+   428→              <line x1="4" y1="22" x2="10" y2="16" />
+   429→              <line x1="22" y1="22" x2="16" y2="16" />
+   430→            </g>
+   431→          </svg>
+   432→        </div>
+   433→      )}
+   434→
+   435→      {/* Police light wash across screen edges (only with active pursuit) */}
+   436→      {state.playing && !state.dead && state.police > 0 && <div className="hyperion-policeflash absolute inset-0" />}
+   437→
+   438→      {/* Contract tracker (top center) */}
+   439→      {state.playing && !state.dead && state.mission && <MissionChip mission={state.mission} />}
+   440→
+   441→      {/* Stars — GTA chaos level (top right) */}
+   442→      {state.playing && (
+   443→        <div className="absolute right-4 top-4 flex flex-col items-end gap-1">
+   444→          <Stars count={state.stars} />
+   445→          <div className="rounded bg-black/55 px-2 py-0.5 text-right text-[11px] font-bold tracking-widest text-white/90">
+   446→            CHAOS {state.score}
+   447→          </div>
+   448→          <div className="h-1 w-24 overflow-hidden rounded-full bg-black/50">
+   449→            <div
+   450→              className="h-full rounded-full bg-gradient-to-r from-amber-500 to-red-400 transition-[width] duration-300"
+   451→              style={{ width: `${Math.min(100, ((state.score % 150) / 150) * 100)}%` }}
+   452→            />
+   453→          </div>
+   454→          {state.police > 0 && (
+   455→            <div className="hyperion-policechip mt-1 rounded border border-red-400/40 bg-black/60 px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.18em] text-red-300">
+   456→              🚓 Police ×{state.police}
+   457→            </div>
+   458→          )}
+   459→          {state.heli && <HeliChip />}
+   460→          {state.police > 0 && state.evading > 0 && <EvadeChip evading={state.evading} />}
+   461→          {(() => {
+   462→            const sel = state.hotbar[state.slot];
+   463→            const showJet = state.playing && !state.dead && (sel?.id === 'jetpack' || state.jetThrusting);
+   464→            return showJet ? <JetFuelChip fuel={state.jetFuel} thrusting={state.jetThrusting} /> : null;
+   465→          })()}
+   466→          {state.driving && !state.dead && (
+   467→            <div className="mt-1 flex justify-end">
+   468→              <Speedo driving={state.driving} />
+   469→            </div>
+   470→          )}
+   471→        </div>
+   472→      )}
+   473→
+   474→      {/* Depth chip — underground mining readout */}
+   475→      {state.playing && !state.dead && state.depth > 0 && (
+   476→        <div className="absolute bottom-4 right-4 rounded border border-emerald-400/30 bg-black/65 px-3 py-1.5 text-right">
+   477→          <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-300/90">Depth</div>
+   478→          <div className="text-lg font-black leading-none text-emerald-200">
+   479→            −{state.depth}
+   480→            <span className="ml-1 text-[10px] font-bold text-emerald-400/70">M</span>
+   481→          </div>
+   482→        </div>
+   483→      )}
+   484→
+   485→      {/* Quick-hints chip (bottom right) */}
+   486→      {state.playing && !state.dead && state.depth <= 0 && (
+   487→        <div className="absolute bottom-6 right-4 rounded bg-black/45 px-2.5 py-1 text-right text-[10px] font-bold leading-relaxed tracking-wide text-white/55">
+   488→          <div>E INVENTORY · F5 VIEW</div>
+   489→          <div>F CAR · M CONTRACT</div>
+   490→        </div>
+   491→      )}
+   492→
+   493→      {/* Radio chip — animated EQ + station name while driving */}
+   494→      {state.playing && !state.dead && state.radio && (
+   495→        <div className="absolute bottom-24 right-4 flex items-center gap-2 rounded-lg border border-emerald-400/25 bg-black/65 px-3 py-1.5">
+   496→          <EqBars />
+   497→          <div>
+   498→            <div className="text-[9px] font-bold uppercase tracking-[0.22em] text-emerald-300/80">Radio · R</div>
+   499→            <div className="text-[11px] font-black leading-tight text-white/90">{state.radio}</div>
+   500→          </div>
+   501→        </div>
+   502→      )}
+   503→
+   504→      {/* Weather chip — above the minimap */}
+   505→      {state.playing && !state.dead && <div className="absolute bottom-[172px] left-4"><WeatherChip weather={state.weather} /></div>}
+   506→
+   507→      {/* Minimap — GTA style bottom-left */}
+   508→      {state.playing && (
+   509→        <div className="absolute bottom-4 left-4 overflow-hidden rounded-lg border-2 border-black/70 shadow-lg shadow-black/50">
+   510→          <canvas id="hyperion-minimap" width={208} height={140} className="block bg-black" />
+   511→          <div className="absolute inset-0 rounded-lg ring-1 ring-inset ring-white/10" />
+   512→        </div>
+   513→      )}
+   514→
+   515→      {/* Debug (F3) */}
+   516→      {state.debug && state.playing && (
+   517→        <div className="absolute left-4 top-4 space-y-0.5 rounded bg-black/60 px-3 py-2 text-[11px] leading-relaxed text-emerald-200">
+   518→          <div className="font-bold text-white">PROJECT HYPERION · debug</div>
+   519→          <div>FPS: {state.fps}</div>
+   520→          <div>
+   521→            XYZ: {state.pos[0].toFixed(1)} / {state.pos[1].toFixed(1)} / {state.pos[2].toFixed(1)}
+   522→          </div>
+   523→          <div>Depth: {state.depth} m</div>
+   524→          <div>Micro-voxels carved: {state.removed.toLocaleString()}</div>
+   525→          <div>Mode: {state.driving ? 'driving' : state.flying ? 'creative flight' : 'walking'}</div>
+   526→        </div>
+   527→      )}
+   528→
+   529→      {/* Hint */}
+   530→      {state.hint && state.playing && !state.dead && (
+   531→        <div className="absolute bottom-32 left-1/2 -translate-x-1/2 rounded bg-black/60 px-4 py-1.5 text-sm font-bold text-white/90">
+   532→          {state.hint}
+   533→        </div>
+   534→      )}
+   535→
+   536→      {/* Actionbar toast + selected item name */}
+   537→      <div className="absolute bottom-28 left-1/2 -translate-x-1/2 text-center">
+   538→        {toast && !toast.startsWith('__') && (
+   539→          <div
+   540→            key={toast}
+   541→            className="hyperion-toast rounded bg-black/65 px-4 py-1.5 text-sm font-bold text-white [text-shadow:1px_1px_0_#000]"
+   542→          >
+   543→            {toast}
+   544→          </div>
+   545→        )}
+   546→      </div>
+   547→
+   548→      {/* Bottom center: hearts + hotbar */}
+   549→      {state.playing && !state.dead && (
+   550→        <div className="pointer-events-auto absolute bottom-4 left-1/2 -translate-x-1/2">
+   551→          <div className="mb-1 flex items-end justify-between px-1">
+   552→            <Hearts health={state.health} />
+   553→            <div className="text-[11px] font-bold text-white/85 [text-shadow:1px_1px_0_#000]">
+   554→              {state.flying ? '✦ CREATIVE FLIGHT' : itemName ? itemName : ''}
+   555→            </div>
+   556→          </div>
+   557→          <div className="flex gap-[3px] rounded border-2 border-black/60 bg-black/40 p-[3px]">
+   558→            {state.hotbar.map((s, i) => (
+   559→              <Slot key={i} stack={s} selected={i === state.slot} onClick={() => props.onSlotClick(i)} />
+   560→            ))}
+   561→          </div>
+   562→        </div>
+   563→      )}
+   564→
+   565→      {/* Inventory overlay */}
+   566→      {props.inventoryOpen && (
+   567→        <div className="pointer-events-auto absolute inset-0 flex items-center justify-center bg-black/55 backdrop-blur-[2px]">
+   568→          <div className="w-[430px] max-w-[92vw] rounded-lg border-4 border-[#1d1d1f] bg-[#c6c6c6] p-4 shadow-2xl">
+   569→            <div className="mb-3 flex items-center justify-between">
+   570→              <div className="text-lg font-black tracking-wide text-[#3a3a3a]">Inventory</div>
+   571→              <button
+   572→                onClick={props.onCloseInventory}
+   573→                className="rounded bg-[#8b8b8b] px-3 py-1 text-sm font-bold text-white hover:bg-[#9c9c9c]"
+   574→              >
+   575→                Close (E)
+   576→              </button>
+   577→            </div>
+   578→            <div className="grid grid-cols-9 gap-[3px]">
+   579→              {state.inventory.map((s, i) => (
+   580→                <Slot key={i} stack={s} onClick={() => props.onInventorySwap(i)} size={44} />
+   581→              ))}
+   582→            </div>
+   583→            <div className="my-3 h-[2px] bg-[#8b8b8b]" />
+   584→            <div className="grid grid-cols-9 gap-[3px]">
+   585→              {state.hotbar.map((s, i) => (
+   586→                <Slot key={i} stack={s} selected={i === state.slot} onClick={() => props.onSlotClick(i)} size={44} />
+   587→              ))}
+   588→            </div>
+   589→            <div className="mt-3 text-center text-[11px] font-bold text-[#555]">
+   590→              Click an item to swap it into the selected hotbar slot
+   591→            </div>
+   592→          </div>
+   593→        </div>
+   594→      )}
+   595→
+   596→      {/* Pause menu */}
+   597→      {props.paused && !props.showStart && !state.dead && (
+   598→        <div className="pointer-events-auto absolute inset-0 flex items-center justify-center bg-black/65 backdrop-blur-sm">
+   599→          <div className="w-[440px] max-w-[94vw] rounded-xl border border-white/10 bg-[#141416]/95 p-6 text-center shadow-2xl">
+   600→            <div className="mb-1 text-xs font-bold uppercase tracking-[0.3em] text-amber-400/90">Paused</div>
+   601→            <div className="mb-5 text-3xl font-black italic tracking-tight text-white">PROJECT HYPERION</div>
+   602→            <button
+   603→              onClick={props.onResume}
+   604→              className="mb-4 w-full rounded-lg bg-amber-500 py-3 text-lg font-black text-black transition hover:bg-amber-400 active:scale-[0.98]"
+   605→            >
+   606→              RESUME
+   607→            </button>
+   608→            <button
+   609→              onClick={props.onSave}
+   610→              className="mb-4 w-full rounded-lg border border-emerald-400/40 bg-emerald-500/15 py-2 text-sm font-black uppercase tracking-widest text-emerald-300 transition hover:bg-emerald-500/25 active:scale-[0.98]"
+   611→            >
+   612→              💾 Save world
+   613→            </button>
+   614→            <div className="grid grid-cols-2 gap-x-4 gap-y-1 rounded-lg bg-black/40 p-3 text-left text-[11px] text-white/75">
+   615→              {CONTROLS.map(([k, v]) => (
+   616→                <div key={k} className="flex justify-between gap-2">
+   617→                  <span className="font-bold text-amber-300/90">{k}</span>
+   618→                  <span className="text-right">{v}</span>
+   619→                </div>
+   620→              ))}
+   621→            </div>
+   622→          </div>
+   623→        </div>
+   624→      )}
+   625→
+   626→      {/* Death screen */}
+   627→      {state.dead && (
+   628→        <div className="pointer-events-auto absolute inset-0 flex items-center justify-center bg-red-950/70 backdrop-blur-sm">
+   629→          <div className="text-center">
+   630→            <div className="mb-2 text-5xl font-black tracking-tight text-red-200 [text-shadow:3px_3px_0_#000]">
+   631→              You died!
+   632→            </div>
+   633→            <div className="mb-6 text-sm font-bold text-red-100/80">
+   634→              Chaos score: {state.score} · Voxels carved: {state.removed.toLocaleString()}
+   635→            </div>
+   636→            <button
+   637→              onClick={props.onRespawn}
+   638→              className="rounded-lg bg-white px-8 py-3 text-lg font-black text-red-900 transition hover:bg-red-100 active:scale-[0.98]"
+   639→            >
+   640→              RESPAWN
+   641→            </button>
+   642→          </div>
+   643→        </div>
+   644→      )}
+   645→
+   646→      {/* Start screen */}
+   647→      {props.showStart && (
+   648→        <div className="pointer-events-auto absolute inset-0 overflow-hidden">
+   649→          <div
+   650→            className="absolute inset-0 bg-cover bg-center"
+   651→            style={{ backgroundImage: 'url(/hyperion-splash.png)' }}
+   652→          />
+   653→          <div className="absolute inset-0 bg-gradient-to-t from-black via-black/55 to-black/30" />
+   654→          <div className="relative flex h-full flex-col items-center justify-center px-6 text-center">
+   655→            <div className="mb-2 text-[11px] font-bold uppercase tracking-[0.5em] text-amber-400">
+   656→              Los Santos · Micro-Voxel Engine
+   657→            </div>
+   658→            <h1 className="mb-3 text-6xl font-black italic leading-none tracking-tighter text-white drop-shadow-[0_4px_0_rgba(0,0,0,0.8)] md:text-8xl">
+   659→              PROJECT
+   660→              <span className="ml-4 text-amber-400">HYPERION</span>
+   661→            </h1>
+   662→            <p className="mb-8 max-w-xl text-sm leading-relaxed text-white/80 md:text-base">
+   663→              A photoreal GTA-style open city, tunneled apart by Minecraft freedom. Every building, road and
+   664→              sidewalk is a dense micro-voxel lattice — dig through downtown with your pickaxe, rig engines with
+   665→              flint &amp; steel, build sky-bridges from smooth dirt slabs, and fly like creative mode. Contract
+   666→              chains unlock the 🔥 Chaos Jetpack, then the 🪖 Rhino Tank — but at five stars a police chopper
+   667→              joins the hunt, and only the tunnels can hide you.
+   668→            </p>
+   669→            {state.hasSave && (
+   670→              <button
+   671→                onClick={props.onContinue}
+   672→                className="mb-3 rounded-lg border border-emerald-400/40 bg-emerald-500/15 px-10 py-2.5 text-base font-black tracking-wide text-emerald-300 transition hover:bg-emerald-500/25 active:scale-[0.98]"
+   673→              >
+   674→                ⟳ CONTINUE SAVED CITY
+   675→              </button>
+   676→            )}
+   677→            <button
+   678→              onClick={props.onPlay}
+   679→              className="mb-8 rounded-lg bg-amber-500 px-14 py-4 text-2xl font-black tracking-wide text-black shadow-[0_6px_0_#8a5a00] transition hover:bg-amber-400 active:translate-y-[3px] active:shadow-[0_3px_0_#8a5a00]"
+   680→            >
+   681→              ▶ NEW GAME
+   682→            </button>
+   683→            <div className="grid max-w-2xl grid-cols-2 gap-x-8 gap-y-1 rounded-xl bg-black/55 p-4 text-left text-[11px] text-white/75 md:grid-cols-3">
+   684→              {CONTROLS.map(([k, v]) => (
+   685→                <div key={k} className="flex justify-between gap-2">
+   686→                  <span className="font-bold text-amber-300/90">{k}</span>
+   687→                  <span className="text-right">{v}</span>
+   688→                </div>
+   689→              ))}
+   690→            </div>
+   691→            <div className="mt-6 text-[10px] uppercase tracking-widest text-white/40">
+   692→              Desktop · Mouse &amp; Keyboard · WebGL2 — inspired by GTA-V decompiled scripts &amp; Minecraft
+   693→            </div>
+   694→          </div>
+   695→        </div>
+   696→      )}
+   697→    </div>
+   698→  );
+   699→}
+   700→

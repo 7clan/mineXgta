@@ -71,3 +71,51 @@ export function clearSave(): void {
     /* noop */
   }
 }
+
+// ------------------------------------------------------------------ settings
+// Settings live in a SEPARATE key so they survive NEW GAME (world save wipe).
+
+const SKEY = 'hyperion-settings-v1';
+
+export interface Settings {
+  /** Master volume 0..1. */
+  volume: number;
+  /** Touch controls enabled (defaults to device capability). */
+  touch: boolean;
+}
+
+/** Is this device touch-capable? Used as the default for the touch toggle. */
+export function isTouchDevice(): boolean {
+  if (typeof window === 'undefined') return false;
+  return 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+}
+
+export function defaultSettings(): Settings {
+  return { volume: 0.8, touch: isTouchDevice() };
+}
+
+export function loadSettings(): Settings {
+  const def = defaultSettings();
+  try {
+    if (typeof window === 'undefined') return def;
+    const raw = window.localStorage.getItem(SKEY);
+    if (!raw) return def;
+    const d = JSON.parse(raw) as Partial<Settings>;
+    return {
+      volume: typeof d.volume === 'number' ? Math.min(1, Math.max(0, d.volume)) : def.volume,
+      touch: typeof d.touch === 'boolean' ? d.touch : def.touch,
+    };
+  } catch {
+    return def;
+  }
+}
+
+export function writeSettings(s: Settings): boolean {
+  try {
+    if (typeof window === 'undefined') return false;
+    window.localStorage.setItem(SKEY, JSON.stringify(s));
+    return true;
+  } catch {
+    return false;
+  }
+}

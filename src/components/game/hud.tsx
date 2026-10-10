@@ -1,8 +1,10 @@
 'use client';
 
-import { useMemo, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { HudState, ItemStack, ItemId } from './engine/types';
 import { ICON_URLS, ITEMS, UI_ICONS } from './engine/items';
+import { HyperionAudio } from './engine/audio';
+import type { HyperionGame } from './engine/game';
 
 const SLOT_BASE =
   'relative flex items-center justify-center bg-[#8b8b8b] border-2 border-t-[#373737] border-l-[#373737] border-b-[#c6c6c6] border-r-[#c6c6c6]';
@@ -92,6 +94,7 @@ function Stars({ count }: { count: number }) {
 export interface HudProps {
   state: HudState;
   toast: string | null;
+  game: HyperionGame | null;
   onSlotClick: (i: number) => void;
   onInventorySwap: (i: number) => void;
   onResume: () => void;
@@ -119,6 +122,8 @@ const CONTROLS: Array<[string, string]> = [
   ['E', 'Inventory'],
   ['F', 'Enter / exit car'],
   ['M', 'Accept / quit contract'],
+  ["🎨 Drive in", "Pay'n'Spray — clear heat + repair"],
+  ['🛞 Spike strips', '4★ roadblocks shred tires — respray to fix'],
   ['R', 'Car radio station'],
   ['F5', 'Third-person view'],
   ['F3', 'Debug overlay'],
@@ -303,6 +308,42 @@ function HeliChip() {
   );
 }
 
+/** SPOTTED chip — the chopper searchlight has the player lit. */
+function SpottedChip({ level }: { level: number }) {
+  return (
+    <div className="hyperion-spotted mt-1 flex items-center gap-2 rounded border bg-black/70 px-2 py-1">
+      <span className="hyperion-flame text-[14px] leading-none">🔦</span>
+      <div>
+        <div className="text-[10px] font-black uppercase tracking-[0.2em] text-amber-200">Spotted</div>
+        <div className="mt-0.5 h-1 w-20 overflow-hidden rounded-full bg-white/10">
+          <div
+            className="h-full rounded-full bg-gradient-to-r from-amber-400 to-red-500 transition-[width] duration-150"
+            style={{ width: `${Math.max(8, level * 100)}%` }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Roadblock warning chip — animated hazard stripes + live distance. */
+function RoadblockChip({ dist }: { dist: number }) {
+  const close = dist < 45;
+  return (
+    <div
+      className={`mt-1 flex items-center gap-2 rounded border border-red-400/60 bg-black/70 px-2 py-1 ${close ? 'hyperion-roadblock-close' : ''}`}
+    >
+      <span className="hyperion-hazard block h-4 w-7 rounded-[3px] border border-white/25" />
+      <div>
+        <div className="text-[10px] font-black uppercase tracking-[0.2em] text-red-300">🚧 Roadblock</div>
+        <div className={`text-[9px] font-bold tabular-nums ${close ? 'text-red-200' : 'text-white/55'}`}>
+          {Math.round(dist)}m {close ? '· DODGE OR SMASH' : 'ahead'}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Vehicle speedometer — SVG arc gauge + hull integrity + tank cannon reload. */
 function Speedo({ driving }: { driving: NonNullable<HudState['driving']> }) {
   const max = driving.tank ? 60 : 130;
@@ -362,6 +403,11 @@ function Speedo({ driving }: { driving: NonNullable<HudState['driving']> }) {
         <span className={`text-[9px] font-black uppercase tracking-[0.14em] ${driving.tank ? 'text-lime-300/90' : 'text-amber-300/90'}`}>
           {driving.name}
         </span>
+        {!driving.tires && (
+          <span className="hyperion-flame rounded bg-red-500/25 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest text-red-300">
+            🛞 Shredded
+          </span>
+        )}
         {driving.tank && (
           <span
             className={`rounded px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest ${
@@ -377,6 +423,253 @@ function Speedo({ driving }: { driving: NonNullable<HudState['driving']> }) {
           <div className="h-full rounded-full bg-lime-400/70 transition-[width] duration-100" style={{ width: `${driving.reload * 100}%` }} />
         </div>
       )}
+    </div>
+  );
+}
+
+/** Mobile/touch control layer — analog joystick, drag-look, action buttons.
+ *  Rendered above the canvas but below chips/hotbar so HUD taps still work. */
+function TouchControls({ game, state }: { game: HyperionGame; state: HudState }) {
+  const input = game.input;
+  const [knob, setKnob] = useState({ x: 0, y: 0 });
+  const [sprintOn, setSprintOn] = useState(false);
+  const padRef = useRef<HTMLDivElement | null>(null);
+  const joyId = useRef<number | null>(null);
+  const lookId = useRef<number | null>(null);
+  const lookLast = useRef<{ x: number; y: number } | null>(null);
+  const R = 50;
+
+  const moveJoy = (e: React.PointerEvent) => {
+    const el = padRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    let dx = e.clientX - (rect.left + rect.width / 2);
+    let dy = e.clientY - (rect.top + rect.height / 2);
+    const d = Math.hypot(dx, dy);
+    if (d > R) {
+      dx = (dx / d) * R;
+      dy = (dy / d) * R;
+    }
+    setKnob({ x: dx, y: dy });
+    input.setVirtualMove(dx / R, -dy / R);
+  };
+
+  const endJoy = () => {
+    joyId.current = null;
+    setKnob({ x: 0, y: 0 });
+    input.setVirtualMove(0, 0);
+  };
+
+  // Look layer handlers (full-screen drag area)
+  const onLookDown = (e: React.PointerEvent) => {
+    if (lookId.current !== null) return;
+    lookId.current = e.pointerId;
+    lookLast.current = { x: e.clientX, y: e.clientY };
+  };
+  const onLookMove = (e: React.PointerEvent) => {
+    if (lookId.current !== e.pointerId || !lookLast.current) return;
+    input.addLook((e.clientX - lookLast.current.x) * 2.1, (e.clientY - lookLast.current.y) * 2.1);
+    lookLast.current = { x: e.clientX, y: e.clientY };
+  };
+  const onLookUp = (e: React.PointerEvent) => {
+    if (lookId.current === e.pointerId) {
+      lookId.current = null;
+      lookLast.current = null;
+    }
+  };
+
+  // Generic press-and-hold button that simulates a keyboard key.
+  const keyBtn = (label: string, code: string, cls = 'h-14 w-14 text-lg') => (
+    <button
+      className={`hyperion-touchbtn pointer-events-auto flex items-center justify-center rounded-full border border-white/25 bg-black/45 font-black text-white/90 backdrop-blur-[2px] ${cls}`}
+      onPointerDown={(e) => {
+        e.preventDefault();
+        input.pressCode(code);
+      }}
+      onPointerUp={() => input.releaseCode(code)}
+      onPointerLeave={() => input.releaseCode(code)}
+      onPointerCancel={() => input.releaseCode(code)}
+      aria-label={label}
+    >
+      {label}
+    </button>
+  );
+
+  const inTank = !!state.driving?.tank;
+
+  // DIG (on foot, hold) / FIRE (tank tap / horn while driving)
+  const digFireBtn = (
+    <button
+      className="hyperion-touchbtn pointer-events-auto flex h-16 w-16 items-center justify-center rounded-full border border-white/25 bg-black/45 text-xl font-black text-white/90 backdrop-blur-[2px]"
+      onPointerDown={(e) => {
+        e.preventDefault();
+        if (state.driving) input.tapFire();
+        else input.setVirtualDig(true);
+      }}
+      onPointerUp={() => {
+        input.setVirtualDig(false);
+      }}
+      onPointerLeave={() => {
+        input.setVirtualDig(false);
+      }}
+      onPointerCancel={() => {
+        input.setVirtualDig(false);
+      }}
+      aria-label={inTank ? 'fire cannon' : state.driving ? 'horn' : 'dig'}
+    >
+      {inTank ? '🔥' : state.driving ? '📢' : '⛏'}
+    </button>
+  );
+
+  // USE / PLACE — tap places a block or uses the item; hold = jetpack thrust.
+  const useBtn = (
+    <button
+      className="hyperion-touchbtn pointer-events-auto flex h-14 w-14 items-center justify-center rounded-full border border-white/25 bg-black/45 text-lg font-black text-white/90 backdrop-blur-[2px]"
+      onPointerDown={(e) => {
+        e.preventDefault();
+        input.setVirtualUseHold(true);
+        input.tapUse();
+      }}
+      onPointerUp={() => {
+        input.setVirtualUseHold(false);
+      }}
+      onPointerLeave={() => {
+        input.setVirtualUseHold(false);
+      }}
+      onPointerCancel={() => {
+        input.setVirtualUseHold(false);
+      }}
+      aria-label="use item"
+    >
+      🧱
+    </button>
+  );
+
+  return (
+    <div className="absolute inset-0" style={{ touchAction: 'none' }}>
+      {/* Look-drag layer (below all buttons / HUD elements in DOM order) */}
+      <div
+        className="absolute inset-0"
+        onPointerDown={onLookDown}
+        onPointerMove={onLookMove}
+        onPointerUp={onLookUp}
+        onPointerCancel={onLookUp}
+      />
+
+      {/* Analog joystick (bottom-left) */}
+      <div
+        ref={padRef}
+        className="hyperion-touchbtn pointer-events-auto absolute bottom-24 left-5 h-[124px] w-[124px] rounded-full border-2 border-white/20 bg-black/35 backdrop-blur-[2px]"
+        onPointerDown={(e) => {
+          e.preventDefault();
+          joyId.current = e.pointerId;
+          (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+          moveJoy(e);
+        }}
+        onPointerMove={(e) => {
+          if (joyId.current === e.pointerId) moveJoy(e);
+        }}
+        onPointerUp={endJoy}
+        onPointerCancel={endJoy}
+        aria-label="movement joystick"
+      >
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div
+            className="h-12 w-12 rounded-full border border-white/40 bg-white/25 shadow-[0_0_12px_rgba(255,255,255,0.25)] transition-transform duration-75"
+            style={{ transform: `translate(${knob.x}px, ${knob.y}px)` }}
+          />
+        </div>
+        <div className="absolute -top-5 left-1/2 -translate-x-1/2 text-[9px] font-black uppercase tracking-widest text-white/40">
+          move
+        </div>
+      </div>
+
+      {/* Action cluster (bottom-right) */}
+      <div className="absolute bottom-24 right-5 flex flex-col items-end gap-2">
+        <div className="flex items-end gap-2">
+          {keyBtn('E', 'KeyE', 'h-12 w-12 text-sm')}
+          {keyBtn('M', 'KeyM', 'h-12 w-12 text-sm')}
+          {keyBtn('F', 'KeyF', 'h-12 w-12 text-sm')}
+        </div>
+        <div className="flex items-end gap-2">
+          {keyBtn('⬇', 'KeyC', 'h-12 w-12 text-sm')}
+          <button
+            className={`hyperion-touchbtn pointer-events-auto flex h-12 w-12 items-center justify-center rounded-full border border-white/25 bg-black/45 text-sm font-black text-white/90 backdrop-blur-[2px] ${sprintOn ? 'text-amber-300' : ''}`}
+            data-active={sprintOn}
+            onPointerDown={(e) => {
+              e.preventDefault();
+              setSprintOn(input.toggleVirtualSprint());
+            }}
+            aria-label="sprint toggle"
+          >
+            ⚡
+          </button>
+          {keyBtn('⬆', 'Space', 'h-14 w-14 text-base')}
+          {useBtn}
+          {digFireBtn}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Pause-menu settings block: volume, radio presets, touch toggle. */
+function SettingsPanel({ game, state }: { game: HyperionGame; state: HudState }) {
+  const [vol, setVol] = useState(Math.round((game.volume ?? 0.8) * 100));
+  const [station, setStation] = useState(game.radioStation ?? 0);
+  return (
+    <div className="mt-3 rounded-lg bg-black/40 p-3 text-left">
+      <div className="mb-2 text-[10px] font-black uppercase tracking-[0.25em] text-white/40">Settings</div>
+      {/* Master volume */}
+      <div className="mb-2.5 flex items-center gap-2">
+        <span className="w-14 text-[11px] font-bold text-amber-300/90">Volume</span>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={vol}
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            setVol(v);
+            game.setVolume(v / 100);
+          }}
+          className="hyperion-vol flex-1"
+          aria-label="master volume"
+        />
+        <span className="w-10 text-right text-[11px] tabular-nums text-white/70">{vol}%</span>
+      </div>
+      {/* Radio presets */}
+      <div className="mb-2.5 flex items-center gap-2">
+        <span className="w-14 text-[11px] font-bold text-amber-300/90">Radio</span>
+        <div className="flex flex-1 flex-wrap gap-1">
+          {HyperionAudio.STATIONS.map((s, i) => (
+            <button
+              key={s.name}
+              onClick={() => {
+                setStation(i);
+                game.setRadioStation(i);
+              }}
+              className={`rounded px-2 py-1 text-[9px] font-black uppercase tracking-wider transition ${
+                station === i ? 'bg-emerald-500/30 text-emerald-200 outline outline-1 outline-emerald-400/50' : 'bg-white/8 text-white/55 hover:bg-white/15'
+              }`}
+            >
+              {i === 0 ? 'OFF' : s.name}
+            </button>
+          ))}
+        </div>
+      </div>
+      {/* Touch controls */}
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-bold text-amber-300/90">Touch controls</span>
+        <button
+          onClick={() => game.setTouch(!state.touch)}
+          className={`rounded px-3 py-1 text-[10px] font-black uppercase tracking-widest transition ${
+            state.touch ? 'bg-cyan-500/25 text-cyan-200 outline outline-1 outline-cyan-400/50' : 'bg-white/10 text-white/50 hover:bg-white/20'
+          }`}
+        >
+          {state.touch ? 'ON' : 'OFF'}
+        </button>
+      </div>
     </div>
   );
 }
@@ -435,6 +728,11 @@ export function Hud(props: HudProps) {
       {/* Police light wash across screen edges (only with active pursuit) */}
       {state.playing && !state.dead && state.police > 0 && <div className="hyperion-policeflash absolute inset-0" />}
 
+      {/* Touch controls (mobile / manually enabled) — below chips in DOM order */}
+      {state.playing && !state.dead && !props.paused && !props.inventoryOpen && !props.showStart && state.touch && props.game && (
+        <TouchControls game={props.game} state={state} />
+      )}
+
       {/* Contract tracker (top center) */}
       {state.playing && !state.dead && state.mission && <MissionChip mission={state.mission} />}
 
@@ -457,6 +755,8 @@ export function Hud(props: HudProps) {
             </div>
           )}
           {state.heli && <HeliChip />}
+          {state.spotted > 0 && <SpottedChip level={state.spotted} />}
+          {state.roadblock !== null && <RoadblockChip dist={state.roadblock} />}
           {state.police > 0 && state.evading > 0 && <EvadeChip evading={state.evading} />}
           {(() => {
             const sel = state.hotbar[state.slot];
@@ -619,6 +919,7 @@ export function Hud(props: HudProps) {
                 </div>
               ))}
             </div>
+            {props.game && <SettingsPanel game={props.game} state={state} />}
           </div>
         </div>
       )}
@@ -664,7 +965,9 @@ export function Hud(props: HudProps) {
               sidewalk is a dense micro-voxel lattice — dig through downtown with your pickaxe, rig engines with
               flint &amp; steel, build sky-bridges from smooth dirt slabs, and fly like creative mode. Contract
               chains unlock the 🔥 Chaos Jetpack, then the 🪖 Rhino Tank — but at five stars a police chopper
-              joins the hunt, and only the tunnels can hide you.
+              joins the hunt, and only the tunnels can hide you. At four stars the cops set 🚧 roadblocks with
+              spike strips that wreck your tires. Too hot? Drive into a 🎨 Pay&apos;n&apos;Spray bay to respray,
+              get new rubber and lose the heat — or blow a 💧 hydrant and watch the main geyser douse the chaos.
             </p>
             {state.hasSave && (
               <button
@@ -689,7 +992,8 @@ export function Hud(props: HudProps) {
               ))}
             </div>
             <div className="mt-6 text-[10px] uppercase tracking-widest text-white/40">
-              Desktop · Mouse &amp; Keyboard · WebGL2 — inspired by GTA-V decompiled scripts &amp; Minecraft
+              Desktop · Touch supported (Settings → Touch) · Mouse &amp; Keyboard · WebGL2 — inspired by GTA-V
+              decompiled scripts &amp; Minecraft
             </div>
           </div>
         </div>

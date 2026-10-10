@@ -4,6 +4,7 @@ import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeom
 import {
   BEDROCK_Y,
   CAR_EXPLODE_RADIUS,
+  CITY_HALF,
   GRID_HALF,
   BLOCK,
   HAND_COOLDOWN,
@@ -13,6 +14,7 @@ import {
   MAX_STRATA,
   PICK_COOLDOWN,
   REACH,
+  ROAD_W,
   TNT_FUSE,
   TNT_RADIUS,
   mulberry32,
@@ -28,7 +30,7 @@ import { HyperionAudio } from './audio';
 import { Missions } from './missions';
 import { Weather } from './weather';
 import { Helicopter } from './helicopter';
-import { SAVE_TYPES, clearSave, hasSave, loadSave, writeSave } from './save';
+import { SAVE_TYPES, clearSave, hasSave, loadSave, writeSave, loadSettings, writeSettings, type Settings } from './save';
 import {
   HUD_EMIT_INTERVAL,
   MINIMAP_SPAN,
@@ -107,7 +109,8 @@ export class HyperionGame implements World {
   private sun: THREE.DirectionalLight;
   private hemi: THREE.HemisphereLight;
   private destruction = new DestructionSystem();
-  private input = new Input();
+  /** Public so the React touch-control layer can drive virtual input. */
+  input = new Input();
   city: City;
   player: Player;
   vehicles: Vehicles;
@@ -174,6 +177,9 @@ export class HyperionGame implements World {
   private heliBurstT = 0;
   private heliMinAlt = 44;
   private heliScanT = 0;
+  /** SPOTTED: the chopper searchlight has the player lit — ground cops converge. */
+  private spotT = 0;
+  private spotToastT = 0;
   /** Rhino tank gunnery (chain tier-2 reward). */
   private tankAimYaw = 0;
   private tankAimPitch = 0.14;
@@ -194,6 +200,25 @@ export class HyperionGame implements World {
   private disposed = false;
   private weather: Weather;
   private beacon: THREE.Mesh | null = null;
+  /** Pay'n'Spray bays (clear heat + repair for a CHAOS fee). */
+  private sprays: Array<{ pos: THREE.Vector3; cd: number }> = [];
+  private sprayRings: THREE.Mesh[] = [];
+  private sprayAssets: Array<{ geo: THREE.BufferGeometry; mat: THREE.Material }> = [];
+  private nearSpray: number | null = null;
+  /** Police roadblocks (4+ stars): cruisers + spike strip across the player's road. */
+  private roadblocks: Array<{ group: THREE.Group; pos: THREE.Vector3; spike: THREE.Vector3; cars: Car[]; barrier: THREE.Mesh; flyT: number }> = [];
+  private roadblockCd = 8;
+  private roadblockToastT = 0;
+  private rbAssets: Array<{ geo: THREE.BufferGeometry; mat: THREE.Material }> = [];
+  private rbGeo: { plane: THREE.PlaneGeometry; strip: THREE.BoxGeometry; tooth: THREE.ConeGeometry; cone: THREE.ConeGeometry; leg: THREE.BoxGeometry; hazardMat: THREE.MeshStandardMaterial; steelMat: THREE.MeshStandardMaterial; toothMat: THREE.MeshStandardMaterial; coneMat: THREE.MeshStandardMaterial } | null = null;
+  /** Fire hydrants: instanced street furniture that bursts into water geysers. */
+  private hydrants: Array<{ pos: THREE.Vector3; broken: boolean; geyserT: number }> = [];
+  private hydBody: THREE.InstancedMesh | null = null;
+  private hydCap: THREE.InstancedMesh | null = null;
+  private hydAssets: Array<{ geo: THREE.BufferGeometry; mat: THREE.Material }> = [];
+  private hydToastT = 0;
+  /** User settings (volume / touch) — persisted separately from the world save. */
+  private settings: Settings;
   private missions = new Missions({
     toast: (msg) => this.toast(msg),
     complete: (def) => {
@@ -288,6 +313,11 @@ export class HyperionGame implements World {
     this.vehicles.onRagdollNPCs = (p, r) => {
       if (this.npcs.ragdollNear(p, r)) this.addScore(14);
     };
+    // Settings: apply persisted volume/touch BEFORE any audio can start.
+    this.settings = loadSettings();
+    this.audio.setMasterVolume(this.settings.volume);
+    this.buildSprayGarages();
+    this.buildHydrants();
     this.vehicles.onSmoke = (car) => {
       const p = car.group.position.clone();
       p.y += 0.9;
@@ -472,6 +502,8 @@ export class HyperionGame implements World {
       this.missions.onVoxels(res.removed);
       this.city.checkCollapses();
       this.ensureStrata(this.player.pos.y);
+      // Digging through the street shears hydrant risers — water mains burst.
+      if (point.y < 2.2) this.maybeBreakHydrants(point, radius + 0.7);
     }
     return res.removed;
   }
@@ -686,7 +718,8 @@ export class HyperionGame implements World {
   // ------------------------------------------------------------------ actions
   private tryDig(dt: number): void {
     this.digTimer -= dt;
-    if (!this.input.leftDown || this.digTimer > 0) return;
+    const lmb = this.input.leftDown || this.input.virtualDig;
+    if (!lmb || this.digTimer > 0) return;
     const it = this.selectedItem();
     const def = it ? ITEMS[it.id] : null;
     const isTool = def && (def.kind === 'tool' || def.kind === 'weapon');
@@ -946,7 +979,8 @@ export class HyperionGame implements World {
   private updateJetpack(dt: number): void {
     const it = this.selectedItem();
     const armed = !!it && it.id === 'jetpack';
-    const wantThrust = armed && this.input.rightDown && this.jetFuel > 0 && !this.player.dead;
+    const rmbHeld = this.input.rightDown || this.input.virtualUseHold;
+    const wantThrust = armed && rmbHeld && this.jetFuel > 0 && !this.player.dead;
     this.jetThrusting = wantThrust;
     if (wantThrust) {
       // Rocket burn: strong vertical accel + forward boost, both velocity-capped.
@@ -976,12 +1010,12 @@ export class HyperionGame implements World {
         this.audio.jetThrust(false);
       }
     }
-    if (this.jetFuel <= 0 && armed && this.input.rightDown && !this.jetDryWarned) {
+    if (this.jetFuel <= 0 && armed && rmbHeld && !this.jetDryWarned) {
       this.jetDryWarned = true;
       this.audio.jetThrust(false);
       this.toast('Jetpack fuel depleted — cooling down');
     }
-    if (!this.input.rightDown || this.jetFuel > 0.12) this.jetDryWarned = false;
+    if (!rmbHeld || this.jetFuel > 0.12) this.jetDryWarned = false;
   }
   private jetDryWarned = false;
 
@@ -1029,6 +1063,7 @@ export class HyperionGame implements World {
     this.city.checkCollapses();
     this.ensureStrata(this.player.pos.y);
     this.addScorch(pos, r * 0.85);
+    this.maybeBreakHydrants(pos, r * 1.1);
 
     // Damage & chaos
     this.ragdollNPCsNear(pos, r * 1.35);
@@ -1102,8 +1137,10 @@ export class HyperionGame implements World {
 
     // Player or car
     if (this.drivingCar) {
-      const throttle = (this.input.isDown('KeyW') ? 1 : 0) + (this.input.isDown('KeyS') ? -1 : 0);
-      const steer = (this.input.isDown('KeyA') ? 1 : 0) + (this.input.isDown('KeyD') ? -1 : 0);
+      // Analog touch joystick blends with the keyboard (raw key state avoids
+      // double-counting the virtual axis mapping in isDown()).
+      const throttle = Math.max(-1, Math.min(1, (this.input.keyDown('KeyW') ? 1 : 0) + (this.input.keyDown('KeyS') ? -1 : 0) + this.input.virtualMove.z));
+      const steer = Math.max(-1, Math.min(1, (this.input.keyDown('KeyA') ? 1 : 0) + (this.input.keyDown('KeyD') ? -1 : 0) - this.input.virtualMove.x));
       this.vehicles.drivePlayer(this.drivingCar, dt, throttle, steer, this.input.isDown('Space'), this);
       if (this.input.leftClicked) {
         if (this.drivingCar.type === 'tank') this.fireCannon();
@@ -1127,7 +1164,12 @@ export class HyperionGame implements World {
     this.vehicles.setPlayerRef(this.playerPos());
     this.vehicles.update(this.drivingCar, dt, this, this.playerPos());
 
-    // Digging (LMB)
+    // Pay'n'Spray bays (drive-in respray + repair)
+    this.updateSprays(dt);
+    this.updateRoadblocks(dt);
+    this.updateHydrants(dt);
+
+    // Digging (LMB / touch DIG hold)
     this.tryDig(dt);
     if (this.input.rightClicked) this.useItem();
 
@@ -1226,7 +1268,12 @@ export class HyperionGame implements World {
     this.hintT -= dt;
     if (this.hintT <= 0) {
       this.hintT = 0.18;
+      const geyserNear = this.hydrants.find(
+        (h) => h.broken && h.geyserT > 0 && Math.hypot(h.pos.x - this.player.pos.x, h.pos.z - this.player.pos.z) < 26
+      );
       if (this.drivingCar) this.currentHint = 'F — exit vehicle   ·   H — horn';
+      else if (geyserNear) this.currentHint = '💧 Burst hydrant — the geyser douses fires & burning cars';
+      else if (this.nearSpray !== null && this.nearSpray < 42) this.currentHint = `🎨 Pay'n'Spray — ${Math.round(this.nearSpray)}m · drive in to clear heat & repair`;
       else {
         const near = this.vehicles.nearest(this.player.pos, 3.8);
         this.currentHint = near && near.state !== 'burning' ? `F — enter ${near.name}` : null;
@@ -1518,6 +1565,451 @@ export class HyperionGame implements World {
     return this.placedGeoCache;
   }
 
+  // ------------------------------------------------------------------ pay'n'spray
+  /** Neon "PAY'N'SPRAY" sign texture (tiny inline canvas — one per garage). */
+  private makeSpraySignTexture(): THREE.CanvasTexture {
+    const cv = document.createElement('canvas');
+    cv.width = 512;
+    cv.height = 72;
+    const ctx = cv.getContext('2d')!;
+    ctx.fillStyle = '#07090c';
+    ctx.fillRect(0, 0, 512, 72);
+    ctx.strokeStyle = '#22d3ee';
+    ctx.lineWidth = 5;
+    ctx.strokeRect(5, 5, 502, 62);
+    ctx.font = 'italic 900 44px Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = '#22d3ee';
+    ctx.shadowBlur = 16;
+    ctx.fillStyle = '#8ff3ff';
+    ctx.fillText("PAY'N'SPRAY", 256, 39);
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+
+  /** GTA-style respray bays: neon arch + pad on two parking lots. Drive in to
+   *  clear wanted heat + repair the car for a CHAOS fee. */
+  private buildSprayGarages(): void {
+    const lots = this.city.parkingLots;
+    if (!lots.length) return;
+    const spots = [lots[0].clone(), lots[Math.floor(lots.length / 2)].clone()];
+
+    const padGeo = new THREE.CircleGeometry(5.4, 26);
+    const ringGeo = new THREE.RingGeometry(4.7, 5.4, 26);
+    const archGeo = new THREE.TorusGeometry(4.5, 0.3, 10, 28, Math.PI);
+    const poleGeo = new THREE.CylinderGeometry(0.2, 0.26, 4.7, 10);
+    const signGeo = new THREE.BoxGeometry(6.4, 0.9, 0.4);
+    const padMat = new THREE.MeshStandardMaterial({ color: 0x191c21, roughness: 0.82, metalness: 0.15, polygonOffset: true, polygonOffsetFactor: -1 });
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.5, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2 });
+    const steelMat = new THREE.MeshStandardMaterial({ color: 0x2b3138, roughness: 0.42, metalness: 0.65 });
+    const signTex = this.makeSpraySignTexture();
+    const signMat = new THREE.MeshBasicMaterial({ map: signTex });
+    for (const g of [padGeo, ringGeo, archGeo, poleGeo, signGeo]) this.sprayAssets.push({ geo: g, mat: padMat });
+    this.sprayAssets.push({ geo: padGeo, mat: ringMat }, { geo: signGeo, mat: signMat });
+
+    for (const s of spots) {
+      const pad = new THREE.Mesh(padGeo, padMat);
+      pad.rotation.x = -Math.PI / 2;
+      pad.position.set(s.x, 0.07, s.z);
+      pad.renderOrder = 2;
+      const ring = new THREE.Mesh(ringGeo, ringMat.clone());
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.set(s.x, 0.09, s.z);
+      ring.renderOrder = 3;
+      const arch = new THREE.Mesh(archGeo, steelMat);
+      arch.position.set(s.x, 0.12, s.z);
+      const poleL = new THREE.Mesh(poleGeo, steelMat);
+      poleL.position.set(s.x - 4.5, 2.35, s.z);
+      const poleR = new THREE.Mesh(poleGeo, steelMat);
+      poleR.position.set(s.x + 4.5, 2.35, s.z);
+      const sign = new THREE.Mesh(signGeo, signMat);
+      sign.position.set(s.x, 5.0, s.z);
+      const glow = new THREE.PointLight(0x2ee6f5, 2.6, 22, 1.5);
+      glow.position.set(s.x, 5.2, s.z);
+      this.scene.add(pad, ring, arch, poleL, poleR, sign, glow);
+      this.sprayRings.push(ring);
+      this.sprays.push({ pos: new THREE.Vector3(s.x, 0, s.z), cd: 0 });
+    }
+  }
+
+  private updateSprays(dt: number): void {
+    const pp = this.playerPos();
+    let nearest: number | null = null;
+    const now = performance.now();
+    for (let i = 0; i < this.sprays.length; i++) {
+      const sp = this.sprays[i];
+      if (sp.cd > 0) sp.cd -= dt;
+      const d = Math.hypot(sp.pos.x - pp.x, sp.pos.z - pp.z);
+      if (nearest === null || d < nearest) nearest = d;
+      // Pulsing cyan guide ring
+      const ring = this.sprayRings[i];
+      if (ring) {
+        ring.rotation.z += dt * 0.65;
+        (ring.material as THREE.MeshBasicMaterial).opacity = (sp.cd > 0 ? 0.16 : 0.42) + 0.2 * Math.sin(now * 0.003 + i * 2.1);
+      }
+      // Drive-in trigger: slow car on the pad, cooldown ready
+      if (this.drivingCar && sp.cd <= 0 && Math.abs(this.drivingCar.speed) < 3.5 && d < 4.6) {
+        this.doRespray(this.drivingCar, sp);
+      }
+    }
+    this.nearSpray = nearest !== null && nearest < 90 ? nearest : null;
+  }
+
+  /** The Pay'n'Spray service: clears wanted heat, fully repairs, heals a bit. */
+  private doRespray(car: Car, sp: { pos: THREE.Vector3; cd: number }): void {
+    const maxHealth = car.type === 'tank' ? 400 : 100;
+    const wanted = this.heat > 1;
+    const damaged = car.health < maxHealth - 1;
+    if (!wanted && !damaged) {
+      sp.cd = 6; // nothing to service — don't spam
+      return;
+    }
+    const fee = wanted ? Math.min(150, Math.floor(this.heat)) : 60;
+    // GTA canon: the spray garage clears your wanted level entirely (the fee is
+    // the cost of the service, not a partial bribe) — and fixes shredded tires.
+    this.heat = wanted ? 0 : this.heat;
+    car.health = maxHealth;
+    car.tires = 1;
+    car.wobbleT = 0;
+    this.player.heal(4);
+    this.spotT = 0;
+    this.evadeT = 0;
+    this.loseWarned = false;
+    this.policeWarned = false;
+    this.vehicles.despawnExtraPolice(0);
+    sp.cd = 20;
+    this.audio.spray();
+    this.particles.smokePuff(new THREE.Vector3(car.group.position.x, car.group.position.y + 1.1, car.group.position.z), 8, 0.75, 2.1);
+    this.toast(wanted ? `🎨 Resprayed — heat cleared (−${fee} CHAOS) · car repaired` : `🎨 Repaired at Pay'n'Spray (−${fee} CHAOS)`);
+  }
+
+  // ------------------------------------------------------------------ roadblocks
+
+  /** Red/white hazard stripe texture for barricade boards (one shared canvas). */
+  private makeHazardTexture(): THREE.CanvasTexture {
+    const cv = document.createElement('canvas');
+    cv.width = 128;
+    cv.height = 32;
+    const ctx = cv.getContext('2d')!;
+    for (let i = -1; i < 9; i++) {
+      ctx.fillStyle = i % 2 === 0 ? '#e03a2a' : '#f4f0e6';
+      ctx.beginPath();
+      ctx.moveTo(i * 16, 0);
+      ctx.lineTo(i * 16 + 16, 0);
+      ctx.lineTo(i * 16 + 8, 32);
+      ctx.lineTo(i * 16 - 8, 32);
+      ctx.closePath();
+      ctx.fill();
+    }
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+
+  /** Spawn a police roadblock ahead of a fast, wanted driver: two angled
+   *  cruisers, a spike strip, hazard barricades and cones. 4+ stars only. */
+  private spawnRoadblock(): void {
+    const car = this.drivingCar;
+    if (!car) return;
+    const heading = new THREE.Vector3(Math.sin(car.yaw), 0, Math.cos(car.yaw));
+    const p = car.group.position;
+    const ahead = this.tmpV.set(p.x + heading.x * 105, 0, p.z + heading.z * 105);
+    // Snap onto the nearest road centerline (perpendicular axis) so the blockade
+    // sits across the street the player is driving on.
+    const roads = this.city.roadCoords;
+    let bestRoad = roads[0];
+    let bestD = Infinity;
+    for (const c of roads) {
+      const d = Math.abs(c - (Math.abs(heading.x) > Math.abs(heading.z) ? ahead.z : ahead.x));
+      if (d < bestD) { bestD = d; bestRoad = c; }
+    }
+    const alongX = Math.abs(heading.x) > Math.abs(heading.z); // driving along X
+    const bx = alongX ? ahead.x : bestRoad;
+    const bz = alongX ? bestRoad : ahead.z;
+    const pos = new THREE.Vector3(bx, 0, bz);
+    // Keep it out of intersections (both axes near a centerline = crossing).
+    const cross = roads.reduce((n, c) => n + (Math.abs(c - bx) < 6.5 ? 1 : 0) + (Math.abs(c - bz) < 6.5 ? 1 : 0), 0);
+    if (cross > 1) return;
+
+    // Shared roadblock geometry/materials, built once per session.
+    if (!this.rbGeo) {
+      const hazardMat = new THREE.MeshStandardMaterial({ map: this.makeHazardTexture(), roughness: 0.7, side: THREE.DoubleSide });
+      const steelMat = new THREE.MeshStandardMaterial({ color: 0x23262b, roughness: 0.6, metalness: 0.5 });
+      const toothMat = new THREE.MeshStandardMaterial({ color: 0xd8dce2, roughness: 0.35, metalness: 0.85 });
+      const coneMat = new THREE.MeshStandardMaterial({ color: 0xff6a1f, roughness: 0.55 });
+      this.rbGeo = {
+        plane: new THREE.PlaneGeometry(2.6, 0.8),
+        strip: new THREE.BoxGeometry(6.6, 0.08, 0.55),
+        tooth: new THREE.ConeGeometry(0.07, 0.3, 5),
+        cone: new THREE.ConeGeometry(0.28, 0.68, 9),
+        leg: new THREE.BoxGeometry(0.08, 0.62, 0.08),
+        hazardMat,
+        steelMat,
+        toothMat,
+        coneMat,
+      };
+      this.rbAssets.push(
+        { geo: this.rbGeo.plane, mat: hazardMat },
+        { geo: this.rbGeo.strip, mat: steelMat },
+        { geo: this.rbGeo.tooth, mat: toothMat },
+        { geo: this.rbGeo.cone, mat: coneMat },
+        { geo: this.rbGeo.leg, mat: steelMat },
+      );
+    }
+    const G = this.rbGeo;
+    const group = new THREE.Group();
+    const yaw = alongX ? 0 : Math.PI / 2;
+
+    // Spike strip across the road with silver teeth
+    const strip = new THREE.Mesh(G.strip, G.steelMat);
+    strip.position.y = 0.05;
+    strip.rotation.y = yaw;
+    group.add(strip);
+    for (let i = -5; i <= 5; i++) {
+      const tooth = new THREE.Mesh(G.tooth, G.toothMat);
+      tooth.position.set(i * 0.58, 0.24, 0);
+      group.add(tooth);
+    }
+    // Hazard barricade boards sealing both road edges
+    for (const side of [-1, 1]) {
+      const board = new THREE.Mesh(G.plane, G.hazardMat);
+      board.position.set(alongX ? side * 3.35 : 0, 0.68, alongX ? 0 : side * 3.35);
+      board.rotation.y = yaw + Math.PI / 2;
+      group.add(board);
+      for (const off of [-1, 1]) {
+        const leg = new THREE.Mesh(G.leg, G.steelMat);
+        leg.position.set(board.position.x + off * (alongX ? 1 : 0), 0.31, board.position.z + off * (alongX ? 0 : 1));
+        group.add(leg);
+      }
+    }
+    // Cones marking the approach
+    for (let i = 0; i < 4; i++) {
+      const cone = new THREE.Mesh(G.cone, G.coneMat);
+      const t = (i / 3 - 0.5) * 7.4;
+      cone.position.set(alongX ? t : (this.rng() - 0.5) * 4.5, 0.34, alongX ? (this.rng() - 0.5) * 4.5 : t);
+      group.add(cone);
+    }
+    group.position.copy(pos);
+    this.scene.add(group);
+
+    // Two angled cruisers sealing the center gap (parked — lightbars flashed manually)
+    const cars: Car[] = [];
+    for (const side of [-1, 1]) {
+      const c = this.vehicles.makeParkedPolice();
+      if (!c) continue;
+      const cx = alongX ? pos.x + side * 1.55 : pos.x + 1.7;
+      const cz = alongX ? pos.z + 1.7 : pos.z + side * 1.55;
+      c.group.position.set(cx, 0, cz);
+      c.yaw = yaw + Math.PI / 2 + side * 0.5;
+      c.group.rotation.y = c.yaw;
+      cars.push(c);
+    }
+    this.roadblocks.push({ group, pos, spike: pos.clone(), cars, barrier: strip, flyT: 0 });
+    if (this.roadblockToastT <= 0) {
+      this.roadblockToastT = 10;
+      this.toast('🚧 POLICE ROADBLOCK AHEAD — dodge it or smash through!');
+    }
+  }
+
+  /** Per-frame roadblock logic: flashing cruisers, spike hits, barrier smash, cleanup. */
+  private updateRoadblocks(dt: number): void {
+    // Dispatch: wanted 4+ and driving fast → periodically drop a blockade ahead.
+    if (this.stars >= 4 && this.drivingCar && Math.abs(this.drivingCar.speed) > 9) {
+      this.roadblockCd -= dt;
+      if (this.roadblockCd <= 0) {
+        this.roadblockCd = 13 + this.rng() * 6;
+        if (this.roadblocks.length < 2) this.spawnRoadblock();
+      }
+    }
+    if (this.roadblockToastT > 0) this.roadblockToastT -= dt;
+    const pp = this.playerPos();
+    for (let i = this.roadblocks.length - 1; i >= 0; i--) {
+      const rb = this.roadblocks[i];
+      const d = Math.hypot(rb.pos.x - pp.x, rb.pos.z - pp.z);
+      // Flash the parked cruisers' lightbars (they're 'parked', no police AI)
+      const phase = Math.floor(performance.now() * 0.007) % 2;
+      for (const c of rb.cars) {
+        if (c.lightbar.length === 2 && c.state !== 'wrecked' && c.state !== 'burning') {
+          (c.lightbar[0].material as THREE.MeshStandardMaterial).emissiveIntensity = phase === 0 ? 3.4 : 0.12;
+          (c.lightbar[1].material as THREE.MeshStandardMaterial).emissiveIntensity = phase === 1 ? 3.4 : 0.12;
+        }
+      }
+      // Flying barrier animation after a smash-through
+      if (rb.flyT > 0) {
+        rb.flyT -= dt;
+        rb.barrier.position.y += dt * 7.5;
+        rb.barrier.rotation.x += dt * 9;
+        rb.barrier.rotation.z += dt * 4;
+      }
+      // Spike strip: non-tank cars at speed shred their tires
+      const car = this.drivingCar;
+      if (car && car.type !== 'tank' && car.tires >= 0.5 && Math.abs(car.speed) > 6) {
+        if (Math.hypot(car.group.position.x - rb.spike.x, car.group.position.z - rb.spike.z) < 2.1) {
+          car.tires = 0;
+          car.speed *= 0.72;
+          this.audio.thud(0.1);
+          this.shake(0.32);
+          this.particles.spawnDebris(new THREE.Vector3(car.group.position.x, 0.3, car.group.position.z), 7, new THREE.Color(0x181818), 0.9);
+          this.toast('🛞 TIRES SHREDDED — handling wrecked! A Pay\'n\'Spray can fit new rubber');
+          this.hitMark++;
+        }
+      }
+      // Barrier crash: smash through fast, bounce off slow (tank always smashes)
+      if (rb.flyT <= 0 && car && Math.hypot(car.group.position.x - rb.pos.x, car.group.position.z - rb.pos.z) < 2.4) {
+        const smash = Math.abs(car.speed) > (car.type === 'tank' ? 2 : 9);
+        if (smash) {
+          rb.flyT = 1.6;
+          car.speed *= car.type === 'tank' ? 0.96 : 0.8;
+          if (car.type !== 'tank') car.health -= 9;
+          this.audio.thud(0.05);
+          this.shake(0.3);
+          this.particles.spawnDebris(new THREE.Vector3(rb.pos.x, 0.8, rb.pos.z), 6, new THREE.Color(0xe03a2a), 1.2);
+          this.addScore(8);
+        } else if (Math.abs(car.speed) > 1) {
+          car.speed *= -0.14;
+          this.audio.thud(0.12);
+        }
+      }
+      // Cleanup: cooled down + far, or left far behind
+      if ((this.stars < 4 && d > 70) || d > 240) {
+        this.clearRoadblock(i);
+      }
+    }
+  }
+
+  private clearRoadblock(i: number): void {
+    const rb = this.roadblocks[i];
+    for (const c of rb.cars) {
+      // A stolen roadblock cruiser the player is driving stays in the world.
+      if (c !== this.drivingCar) this.vehicles.removeCar(c);
+    }
+    this.scene.remove(rb.group);
+    this.roadblocks.splice(i, 1);
+  }
+
+  // ------------------------------------------------------------------ hydrants
+
+  /** Instanced fire hydrants on sidewalk corners. Carve/explosion near one and
+   *  the water main bursts: geyser column, hiss, douses fires and burning cars. */
+  private buildHydrants(): void {
+    const bodyGeo = new THREE.CylinderGeometry(0.16, 0.2, 0.62, 9);
+    const capGeo = new THREE.SphereGeometry(0.15, 9, 7, 0, Math.PI * 2, 0, Math.PI / 2);
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xb32014, roughness: 0.5, metalness: 0.35 });
+    const capMat = new THREE.MeshStandardMaterial({ color: 0xd8d2c4, roughness: 0.45, metalness: 0.6 });
+    this.hydAssets.push({ geo: bodyGeo, mat: bodyMat }, { geo: capGeo, mat: capMat });
+    // Candidates: sidewalk corners at alternating intersections (skips blocked corners)
+    const roads = this.city.roadCoords;
+    const edge = ROAD_W / 2 + 1.3; // mid-sidewalk offset from the road centerline
+    const spots: THREE.Vector3[] = [];
+    for (let ix = 0; ix < roads.length; ix += 2) {
+      for (let iz = (ix / 2) % 2 === 0 ? 1 : 0; iz < roads.length; iz += 2) {
+        const x = roads[ix] + edge;
+        const z = roads[iz] + edge;
+        if (Math.abs(x) > CITY_HALF - 6 || Math.abs(z) > CITY_HALF - 6) continue;
+        spots.push(new THREE.Vector3(x, 0, z));
+      }
+    }
+    const max = Math.min(spots.length, 64);
+    this.hydBody = new THREE.InstancedMesh(bodyGeo, bodyMat, max);
+    this.hydCap = new THREE.InstancedMesh(capGeo, capMat, max);
+    this.hydBody.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.hydCap.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.hydBody.castShadow = true;
+    const d = new THREE.Object3D();
+    let n = 0;
+    for (let i = 0; i < max; i++) {
+      const s = spots[i];
+      // Skip corners swallowed by building footprints (hydrants need open sidewalk)
+      if (this.city.buildingAt(new THREE.Vector3(s.x, 1, s.z))) continue;
+      d.position.set(s.x, 0.43, s.z);
+      d.rotation.set(0, this.rng() * Math.PI, 0);
+      d.scale.setScalar(1);
+      d.updateMatrix();
+      this.hydBody.setMatrixAt(n, d.matrix);
+      d.position.y = 0.74;
+      d.updateMatrix();
+      this.hydCap.setMatrixAt(n, d.matrix);
+      this.hydrants.push({ pos: s.clone(), broken: false, geyserT: 0 });
+      n++;
+    }
+    this.hydBody.count = n;
+    this.hydCap.count = n;
+    this.hydBody.instanceMatrix.needsUpdate = true;
+    this.hydCap.instanceMatrix.needsUpdate = true;
+    this.scene.add(this.hydBody, this.hydCap);
+  }
+
+  /** Explosions / deep digs shear hydrants → burst the main. */
+  private maybeBreakHydrants(pos: THREE.Vector3, radius: number): void {
+    for (const h of this.hydrants) {
+      if (h.broken) continue;
+      if (Math.hypot(h.pos.x - pos.x, h.pos.z - pos.z) < radius && Math.abs(pos.y - 0.5) < radius + 1.2) {
+        this.burstHydrant(h);
+      }
+    }
+  }
+
+  private burstHydrant(h: { pos: THREE.Vector3; broken: boolean; geyserT: number }): void {
+    h.broken = true;
+    h.geyserT = 15 + this.rng() * 7;
+    const idx = this.hydrants.indexOf(h);
+    if (this.hydCap && idx >= 0 && idx < this.hydCap.count) {
+      const d = new THREE.Object3D();
+      d.position.set(0, -100, 0);
+      d.updateMatrix();
+      this.hydCap.setMatrixAt(idx, d.matrix);
+      this.hydCap.instanceMatrix.needsUpdate = true;
+    }
+    if (this.hydBody && idx >= 0 && idx < this.hydBody.count) {
+      const d = new THREE.Object3D();
+      d.position.set(h.pos.x, 0.36, h.pos.z);
+      d.rotation.set(0.7 * (this.rng() - 0.5), this.rng() * Math.PI, 0.7 * (this.rng() - 0.5));
+      d.scale.setScalar(0.9);
+      d.updateMatrix();
+      this.hydBody.setMatrixAt(idx, d.matrix);
+      this.hydBody.instanceMatrix.needsUpdate = true;
+    }
+    this.particles.spawnDebris(new THREE.Vector3(h.pos.x, 0.7, h.pos.z), 5, new THREE.Color(0xb32014), 1.1);
+    this.audio.thud(this.far(h.pos));
+    if (this.hydToastT <= 0) {
+      this.hydToastT = 8;
+      this.toast('💧 Hydrant main burst — the geyser douses fires (and burning cars)');
+    }
+  }
+
+  private updateHydrants(dt: number): void {
+    if (this.hydToastT > 0) this.hydToastT -= dt;
+    let loudest = 0;
+    const pp = this.playerPos();
+    for (const h of this.hydrants) {
+      if (!h.broken || h.geyserT <= 0) continue;
+      h.geyserT -= dt;
+      // Geyser column: droplets per frame scale with remaining pressure
+      const pressure = Math.min(1, h.geyserT / 6);
+      this.particles.waterJet(h.pos, Math.random() < 0.7 ? 3 : 4, 0.55 + 0.65 * pressure);
+      if (Math.random() < dt * 9) this.particles.smokePuff(new THREE.Vector3(h.pos.x, 0.4, h.pos.z), 1, 1.3, 0.7);
+      // Douse fires + burning cars nearby
+      for (let i = this.fires.length - 1; i >= 0; i--) {
+        const f = this.fires[i];
+        if (f.pos.distanceTo(h.pos) < 7) {
+          this.fires.splice(i, 1);
+          this.particles.smokePuff(f.pos.clone().setY(0.6), 4, 1, 1.6);
+        }
+      }
+      for (const c of this.vehicles.cars) {
+        if (c.state === 'burning' && c.group.position.distanceTo(h.pos) < 6.5) {
+          this.vehicles.extinguish(c);
+          this.toast('🚒 Geyser doused a burning car');
+        }
+      }
+      const d = Math.hypot(h.pos.x - pp.x, h.pos.z - pp.z);
+      loudest = Math.max(loudest, Math.max(0, 1 - d / 42) * pressure);
+    }
+    this.audio.setGeyser(loudest);
+  }
+
   // ------------------------------------------------------------------ weather
   private updateWeather(dt: number): void {
     this.weather.update(dt, this.playerPos());
@@ -1612,12 +2104,26 @@ export class HyperionGame implements World {
       this.heli.update(dt, surface, this.heliMinAlt);
       this.audio.setHeliDist(hp.distanceTo(pp) / 130);
       heliSees = pp.y > -2.5 && Math.hypot(hp.x - pp.x, hp.z - pp.z) < 135;
+      // SPOTTED: the searchlight itself is a gameplay tool — when the beam's hot
+      // spot lands on you, ground units converge even behind cover (evade resets).
+      if (heliSees) {
+        const beam = this.heli.beamPoint;
+        const bd = Math.hypot(beam.x - pp.x, beam.z - pp.z);
+        if (bd < 5.6) {
+          if (this.spotT <= 0 && this.spotToastT <= 0) {
+            this.toast('🔦 SPOTTED — searchlight lock! Break the beam or tunnel down!');
+            this.spotToastT = 7;
+          }
+          this.spotT = 3.6;
+        }
+      }
       // Rotor wash when hovering low over the streets
       const below = this.floorHeightAt(hp.x, hp.z, hp.y);
       if (hp.y - below < 17 && Math.random() < dt * 5) {
         this.particles.dustPuff(new THREE.Vector3(hp.x, below + 0.4, hp.z), 3, 4.5);
       }
-      // Door-gun bursts at the player
+      // Door-gun bursts — focus the Rhino when the player is tanked up
+      const inTank = !!this.drivingCar && this.drivingCar.type === 'tank';
       this.heliGunT -= dt;
       if (heliSees && this.heliGunT <= 0 && !this.player.dead) {
         this.heliGunT = 2.3 + Math.random() * 0.9;
@@ -1635,9 +2141,17 @@ export class HyperionGame implements World {
           const to = eye.clone().add(spread);
           this.spawnTracer(from, to);
           this.audio.gunCrack(0.12);
-          if (Math.random() < 0.62) {
-            this.damagePlayer(3);
-            this.particles.spawnDebris(eye, 2, new THREE.Color(0x992211), 0.5);
+          if (Math.random() < (inTank ? 0.8 : 0.62)) {
+            if (inTank && this.drivingCar) {
+              // The chopper's door gun chews tank hull slowly instead of the crew.
+              this.drivingCar.health -= 5;
+              this.hitMark++;
+              this.shake(0.1);
+              this.particles.spawnDebris(eye, 2, new THREE.Color(0x992211), 0.5);
+            } else {
+              this.damagePlayer(3);
+              this.particles.spawnDebris(eye, 2, new THREE.Color(0x992211), 0.5);
+            }
           } else {
             this.particles.spawnDebris(to, 2, new THREE.Color(0x888888), 0.5);
             this.shake(0.05);
@@ -1645,6 +2159,9 @@ export class HyperionGame implements World {
         }
       }
     }
+    // SPOTTED timers (run even without the heli so the lock decays naturally)
+    if (this.spotT > 0) this.spotT -= dt;
+    if (this.spotToastT > 0) this.spotToastT -= dt;
 
     // --- Line-of-sight / evade logic (occlusion-aware + airborne) -----------
     if (want > 0 && (active > 0 || this.heli)) {
@@ -1656,6 +2173,9 @@ export class HyperionGame implements World {
         this.copsSee = this.computeCopLOS(units) || heliSees;
       }
       let seen = this.copsSee;
+      // The searchlight lock counts as seen — hiding behind cover doesn't work
+      // while the beam is on you.
+      if (this.spotT > 0 && this.playerPos().y > -2.5) seen = true;
       // Tunnels are safe: cops can't see you from the surface once underground.
       if (this.playerPos().y < -2.5) seen = false;
       if (seen) {
@@ -1887,6 +2407,7 @@ export class HyperionGame implements World {
             health: Math.max(0, this.drivingCar.health),
             tank: this.drivingCar.type === 'tank',
             reload: this.drivingCar.type === 'tank' ? 1 - Math.max(0, this.shellCd) / 2.6 : 0,
+            tires: this.drivingCar.tires >= 0.5,
           }
         : null,
       slot: this.slot,
@@ -1920,6 +2441,18 @@ export class HyperionGame implements World {
       jetFuel: this.jetFuel,
       jetThrusting: this.jetThrusting,
       heli: !!this.heli,
+      spotted: this.spotT > 0 ? Math.min(1, this.spotT / 3.6) : 0,
+      touch: this.settings.touch,
+      spray: this.nearSpray,
+      roadblock: (() => {
+        const pp2 = this.playerPos();
+        let best: number | null = null;
+        for (const rb of this.roadblocks) {
+          const d = Math.hypot(rb.pos.x - pp2.x, rb.pos.z - pp2.z);
+          if (best === null || d < best) best = d;
+        }
+        return best !== null && best < 150 ? best : null;
+      })(),
     };
     this.cb.onState(state);
     this.drawMinimap();
@@ -2005,6 +2538,38 @@ export class HyperionGame implements World {
         ctx.fillStyle = '#ff2020';
         ctx.fillRect((t.pos.x - p.x) - 2.4, (t.pos.z - p.z) - 2.4, 4.8, 4.8);
       }
+    }
+    // Roadblocks — blinking red ✕
+    for (const rb of this.roadblocks) {
+      const blink = 0.5 + 0.5 * (0.5 + 0.5 * Math.sin(performance.now() * 0.01));
+      ctx.strokeStyle = `rgba(255,60,40,${0.45 + 0.5 * blink})`;
+      ctx.lineWidth = 1.6;
+      const rx = rb.pos.x - p.x;
+      const rz = rb.pos.z - p.z;
+      ctx.beginPath();
+      ctx.moveTo(rx - 3, rz - 3);
+      ctx.lineTo(rx + 3, rz + 3);
+      ctx.moveTo(rx + 3, rz - 3);
+      ctx.lineTo(rx - 3, rz + 3);
+      ctx.stroke();
+    }
+    // Pay'n'Spray bays — pulsing cyan discs with a spray-can glyph
+    for (const sp of this.sprays) {
+      const gx = sp.pos.x - p.x;
+      const gz = sp.pos.z - p.z;
+      const pulse = 0.55 + 0.45 * Math.sin(performance.now() * 0.004);
+      ctx.fillStyle = `rgba(34,211,238,${0.35 + 0.4 * pulse})`;
+      ctx.beginPath();
+      ctx.arc(gx, gz, 3.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(143,243,255,0.9)';
+      ctx.lineWidth = 1.1;
+      ctx.stroke();
+      ctx.fillStyle = '#0b1214';
+      ctx.font = 'bold 7px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('S', gx, gz + 2.4);
+      ctx.textAlign = 'left';
     }
     // Contract target marker (pulsing amber diamond, clamped to map edges)
     const snap = this.missions.snapshot((m, buildingId) => (m.locate === 'building' ? this.missionMarker(buildingId) : null));
@@ -2118,6 +2683,45 @@ export class HyperionGame implements World {
     return this.input.pointerLockFailed;
   }
 
+  // ------------------------------------------------------------------ settings
+  /** Master volume 0..1 (persisted to the settings store). */
+  setVolume(v: number): void {
+    this.settings.volume = Math.min(1, Math.max(0, v));
+    this.audio.setMasterVolume(this.settings.volume);
+    writeSettings(this.settings);
+  }
+
+  get volume(): number {
+    return this.settings.volume;
+  }
+
+  /** Touch controls on/off (persisted; resets all virtual state when disabled). */
+  setTouch(v: boolean): void {
+    this.settings.touch = v;
+    writeSettings(this.settings);
+    if (!v) {
+      this.input.virtualMove.x = 0;
+      this.input.virtualMove.z = 0;
+      this.input.virtualDig = false;
+      this.input.virtualUseHold = false;
+      this.input.virtualSprint = false;
+    }
+  }
+
+  /** Car-radio preset from the settings panel (0 = off). Applies live while driving. */
+  setRadioStation(i: number): void {
+    const st = Math.max(0, Math.min(HyperionAudio.STATIONS.length - 1, Math.round(i)));
+    this.audio.radioStation = st;
+    if (this.drivingCar) {
+      if (st > 0) this.audio.startRadio(st);
+      else this.audio.stopRadio();
+    }
+  }
+
+  get radioStation(): number {
+    return this.audio.radioStation;
+  }
+
   dispose(): void {
     this.disposed = true;
     cancelAnimationFrame(this.raf);
@@ -2146,6 +2750,33 @@ export class HyperionGame implements World {
     this.tracers.length = 0;
     this.shellGeo?.dispose();
     this.shellMat?.dispose();
+    for (const a of this.sprayAssets) {
+      a.geo.dispose();
+      a.mat.dispose();
+    }
+    for (const r of this.sprayRings) (r.material as THREE.Material).dispose();
+    while (this.roadblocks.length) this.clearRoadblock(0);
+    for (const a of this.rbAssets) {
+      a.geo.dispose();
+      a.mat.dispose();
+    }
+    this.rbAssets.length = 0;
+    this.rbGeo = null;
+    if (this.hydBody) {
+      this.scene.remove(this.hydBody);
+      this.hydBody.dispose();
+      this.hydBody = null;
+    }
+    if (this.hydCap) {
+      this.scene.remove(this.hydCap);
+      this.hydCap.dispose();
+      this.hydCap = null;
+    }
+    for (const a of this.hydAssets) {
+      a.geo.dispose();
+      a.mat.dispose();
+    }
+    this.hydrants.length = 0;
     this.weather.dispose();
     this.city.dispose();
     this.vehicles.dispose();

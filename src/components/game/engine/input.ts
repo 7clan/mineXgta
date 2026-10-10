@@ -1,7 +1,37 @@
-/** Keyboard + mouse input with pointer-lock and drag-look fallback. */
+/** Keyboard + mouse input with pointer-lock, drag-look fallback and virtual (touch) support. */
 export class Input {
   private down = new Set<string>();
   private pressedFrame = new Set<string>();
+
+  // --- Virtual (touch) input, driven by the React touch-control layer ------
+  /** Analog joystick axes: x = strafe (+right), z = forward (+up on the pad). */
+  virtualMove = { x: 0, z: 0 };
+  /** Hold-to-dig (LMB equivalent for the touch DIG button). */
+  virtualDig = false;
+  /** Hold-to-use (RMB hold equivalent — jetpack thrust). Tap also sets rightClicked once. */
+  virtualUseHold = false;
+  /** Sprint toggle for touch (maps to ShiftLeft reads). */
+  virtualSprint = false;
+
+  /** Set both joystick axes at once (React touch handlers call this). */
+  setVirtualMove(x: number, z: number): void {
+    this.virtualMove.x = x;
+    this.virtualMove.z = z;
+  }
+
+  setVirtualDig(v: boolean): void {
+    this.virtualDig = v;
+  }
+
+  setVirtualUseHold(v: boolean): void {
+    this.virtualUseHold = v;
+  }
+
+  /** Flip the touch sprint toggle; returns the new state. */
+  toggleVirtualSprint(): boolean {
+    this.virtualSprint = !this.virtualSprint;
+    return this.virtualSprint;
+  }
   private el: HTMLElement | null = null;
   private onEsc: (() => void) | null = null;
 
@@ -108,8 +138,46 @@ export class Input {
     this.locked = v;
   }
 
-  isDown(code: string): boolean {
+  /** Raw keyboard state WITHOUT virtual mapping (for analog blending). */
+  keyDown(code: string): boolean {
     return this.down.has(code);
+  }
+
+  isDown(code: string): boolean {
+    // Virtual (touch) axes blend in over the keyboard state.
+    if (this.virtualSprint && code === 'ShiftLeft') return true;
+    if (code === 'KeyW' && this.virtualMove.z > 0.4) return true;
+    if (code === 'KeyS' && this.virtualMove.z < -0.4) return true;
+    if (code === 'KeyA' && this.virtualMove.x < -0.4) return true;
+    if (code === 'KeyD' && this.virtualMove.x > 0.4) return true;
+    return this.down.has(code);
+  }
+
+  /** Simulate a key press from a touch button (fires justPressed for one frame). */
+  pressCode(code: string): void {
+    this.down.add(code);
+    this.pressedFrame.add(code);
+  }
+
+  /** Release a touch-held key. */
+  releaseCode(code: string): void {
+    this.down.delete(code);
+  }
+
+  /** Touch look: accumulate drag deltas exactly like mouse movement. */
+  addLook(dx: number, dy: number): void {
+    this.mouseDX += dx;
+    this.mouseDY += dy;
+  }
+
+  /** Touch USE tap — one-shot RMB click (place block / use item). */
+  tapUse(): void {
+    this.rightClicked = true;
+  }
+
+  /** Touch FIRE tap — one-shot LMB click (tank cannon / horn). */
+  tapFire(): void {
+    this.leftClicked = true;
   }
 
   justPressed(code: string): boolean {

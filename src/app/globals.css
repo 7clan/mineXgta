@@ -331,3 +331,114 @@ body {
   animation: hyperion-radar-spin 1.5s linear infinite;
 }
 
+/* SPOTTED chip: harsh searchlight flicker (amber -> red) */
+@keyframes hyperion-spotted-flicker {
+  0%,
+  100% {
+    border-color: rgba(251, 191, 36, 0.95);
+    box-shadow:
+      0 0 14px 2px rgba(251, 191, 36, 0.5),
+      inset 0 0 8px rgba(251, 191, 36, 0.25);
+  }
+  45% {
+    border-color: rgba(248, 113, 113, 0.95);
+    box-shadow:
+      0 0 18px 4px rgba(248, 113, 113, 0.55),
+      inset 0 0 10px rgba(248, 113, 113, 0.3);
+  }
+  60% {
+    border-color: rgba(251, 191, 36, 0.5);
+    box-shadow: 0 0 6px 1px rgba(251, 191, 36, 0.25);
+  }
+}
+
+.hyperion-spotted {
+  animation: hyperion-spotted-flicker 0.62s steps(2) infinite;
+}
+
+/* Pay'n'Spray hint chip: cyan neon breathing */
+@keyframes hyperion-spray-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(34, 211, 238, 0.55),
+      0 0 12px rgba(34, 211, 238, 0.28);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px rgba(34, 211, 238, 0.25),
+      0 0 4px rgba(34, 211, 238, 0.1);
+  }
+}
+
+.hyperion-spray {
+  animation: hyperion-spray-glow 1.6s ease-in-out infinite;
+}
+
+/* Touch buttons: tactile press + soft glow ring */
+.hyperion-touchbtn {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    transform 0.08s ease,
+    background-color 0.08s ease,
+    box-shadow 0.08s ease;
+}
+
+.hyperion-touchbtn:active,
+.hyperion-touchbtn[data-active='true'] {
+  transform: scale(0.92);
+  background-color: rgba(251, 191, 36, 0.32);
+  box-shadow:
+    0 0 16px 2px rgba(251, 191, 36, 0.45),
+    inset 0 0 10px rgba(255, 255, 255, 0.18);
+}
+
+/* Volume slider styling (settings panel) */
+input[type='range'].hyperion-vol {
+  accent-color: #fbbf24;
+  height: 4px;
+  cursor: pointer;
+}
+
+
+/* Roadblock chip: animated red/white hazard stripes (marching diagonals) */
+@keyframes hyperion-hazard-march {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 16px 0;
+  }
+}
+
+.hyperion-hazard {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    #e03a2a 0 6px,
+    #f4f0e6 6px 12px
+  );
+  background-size: 16px 16px;
+  animation: hyperion-hazard-march 0.5s linear infinite;
+}
+
+/* Roadblock proximity state: whole chip pulses red like a barricade light */
+@keyframes hyperion-roadblock-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(248, 113, 113, 0.7),
+      0 0 16px 3px rgba(248, 60, 40, 0.4);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px rgba(248, 113, 113, 0.25),
+      0 0 5px 1px rgba(248, 60, 40, 0.15);
+  }
+}
+
+.hyperion-roadblock-close {
+  animation: hyperion-roadblock-pulse 0.75s ease-in-out infinite;
+}

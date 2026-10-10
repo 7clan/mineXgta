@@ -177,11 +177,19 @@ export class Helicopter {
 
     this.group.scale.setScalar(1.15);
     scene.add(this.group);
-    scene.add(this.lightTarget);
+    // NOTE: lightTarget stays a child of `group` — the update math stores it in
+    // group-LOCAL coords (world target − heli position). Adding it to the scene
+    // here would re-parent it and make the beam drift off-target as the chopper
+    // travels away from the origin (a real bug caught by the beamPoint getter).
   }
 
   get pos(): THREE.Vector3 {
     return this.group.position;
+  }
+
+  /** World-space hot spot of the searchlight (where the beam meets the ground). */
+  get beamPoint(): THREE.Vector3 {
+    return this.lightTarget.getWorldPosition(new THREE.Vector3());
   }
 
   /**
@@ -227,14 +235,18 @@ export class Helicopter {
     (this.flashers[0].material as THREE.MeshStandardMaterial).emissiveIntensity = phase === 0 ? 3.4 : 0.12;
     (this.flashers[1].material as THREE.MeshStandardMaterial).emissiveIntensity = phase === 1 ? 3.4 : 0.12;
 
-    // Searchlight sweeps a lazy circle around the target
+    // Searchlight sweeps a lazy circle around the target. The sweep is computed
+    // in WORLD space, then converted into the group's local space so the chopper's
+    // yaw/bank never skews the aim (SpotLight.target + cone both live in local space).
     const sweepR = 2.5 + Math.sin(this.sweepT * 0.9) * 2.2;
     const sweepA = this.sweepT * 1.35;
-    this.lightTarget.position.set(
-      target.x + Math.cos(sweepA) * sweepR - this.group.position.x,
-      Math.max(target.y, 0) + 0.2 - this.group.position.y,
-      target.z + Math.sin(sweepA) * sweepR - this.group.position.z
+    this.group.updateMatrixWorld();
+    const worldBeam = new THREE.Vector3(
+      target.x + Math.cos(sweepA) * sweepR,
+      Math.max(target.y, 0) + 0.2,
+      target.z + Math.sin(sweepA) * sweepR
     );
+    this.lightTarget.position.copy(this.group.worldToLocal(worldBeam));
     // Orient the volumetric cone straight down toward the beam target
     const beamDir = this.lightTarget.position.clone().sub(this.light.position).normalize();
     const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, -1, 0), beamDir);
@@ -244,7 +256,6 @@ export class Helicopter {
 
   dispose(scene: THREE.Scene): void {
     scene.remove(this.group);
-    scene.remove(this.lightTarget);
     for (const g of this.geos) g.dispose();
     for (const m of this.mats) m.dispose();
   }

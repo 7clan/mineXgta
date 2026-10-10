@@ -51,6 +51,8 @@ export interface HudState {
     tank: boolean;
     /** Cannon reload progress 0..1 (1 = ready to fire). */
     reload: number;
+    /** False when spike strips shredded the tires (speed cap + pull). */
+    tires: boolean;
   };
   slot: number;
   hotbar: (ItemStack | null)[];
@@ -101,6 +103,14 @@ export interface HudState {
   jetThrusting: boolean;
   /** Police helicopter (air support) deployed at 5 stars. */
   heli: boolean;
+  /** Searchlight exposure 0..1 (>0 = the chopper beam has you — ground cops converge). */
+  spotted: number;
+  /** Touch controls enabled (settings). */
+  touch: boolean;
+  /** Nearest Pay'n'Spray garage: distance in m, or null when > 90 m away. */
+  spray: number | null;
+  /** Nearest police roadblock: distance in m, or null when none within 150 m. */
+  roadblock: number | null;
 }
 
 export const HUD_INITIAL: HudState = {
@@ -134,6 +144,10 @@ export const HUD_INITIAL: HudState = {
   jetFuel: 1,
   jetThrusting: false,
   heli: false,
+  spotted: 0,
+  touch: false,
+  spray: null,
+  roadblock: null,
 };
 
 /**

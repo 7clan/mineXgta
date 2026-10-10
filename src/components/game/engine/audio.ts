@@ -24,6 +24,10 @@ export class HyperionAudio {
   private rainSrc: AudioBufferSourceNode | null = null;
   private rainGain: GainNode | null = null;
   private rainLevel = 0;
+  // Persistent hydrant-geyser hiss loop (looping noise -> bandpass -> gain).
+  private hydSrc: AudioBufferSourceNode | null = null;
+  private hydGain: GainNode | null = null;
+  private hydLevel = 0;
   // Persistent jetpack-thrust loop (saw osc + looping noise).
   private jetOsc: OscillatorNode | null = null;
   private jetSrc: AudioBufferSourceNode | null = null;
@@ -38,6 +42,8 @@ export class HyperionAudio {
   private radioStep = 0;
   private radioNextT = 0;
   radioStation = 0; // 0 = off, 1..3 = stations
+  /** Desired master volume — applied at unlock() and live via setMasterVolume(). */
+  private vol = 0.8;
 
   constructor() {}
 
@@ -51,7 +57,7 @@ export class HyperionAudio {
       const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!Ctor) return;
       const ctx = new Ctor(), master = ctx.createGain();
-      master.gain.value = 0.8;
+      master.gain.value = this.vol;
       master.connect(ctx.destination);
       // Cached 1s white-noise buffer, created exactly once.
       const buf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate), d = buf.getChannelData(0);
@@ -64,8 +70,9 @@ export class HyperionAudio {
 
   setMasterVolume(v: number): void {
     try {
+      this.vol = v < 0 ? 0 : v > 1 ? 1 : v;
       if (!this.ctx || !this.master) return;
-      this.master.gain.setTargetAtTime(v < 0 ? 0 : v > 1 ? 1 : v, this.ctx.currentTime, 0.02);
+      this.master.gain.setTargetAtTime(this.vol, this.ctx.currentTime, 0.02);
     } catch { /* noop */ }
   }
 
@@ -551,6 +558,56 @@ export class HyperionAudio {
     } catch { /* noop */ }
   }
 
+  // ---------------------------------------------------------------- hydrant
+
+  /** Burst hydrant main: pressured water hiss, loudness by proximity (0..1). */
+  setGeyser(intensity: number): void {
+    try {
+      if (!this.ctx || !this.master || !this.noiseBuf) return;
+      const v = intensity < 0 ? 0 : intensity > 1 ? 1 : intensity;
+      this.hydLevel = v;
+      if (v <= 0.001) {
+        this.stopGeyser();
+        return;
+      }
+      if (!this.hydSrc || !this.hydGain) {
+        const src = this.ctx.createBufferSource();
+        src.buffer = this.noiseBuf;
+        src.loop = true;
+        const hp = this.ctx.createBiquadFilter();
+        hp.type = 'highpass';
+        hp.frequency.value = 780;
+        const bp = this.ctx.createBiquadFilter();
+        bp.type = 'bandpass';
+        bp.frequency.value = 2600;
+        bp.Q.value = 0.6;
+        const g = this.ctx.createGain();
+        g.gain.value = 0.0001;
+        this.chain([src, hp, bp, g]);
+        src.start(0, Math.random() * 0.9);
+        this.hydSrc = src;
+        this.hydGain = g;
+      }
+      const peak = 0.03 + v * 0.12;
+      this.hydGain!.gain.setTargetAtTime(peak, this.ctx.currentTime, 0.45);
+    } catch { /* noop */ }
+  }
+
+  /** Fade out and stop the geyser hiss loop. */
+  stopGeyser(): void {
+    try {
+      const src = this.hydSrc, g = this.hydGain;
+      this.hydSrc = null;
+      this.hydGain = null;
+      this.hydLevel = 0;
+      if (!this.ctx || !src || !g) return;
+      g.gain.setTargetAtTime(0.0001, this.ctx.currentTime, 0.4);
+      window.setTimeout(() => {
+        try { src.stop(); } catch { /* noop */ }
+      }, 1400);
+    } catch { /* noop */ }
+  }
+
   /** Thunder clap: deep filtered noise rumble with a slow roll-off. */
   thunder(far: number): void {
     try {
@@ -574,6 +631,27 @@ export class HyperionAudio {
         g2.gain.exponentialRampToValueAtTime(0.0001, t1 + 1.5);
         this.chain([src2, lp2, g2]);
       }
+    } catch { /* noop */ }
+  }
+
+  /** Pay'n'Spray: airy aerosol hiss + two jingles when the respray completes. */
+  spray(): void {
+    try {
+      if (!this.ctx || !this.master) return;
+      const t0 = this.ctx.currentTime;
+      // Aerosol hiss (bandpassed noise, sweeping)
+      const src = this.noise(0.9), bp = this.filter('bandpass', 900, 2.5), g = this.ctx.createGain();
+      if (!src || !bp) return;
+      bp.frequency.setValueAtTime(600, t0);
+      bp.frequency.linearRampToValueAtTime(2600, t0 + 0.5);
+      bp.frequency.linearRampToValueAtTime(900, t0 + 0.85);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(0.14, t0 + 0.05);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.9);
+      this.chain([src, bp, g]);
+      // Completion jingle: two quick major notes (absolute-time scheduled)
+      this.radioNote('square', 660, t0 + 0.55, 0.12, 0.07, 4200);
+      this.radioNote('square', 990, t0 + 0.7, 0.22, 0.07, 4200);
     } catch { /* noop */ }
   }
 
@@ -740,6 +818,7 @@ export class HyperionAudio {
     try { this.stopEngine(); } catch { /* noop */ }
     try { this.stopSiren(); } catch { /* noop */ }
     try { this.stopRain(); } catch { /* noop */ }
+    try { this.stopGeyser(); } catch { /* noop */ }
     try { this.stopRadio(); } catch { /* noop */ }
     try { this.jetThrust(false); } catch { /* noop */ }
     try { this.stopHeli(); } catch { /* noop */ }

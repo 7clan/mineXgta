@@ -176,7 +176,7 @@ export class Player {
       const target = wish.multiplyScalar(speed);
       if (active) {
         if (input.isDown('Space')) target.y += speed * 0.9;
-        if (input.isDown('KeyC') || input.isDown('ShiftLeft')) target.y -= speed * 0.9;
+        if (input.isDown('KeyC')) target.y -= speed * 0.9;
       }
       const k = 1 - Math.exp(-9 * dt);
       this.vel.lerp(target, k);
