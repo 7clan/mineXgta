@@ -31,6 +31,7 @@ import {
   buildSky,
   rayBox,
   updateClouds,
+  type SkyUniforms,
 } from './game-utils';
 import { ITEMS, makeBlockMaterial, makeTNTMaterials } from './items';
 import { AimHit, HudState, ItemId, ItemStack, World } from './types';
@@ -41,6 +42,15 @@ export interface GameCallbacks {
   onToast: (msg: string) => void;
   onDeath: () => void;
 }
+
+const DAY_CYCLE = 300; // seconds of game-time for a full 24h cycle
+// Palette anchors for the day/night cycle.
+const DUSK_SUN = new THREE.Color(0xff8a3c);
+const NIGHT_TOP = new THREE.Color(0x060912);
+const NIGHT_MID = new THREE.Color(0x0d1424);
+const NIGHT_BOTTOM = new THREE.Color(0x141d33);
+const DUSK_ORANGE = new THREE.Color(0xff9a4a);
+const NIGHT_FOG = new THREE.Color(0x0a0f1a);
 
 interface PlacedBlock {
   mesh: THREE.Mesh;
@@ -70,6 +80,7 @@ export class HyperionGame implements World {
   private scene = new THREE.Scene();
   private camera: THREE.PerspectiveCamera;
   private sun: THREE.DirectionalLight;
+  private hemi: THREE.HemisphereLight;
   private destruction = new DestructionSystem();
   private input = new Input();
   city: City;
@@ -111,6 +122,14 @@ export class HyperionGame implements World {
   private frameN = 0;
   private fpsT = 0;
   private qualityTier = 0;
+  private skyUniforms: SkyUniforms | null = null;
+  private starsMat: THREE.PointsMaterial | null = null;
+  private timeT = 0.72; // 0 = midnight, 0.25 sunrise, 0.5 noon, 0.75 sunset
+  private policeTimer = 0;
+  private sirenOn = false;
+  private policeWarned = false;
+  private hitMark = 0;
+  private clockStr = '17:20';
   private raycaster = new THREE.Raycaster();
   private tmpV = new THREE.Vector3();
   private tmpV2 = new THREE.Vector3();
@@ -138,8 +157,8 @@ export class HyperionGame implements World {
     this.scene.fog = new THREE.Fog(0xe4c39a, 130, 620);
 
     // Lighting — golden hour
-    const hemi = new THREE.HemisphereLight(0xcfe0f2, 0x8a7a5a, 0.75);
-    this.scene.add(hemi);
+    this.hemi = new THREE.HemisphereLight(0xcfe0f2, 0x8a7a5a, 0.75);
+    this.scene.add(this.hemi);
     this.sun = new THREE.DirectionalLight(0xffd9ae, 2.6);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
@@ -157,7 +176,9 @@ export class HyperionGame implements World {
     this.scene.environmentIntensity = 0.35;
     pmrem.dispose();
 
-    buildSky(this.scene, makeSunSprite(), makeCloudTexture());
+    const built = buildSky(this.scene, makeSunSprite(), makeCloudTexture());
+    this.skyUniforms = built.skyUniforms;
+    this.starsMat = built.starsMat;
 
     this.city = new City(this.scene, this.destruction);
     this.city.onCollapseStart = (b) => {
@@ -484,6 +505,7 @@ export class HyperionGame implements World {
   }
 
   damagePlayer(n: number): void {
+    if (n > 0) this.hitMark++;
     this.player.damage(n);
     this.audio.hurt();
     this.hurtVignette = 1;
@@ -588,6 +610,7 @@ export class HyperionGame implements World {
       const car = this.vehicles.cars.find((c) => c.id === hit.carId);
       if (car && car.state !== 'wrecked') {
         car.health -= 9;
+        this.hitMark++;
         this.audio.thud(0.1);
         this.particles.spawnDebris(hit.point, 3, new THREE.Color(0x999999), 0.6);
         if (car.health <= 0) this.vehicles.ignite(car);
@@ -596,6 +619,7 @@ export class HyperionGame implements World {
     }
     if (hit.kind === 'npc') {
       if (this.npcs.hitNear(hit.point, 1.5)) {
+        this.hitMark++;
         this.addScore(15);
         this.audio.thud(0.1);
         this.toast('Pedestrian down');
@@ -660,19 +684,40 @@ export class HyperionGame implements World {
   private placeBlock(type: ItemId): void {
     const hit = this.aimRaycast();
     if (!hit || hit.kind === 'car' || hit.kind === 'npc' || hit.kind === 'tnt') return;
-    const center = this.snapPlace(hit.point, hit.normal);
-    if (!center || center.y <= BEDROCK_Y - 1) return;
-    const key = `${Math.floor(center.x)},${Math.floor(center.y)},${Math.floor(center.z)}`;
-    if (this.placed.has(key) || !this.canPlaceAt(center)) return;
+    const primary = this.snapPlace(hit.point, hit.normal);
+    if (!primary) return;
+    // Feet-friendly retries: direct cell, then one cell horizontally along the aim
+    // direction (in front of the player), then one along the face normal.
+    const candidates = [primary];
+    const aimFlat = new THREE.Vector3(hit.point.x - this.player.pos.x, 0, hit.point.z - this.player.pos.z);
+    if (aimFlat.lengthSq() > 1e-6) {
+      aimFlat.normalize();
+      const flat = new THREE.Vector3(Math.round(aimFlat.x), 0, Math.round(aimFlat.z));
+      if (flat.x === 0 && flat.z === 0) flat.x = 1;
+      candidates.push(primary.clone().add(flat));
+    }
+    candidates.push(primary.clone().add(hit.normal.clone().round()));
+    let placedAt: THREE.Vector3 | null = null;
+    let key = '';
+    for (const cand of candidates) {
+      if (cand.y <= BEDROCK_Y - 1) continue;
+      const k = `${Math.floor(cand.x)},${Math.floor(cand.y)},${Math.floor(cand.z)}`;
+      if (this.placed.has(k)) continue;
+      if (!this.canPlaceAt(cand)) continue;
+      placedAt = cand;
+      key = k;
+      break;
+    }
+    if (!placedAt) return;
     const geo = new RoundedBoxGeometry(0.97, 0.97, 0.97, 2, 0.07);
     const mesh = new THREE.Mesh(geo, makeBlockMaterial(type === 'dirt' ? 'dirt' : type === 'cobblestone' ? 'cobblestone' : type === 'planks' ? 'planks' : 'glass'));
-    mesh.position.copy(center);
+    mesh.position.copy(placedAt);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     this.scene.add(mesh);
     this.placed.set(key, {
       mesh,
-      aabb: new THREE.Box3().setFromCenterAndSize(center.clone(), new THREE.Vector3(1, 1, 1)),
+      aabb: new THREE.Box3().setFromCenterAndSize(placedAt.clone(), new THREE.Vector3(1, 1, 1)),
       type,
     });
     this.placedOrder.push(key);
@@ -978,6 +1023,11 @@ export class HyperionGame implements World {
     this.heat = Math.max(0, this.heat - dt * 2.5);
     this.stars = this.heat <= 0 ? 0 : Math.min(5, 1 + Math.floor(this.heat / 150));
 
+    // Police dispatch + day/night
+    this.updatePolice(dt);
+    this.timeT = (this.timeT + dt / DAY_CYCLE) % 1;
+    this.updateDayNight();
+
     // Hints
     this.hintT -= dt;
     if (this.hintT <= 0) {
@@ -991,6 +1041,73 @@ export class HyperionGame implements World {
 
     this.hurtVignette = Math.max(0, this.hurtVignette - dt * 1.6);
     this.shakeT = Math.max(0, this.shakeT - dt * 2.2);
+  }
+
+  // ------------------------------------------------------------------ police
+  private updatePolice(dt: number): void {
+    const want = this.stars >= 2 ? Math.min(4, this.stars - 1) : 0;
+    const active = this.vehicles.cars.filter((c) => c.state === 'police').length;
+    if (active < want) {
+      this.policeTimer -= dt;
+      if (this.policeTimer <= 0) {
+        this.vehicles.spawnPolice(this.playerPos());
+        this.policeTimer = 5;
+        if (!this.policeWarned) {
+          this.policeWarned = true;
+          this.toast('WANTED — police units responding!');
+        }
+      }
+    } else if (active > want) {
+      this.vehicles.despawnExtraPolice(want);
+      this.policeTimer = 4;
+    }
+    if (want === 0) this.policeWarned = false;
+    const pp = this.playerPos();
+    const near = this.vehicles.cars.some((c) => c.state === 'police' && c.group.position.distanceTo(pp) < 95);
+    if (near && !this.sirenOn) {
+      this.audio.sirenLoop();
+      this.sirenOn = true;
+    } else if (!near && this.sirenOn) {
+      this.audio.stopSiren();
+      this.sirenOn = false;
+    }
+  }
+
+  // ------------------------------------------------------------------ day/night
+  private updateDayNight(): void {
+    const t = this.timeT;
+    const ang = (t - 0.25) * Math.PI * 2; // 0.25 => sunrise
+    const day = Math.max(0, Math.sin(ang));
+    const night = 1 - Math.min(1, day / 0.22);
+    const dusk = Math.max(0, 1 - Math.abs(day - 0.1) / 0.12);
+    const p = this.playerPos();
+    const sx = Math.cos(ang) * 150;
+    const sy = Math.sin(ang) * 115;
+
+    this.sun.position.set(p.x + sx, p.y + Math.max(sy, -30), p.z - 60);
+    this.sun.target.position.set(p.x, p.y, p.z);
+    this.sun.target.updateMatrixWorld();
+    this.sun.intensity = 0.08 + day * 2.7;
+    this.sun.color.setHex(0xffd9ae).lerp(DUSK_SUN, Math.min(1, dusk * 1.3));
+    this.hemi.intensity = 0.14 + day * 0.62;
+
+    if (this.skyUniforms) {
+      this.skyUniforms.top.value.setHex(0x54779e).lerp(NIGHT_TOP, night);
+      this.skyUniforms.mid.value.setHex(0xc4a878).lerp(NIGHT_MID, night);
+      this.skyUniforms.bottom.value.setHex(0xf0c58c).lerp(NIGHT_BOTTOM, night).lerp(DUSK_ORANGE, Math.min(1, dusk * 0.55));
+    }
+    if (this.starsMat) this.starsMat.opacity = night * 0.95;
+
+    const fog = this.scene.fog as THREE.Fog | null;
+    if (fog) {
+      fog.color.setHex(0xe4c39a).lerp(NIGHT_FOG, night);
+      fog.near = 130 - night * 45;
+      fog.far = 620 - night * 190;
+    }
+    this.city.applyNight(night);
+
+    const mins = Math.floor(t * 24 * 60);
+    this.clockStr = `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
   }
 
   private updateCamera(dt: number): void {
@@ -1091,6 +1208,9 @@ export class HyperionGame implements World {
       hurt: this.hurtVignette,
       debug: this.debugVisible,
       removedPerSecond: 0,
+      clock: this.clockStr,
+      hitMark: this.hitMark,
+      police: this.vehicles.cars.reduce((n, c) => (c.state === 'police' ? n + 1 : n), 0),
     };
     this.cb.onState(state);
     this.drawMinimap();
@@ -1164,7 +1284,7 @@ export class HyperionGame implements World {
       }
     }
     ctx.restore();
-    // player arrow
+    // Player arrow
     ctx.save();
     ctx.translate(w / 2, h / 2);
     ctx.fillStyle = '#ffffff';
@@ -1178,6 +1298,15 @@ export class HyperionGame implements World {
     ctx.fill();
     ctx.stroke();
     ctx.restore();
+    // Day/night clock chip
+    const nightNow = this.timeT < 0.23 || this.timeT > 0.79;
+    ctx.font = 'bold 12px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(w - 74, h - 22, 68, 17);
+    ctx.fillStyle = nightNow ? '#bcd0ff' : '#ffe9b0';
+    ctx.fillText(`${nightNow ? '☾' : '☀'} ${this.clockStr}`, w - 9, h - 9);
+    ctx.textAlign = 'left';
   }
 
   // ------------------------------------------------------------------ controls from React

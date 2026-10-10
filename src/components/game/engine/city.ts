@@ -58,6 +58,8 @@ export class City {
   private innerMat: THREE.MeshStandardMaterial;
   private rubbleMat: THREE.MeshStandardMaterial;
   private rng = mulberry32(1337);
+  nightMaterials: THREE.MeshStandardMaterial[] = [];
+  private headMat: THREE.MeshStandardMaterial | null = null;
   private disposables: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
   onCollapseStart?: (b: BuildingRec) => void;
   onCollapseDust?: (pos: THREE.Vector3, radius: number) => void;
@@ -340,6 +342,7 @@ export class City {
       metalness: glassy ? 0.55 : 0.04,
       side: THREE.DoubleSide,
     });
+    this.nightMaterials.push(mat);
     this.disposables.push(geo, mat);
     const mesh = new THREE.Mesh(geo, mat);
     mesh.castShadow = true;
@@ -488,6 +491,7 @@ export class City {
       emissiveIntensity: 1.6,
       roughness: 0.4,
     });
+    this.headMat = headMat;
     this.disposables.push(poleGeo, headGeo, poleMat, headMat);
 
     const spots: Array<{ x: number; z: number; flip: boolean }> = [];
@@ -576,6 +580,14 @@ export class City {
       if (ray.intersectsBox(box) || box.containsPoint(end) || box.containsPoint(ray.origin)) out.push(b);
     }
     return out;
+  }
+
+  // ------------------------------------------------------------------ night
+  /** Adjust window + streetlight emissives for the day/night cycle (night: 0..1). */
+  applyNight(night: number): void {
+    const emiss = 0.55 + night * 1.05;
+    for (const m of this.nightMaterials) m.emissiveIntensity = emiss;
+    if (this.headMat) this.headMat.emissiveIntensity = 0.45 + night * 2.8;
   }
 
   // ------------------------------------------------------------------ collapse

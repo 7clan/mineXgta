@@ -147,3 +147,40 @@ body {
 .hyperion-toast {
   animation: hyperion-toast-fade 2.4s forwards;
 }
+
+@keyframes hyperion-hitmark-pop {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.7);
+  }
+  18% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.9);
+  }
+}
+
+.hyperion-hitmark {
+  animation: hyperion-hitmark-pop 0.5s forwards;
+}
+
+@keyframes hyperion-police-blink {
+  0%,
+  49% {
+    border-color: rgba(248, 113, 113, 0.85);
+  }
+  50%,
+  100% {
+    border-color: rgba(96, 165, 250, 0.85);
+  }
+}
+
+.hyperion-policechip {
+  animation: hyperion-police-blink 0.9s infinite;
+}

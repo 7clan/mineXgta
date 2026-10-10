@@ -89,3 +89,29 @@ Stage Summary:
 - Known env-only artifact: headless-software-renderer compositor shows a stale y-flipped minimap rect in screenshots — framebuffer readback proves it is NOT in the render (real GPU browsers unaffected).
 - Performance: heavy scene (~1.5M tris + 320k-tri ground); adaptive quality lowers pixelRatio/shadows if fps<36. Headless software rendering runs ~4-20fps; real GPU preview expected much faster.
 - Follow-ups for next cycles: place-block rejection when aiming at own feet (correct but could auto-retry adjacent cell), car radio/missions/police response to 5 stars, save/load world edits to localStorage, mobile touch controls, texture atlas to cut draw calls.
+
+---
+
+Task ID: cron-review-1 (2026-10-10)
+Agent: Z.ai Code (webDevReview cycle 1)
+Task: Status assessment, QA, then feature development: police pursuit, day/night, HUD polish
+
+Work Log:
+- QA baseline: agent-browser smoke test — game loads, PLAY works, 34 cars / 26 NPCs / 175 buildings, zero console errors, dev.log clean. Status: STABLE → proceeded to feature development.
+- Feature: POLICE PURSUIT SYSTEM
+  - vehicles.ts: new 'police' car type (white cruiser, black hood/trunk stripes, red/blue lightbar meshes) + 'police' state; spawnPolice() spawns on roads 90-150m from player; despawnExtraPolice() removes farthest units; drivePolice() pursuit AI — seek player (yaw seek + speed curve 30 m/s), building-collision probe with stuck detection → reverse-unstick maneuver, shoves civilian traffic aside (traffic→parked), rams the player on foot (7 dmg + shake + thud); lightbar flashes red/blue at 7Hz via emissiveIntensity; hook into update() (state==='police' && not player-driven); police cars are enterable (steal a cop car), burn/explode/fall-into-holes like all cars.
+  - game.ts updatePolice(): star-gated dispatch — stars≥2 → min(4, stars-1) units, 5s spawn interval, "WANTED — police units responding!" toast once per escalation; despawn when stars drop; siren loop managed by distance (<95m) via audio.sirenLoop()/stopSiren().
+  - audio.ts: sirenLoop() — triangle osc 720Hz wailed by a 0.42Hz sine LFO (±210Hz via AudioParam modulation), 0.042 gain with attack ramp; stopSiren() fades + tears down; wired into dispose().
+- Feature: DAY/NIGHT CYCLE (300s game-time per 24h; starts 17:20 golden hour)
+  - game-utils.ts buildSky() refactor: returns { skyUniforms, starsMat }; added 420-point night starfield (upper-hemisphere, opacity animated).
+  - game.ts updateDayNight(): sun arc (position/intensity 0.08..2.78/color warm→dusk orange), hemi 0.14..0.76, sky shader uniforms lerped day↔night palettes with dusk orange boost on the bottom band, fog color + near/far night compression, stars opacity, city.applyNight() (window emissive 0.55→1.6, streetlights 0.45→3.25), 24h clock string for HUD/minimap.
+  - city.ts: nightMaterials[] registry (facade mats) + headMat ref + applyNight(night).
+- Fix: block placement auto-retry — candidates = [direct cell, one cell along horizontal aim direction (feet-friendly), one along face normal]; verified placing while looking straight down at feet now succeeds.
+- Styling/HUD: hit-marker X (SVG, remount-per-hit via key → pop animation, increments on car melee / NPC knock / player damage), 🚓 POLICE ×N chip with red/blue blinking border, emerald DEPTH −N M chip when underground, quick-hints chip (E/F5/F/F3), minimap day/night clock chip (☀/☾ + HH:MM, drawn per frame).
+- globals.css: hyperion-hitmark-pop + hyperion-police-blink keyframes.
+- Verification: lint 0 problems, tsc 0 errors; agent-browser QA — 4-star chaos spawned police (lightbar 2 meshes, pursuit closes distance over game-time), dusk screenshot shows stars + lit windows + glowing streetlights, midnight forced → dark sky/stars/☾ 00:00 clock, hitMark 0→1 on damage, feet placement placed=1 dirt 64→63, POLICE chip + hints chip + clock chip all render.
+
+Stage Summary:
+- New systems this cycle: police pursuit (star-gated, sirens, lightbars, ramming, unstick AI) + full day/night cycle + HUD detail pass (hit marker, police/depth/hints/clock chips) + placement retry fix. All browser-verified; codebase stays lint/tsc clean.
+- Risks: police AI can corner-camp the player at high stars (mitigate later with lose-them-line-of-sight cooldown); day/night changes shadow direction every frame (cheap, but shadowmap updates could cost on low-end GPUs — adaptive quality already throttles pixelRatio/shadows).
+- Next-cycle priorities (suggested): (1) car radio — procedural chiptune while driving, (2) chaos missions/contracts ("wreck 3 cars in 60s") with golden-apple rewards, (3) save/load placed blocks + carve stats to localStorage, (4) reduce draw calls via material atlas, (5) mobile touch controls.

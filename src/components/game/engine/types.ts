@@ -56,6 +56,9 @@ export interface HudState {
   hurt: number;
   debug: boolean;
   removedPerSecond: number;
+  clock: string;
+  hitMark: number;
+  police: number;
 }
 
 export const HUD_INITIAL: HudState = {
@@ -78,6 +81,9 @@ export const HUD_INITIAL: HudState = {
   hurt: 0,
   debug: false,
   removedPerSecond: 0,
+  clock: '17:20',
+  hitMark: 0,
+  police: 0,
 };
 
 /**

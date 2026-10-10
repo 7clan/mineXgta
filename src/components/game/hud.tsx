@@ -148,6 +148,20 @@ export function Hud(props: HudProps) {
         </div>
       )}
 
+      {/* Hit marker — remounts per hit via key, replaying the pop animation */}
+      {state.playing && !state.dead && state.hitMark > 0 && (
+        <div key={state.hitMark} className="hyperion-hitmark absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+          <svg width="26" height="26" viewBox="0 0 26 26">
+            <g stroke="#ffffff" strokeWidth="2.6" strokeLinecap="round">
+              <line x1="4" y1="4" x2="10" y2="10" />
+              <line x1="22" y1="4" x2="16" y2="10" />
+              <line x1="4" y1="22" x2="10" y2="16" />
+              <line x1="22" y1="22" x2="16" y2="16" />
+            </g>
+          </svg>
+        </div>
+      )}
+
       {/* Stars — GTA chaos level (top right) */}
       {state.playing && (
         <div className="absolute right-4 top-4 flex flex-col items-end gap-1">
@@ -155,6 +169,11 @@ export function Hud(props: HudProps) {
           <div className="rounded bg-black/55 px-2 py-0.5 text-right text-[11px] font-bold tracking-widest text-white/90">
             CHAOS {state.score}
           </div>
+          {state.police > 0 && (
+            <div className="hyperion-policechip mt-1 rounded border border-red-400/40 bg-black/60 px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.18em] text-red-300">
+              🚓 Police ×{state.police}
+            </div>
+          )}
           {state.driving && (
             <div className="mt-1 rounded bg-black/55 px-3 py-1 text-right">
               <div className="text-[10px] uppercase tracking-widest text-amber-300/90">{state.driving.name}</div>
@@ -164,6 +183,25 @@ export function Hud(props: HudProps) {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Depth chip — underground mining readout */}
+      {state.playing && !state.dead && state.depth > 0 && (
+        <div className="absolute bottom-4 right-4 rounded border border-emerald-400/30 bg-black/65 px-3 py-1.5 text-right">
+          <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-300/90">Depth</div>
+          <div className="text-lg font-black leading-none text-emerald-200">
+            −{state.depth}
+            <span className="ml-1 text-[10px] font-bold text-emerald-400/70">M</span>
+          </div>
+        </div>
+      )}
+
+      {/* Quick-hints chip (bottom right, above depth) */}
+      {state.playing && !state.dead && state.depth <= 0 && (
+        <div className="absolute bottom-6 right-4 rounded bg-black/45 px-2.5 py-1 text-right text-[10px] font-bold leading-relaxed tracking-wide text-white/55">
+          <div>E INVENTORY · F5 VIEW</div>
+          <div>F CAR · F3 DEBUG</div>
         </div>
       )}
 

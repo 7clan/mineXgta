@@ -2,6 +2,13 @@ import * as THREE from 'three';
 
 /** Shared helpers for the game orchestrator. */
 
+export interface SkyUniforms {
+  [uniform: string]: { value: THREE.Color };
+  top: { value: THREE.Color };
+  mid: { value: THREE.Color };
+  bottom: { value: THREE.Color };
+}
+
 export const HUD_EMIT_INTERVAL = 0.125;
 export const MINIMAP_SPAN = 480; // world meters covered by the minimap base image
 export const SHAFT_LIFE = 1; // reserved for future shaft recycling tuning
@@ -53,18 +60,23 @@ export function rayBox(
   return { point, t: tmin, normal };
 }
 
-/** Golden-hour sky dome, sun sprite and drifting clouds. */
-export function buildSky(scene: THREE.Scene, sunTex: THREE.Texture, cloudTex: THREE.Texture): void {
+/** Golden-hour sky dome, sun sprite, drifting clouds and night stars. */
+export function buildSky(
+  scene: THREE.Scene,
+  sunTex: THREE.Texture,
+  cloudTex: THREE.Texture
+): { skyUniforms: SkyUniforms; starsMat: THREE.PointsMaterial } {
+  const skyUniforms: SkyUniforms = {
+    top: { value: new THREE.Color(0x54779e) },
+    mid: { value: new THREE.Color(0xc4a878) },
+    bottom: { value: new THREE.Color(0xf0c58c) },
+  };
   const skyGeo = new THREE.SphereGeometry(1100, 24, 14);
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
     fog: false,
-    uniforms: {
-      top: { value: new THREE.Color(0x54779e) },
-      mid: { value: new THREE.Color(0xc4a878) },
-      bottom: { value: new THREE.Color(0xf0c58c) },
-    },
+    uniforms: skyUniforms,
     vertexShader: /* glsl */ `
       varying vec3 vPos;
       void main() {
@@ -87,6 +99,41 @@ export function buildSky(scene: THREE.Scene, sunTex: THREE.Texture, cloudTex: TH
   sky.frustumCulled = false;
   scene.add(sky);
 
+  // Night stars: a sparse sphere of tiny points (opacity animated by the cycle).
+  const starCount = 420;
+  const starPos = new Float32Array(starCount * 3);
+  const rng = (seed: number) => {
+    let a = seed;
+    return () => {
+      a = (a * 16807) % 2147483647;
+      return a / 2147483647;
+    };
+  };
+  const r = rng(777);
+  for (let i = 0; i < starCount; i++) {
+    // Upper-hemisphere random directions at sky radius.
+    const az = r() * Math.PI * 2;
+    const el = 0.08 + r() * 1.35;
+    const rad = 1050;
+    starPos[i * 3] = Math.cos(az) * Math.cos(el) * rad;
+    starPos[i * 3 + 1] = Math.sin(el) * rad;
+    starPos[i * 3 + 2] = Math.sin(az) * Math.cos(el) * rad;
+  }
+  const starGeo = new THREE.BufferGeometry();
+  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+  const starsMat = new THREE.PointsMaterial({
+    color: 0xcfd8ff,
+    size: 2.6,
+    sizeAttenuation: false,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    fog: false,
+  });
+  const stars = new THREE.Points(starGeo, starsMat);
+  stars.frustumCulled = false;
+  scene.add(stars);
+
   // Sun sprite near the horizon
   const sunMat = new THREE.SpriteMaterial({ map: sunTex, transparent: true, depthWrite: false, fog: false });
   const sun = new THREE.Sprite(sunMat);
@@ -96,14 +143,6 @@ export function buildSky(scene: THREE.Scene, sunTex: THREE.Texture, cloudTex: TH
 
   // Clouds
   const cloudMat = new THREE.SpriteMaterial({ map: cloudTex, transparent: true, opacity: 0.5, depthWrite: false, fog: false });
-  const rng = (seed: number) => {
-    let a = seed;
-    return () => {
-      a = (a * 16807) % 2147483647;
-      return a / 2147483647;
-    };
-  };
-  const r = rng(12345);
   for (let i = 0; i < 14; i++) {
     const c = new THREE.Sprite(cloudMat);
     c.scale.set(120 + r() * 160, 40 + r() * 50, 1);
@@ -113,6 +152,7 @@ export function buildSky(scene: THREE.Scene, sunTex: THREE.Texture, cloudTex: TH
     if (!scene.userData.clouds) scene.userData.clouds = [] as THREE.Sprite[];
     (scene.userData.clouds as THREE.Sprite[]).push(c);
   }
+  return { skyUniforms, starsMat };
 }
 
 /** Drift clouds; call once per frame. */

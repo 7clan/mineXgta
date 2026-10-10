@@ -8,8 +8,8 @@ import { World } from './types';
  * Traffic AI follows right-hand lanes on the road grid, brakes for cars/players,
  * turns at intersections. Cars are enterable, ignitable (flint & steel) and explode.
  */
-export type CarType = 'sedan' | 'sports' | 'suv' | 'taxi';
-export type CarState = 'traffic' | 'parked' | 'player' | 'burning' | 'wrecked' | 'falling';
+export type CarType = 'sedan' | 'sports' | 'suv' | 'taxi' | 'police';
+export type CarState = 'traffic' | 'parked' | 'player' | 'burning' | 'wrecked' | 'falling' | 'police';
 
 export interface Car {
   id: number;
@@ -32,6 +32,10 @@ export interface Car {
   color: number;
   name: string;
   smokeAcc: number;
+  lightbar: THREE.Mesh[];
+  flashT: number;
+  stuckT: number;
+  reverseT: number;
 }
 
 const DIR_VEC: Array<[number, number]> = [
@@ -66,7 +70,7 @@ export class Vehicles {
     return g;
   }
 
-  private buildMesh(type: CarType, color: number): { group: THREE.Group; wheels: THREE.Mesh[] } {
+  private buildMesh(type: CarType, color: number): { group: THREE.Group; wheels: THREE.Mesh[]; lightbar: THREE.Mesh[] } {
     const group = new THREE.Group();
     const paint = new THREE.MeshStandardMaterial({ color, roughness: 0.28, metalness: 0.65 });
     const dark = new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.55, metalness: 0.3 });
@@ -119,6 +123,27 @@ export class Vehicles {
       group.add(sign);
     }
 
+    const lightbar: THREE.Mesh[] = [];
+    if (type === 'police') {
+      // Black door panels + trunk stripe over white paint
+      const stripeMat = new THREE.MeshStandardMaterial({ color: 0x101215, roughness: 0.4, metalness: 0.5 });
+      const hood = new THREE.Mesh(this.bodyGeo(dims.w * 0.9, 0.04, 1.1, 0.02), stripeMat);
+      hood.position.set(0, dims.ride + dims.h / 2 + 0.03, 1.45);
+      const trunk = new THREE.Mesh(this.bodyGeo(dims.w * 0.9, 0.04, 0.9, 0.02), stripeMat);
+      trunk.position.set(0, dims.ride + dims.h / 2 + 0.03, -1.7);
+      group.add(hood, trunk);
+      // Lightbar: red + blue flashing modules
+      const red = new THREE.MeshStandardMaterial({ color: 0x5a0806, emissive: 0xff2418, emissiveIntensity: 2 });
+      const blue = new THREE.MeshStandardMaterial({ color: 0x061a5a, emissive: 0x2a5aff, emissiveIntensity: 0.2 });
+      const r = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.13, 0.28), red);
+      const b = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.13, 0.28), blue);
+      const barY = dims.ride + dims.h / 2 + dims.cabinH + 0.04;
+      r.position.set(-0.3, barY, -0.2);
+      b.position.set(0.3, barY, -0.2);
+      group.add(r, b);
+      lightbar.push(r, b);
+    }
+
     const wheels: THREE.Mesh[] = [];
     const tireGeo = new THREE.CylinderGeometry(dims.wheel, dims.wheel, 0.26, 14);
     tireGeo.rotateZ(Math.PI / 2);
@@ -139,7 +164,7 @@ export class Vehicles {
       group.add(wm);
       wheels.push(wm);
     }
-    return { group, wheels };
+    return { group, wheels, lightbar };
   }
 
   spawnTraffic(n: number): void {
@@ -180,8 +205,9 @@ export class Vehicles {
   private makeCar(type: CarType, state: CarState): Car {
     const palette = [0xc23b22, 0x22262b, 0xd8d8dc, 0x8f9aa4, 0xb7791f, 0x37545c, 0x6b2f26, 0xe0dcd2, 0x4a5d23];
     const taxiColor = 0xf7c531;
-    const color = type === 'taxi' ? taxiColor : palette[Math.floor(this.rng() * palette.length)];
-    const { group, wheels } = this.buildMesh(type, color);
+    const policeColor = 0xe8e8ec;
+    const color = type === 'taxi' ? taxiColor : type === 'police' ? policeColor : palette[Math.floor(this.rng() * palette.length)];
+    const { group, wheels, lightbar } = this.buildMesh(type, color);
     this.scene.add(group);
     const car: Car = {
       id: this.nextId++,
@@ -205,12 +231,18 @@ export class Vehicles {
       name:
         type === 'taxi'
           ? 'Taxi'
-          : type === 'sports'
-            ? 'Comet Sports'
-            : type === 'suv'
-              ? 'Cavalcade SUV'
-              : 'Washington Sedan',
+          : type === 'police'
+            ? 'Police Cruiser'
+            : type === 'sports'
+              ? 'Comet Sports'
+              : type === 'suv'
+                ? 'Cavalcade SUV'
+                : 'Washington Sedan',
       smokeAcc: 0,
+      lightbar,
+      flashT: 0,
+      stuckT: 0,
+      reverseT: 0,
     };
     this.cars.push(car);
     return car;
@@ -236,6 +268,128 @@ export class Vehicles {
     }
     car.yawVis = car.yaw;
     car.group.rotation.y = car.yaw;
+  }
+
+  /** Spawn a police cruiser on a road ~90-150m from the player (pursuit AI). */
+  spawnPolice(playerPos: THREE.Vector3): Car | null {
+    for (let tries = 0; tries < 14; tries++) {
+      const vertical = this.rng() < 0.5;
+      const road = (Math.floor(this.rng() * (GRID_HALF * 2 + 1)) - GRID_HALF) * BLOCK;
+      const dirSign = this.rng() < 0.5 ? 1 : -1;
+      let x: number;
+      let z: number;
+      if (vertical) {
+        x = road + (this.rng() < 0.5 ? LANE_OFF : -LANE_OFF);
+        z = playerPos.z + dirSign * (90 + this.rng() * 60);
+      } else {
+        z = road + (this.rng() < 0.5 ? LANE_OFF : -LANE_OFF);
+        x = playerPos.x + dirSign * (90 + this.rng() * 60);
+      }
+      if (Math.abs(x) > GRID_HALF * BLOCK - 8 || Math.abs(z) > GRID_HALF * BLOCK - 8) continue;
+      const car = this.makeCar('police', 'police');
+      car.group.position.set(x, 0, z);
+      const toP = playerPos.clone().sub(car.group.position);
+      car.yaw = Math.atan2(toP.x, toP.z);
+      car.yawVis = car.yaw;
+      car.group.rotation.y = car.yaw;
+      car.targetSpeed = 27;
+      return car;
+    }
+    return null;
+  }
+
+  /** Remove the farthest pursuit units beyond `keep`. */
+  despawnExtraPolice(keep: number): void {
+    const units = this.cars.filter((c) => c.state === 'police');
+    if (units.length <= keep) return;
+    units.sort((a, b) => b.group.position.distanceTo(this.playerRef) - a.group.position.distanceTo(this.playerRef));
+    for (let i = 0; i < units.length - keep; i++) {
+      const c = units[i];
+      this.scene.remove(c.group);
+      const idx = this.cars.indexOf(c);
+      if (idx >= 0) this.cars.splice(idx, 1);
+    }
+  }
+
+  /** Police pursuit: seek the player, shove traffic aside, ram, unstick by reversing. */
+  private drivePolice(car: Car, dt: number, world: World, target: THREE.Vector3): void {
+    const p = car.group.position;
+    // Flash the lightbar
+    car.flashT += dt;
+    const phase = Math.floor(car.flashT * 7) % 2;
+    if (car.lightbar.length === 2) {
+      (car.lightbar[0].material as THREE.MeshStandardMaterial).emissiveIntensity = phase === 0 ? 3.4 : 0.12;
+      (car.lightbar[1].material as THREE.MeshStandardMaterial).emissiveIntensity = phase === 1 ? 3.4 : 0.12;
+    }
+
+    const toT = target.clone().sub(p);
+    toT.y = 0;
+    const dist = toT.length();
+
+    if (car.reverseT > 0) {
+      car.reverseT -= dt;
+      car.speed = Math.max(car.speed - 18 * dt, -7);
+      car.yaw -= 1.25 * dt;
+      const heading = new THREE.Vector3(Math.sin(car.yaw), 0, Math.cos(car.yaw));
+      p.addScaledVector(heading, car.speed * dt);
+      car.group.rotation.y = car.yaw;
+      this.spinWheels(car, dt, car.speed);
+      return;
+    }
+
+    // Steer toward the player
+    const desiredYaw = Math.atan2(toT.x, toT.z);
+    let dy = desiredYaw - car.yaw;
+    while (dy > Math.PI) dy -= Math.PI * 2;
+    while (dy < -Math.PI) dy += Math.PI * 2;
+    car.yaw += dy * Math.min(1, (3.4 + Math.abs(car.speed) * 0.05) * dt);
+
+    const wantSpeed = dist > 14 ? 30 : Math.max(5, dist * 2.1);
+    car.speed += (wantSpeed - car.speed) * Math.min(1, 1.7 * dt);
+
+    // Move with building collision probe
+    const heading = new THREE.Vector3(Math.sin(car.yaw), 0, Math.cos(car.yaw));
+    const next = p.clone().addScaledVector(heading, car.speed * dt);
+    const probe = next.clone();
+    probe.y = 1;
+    const before = probe.clone();
+    world.resolveCircleXZ(probe, 1.35, 0.2, 1.6);
+    if (probe.distanceToSquared(before) > 1e-6) {
+      p.x += (probe.x - before.x) * 0.55;
+      p.z += (probe.z - before.z) * 0.55;
+      car.stuckT += dt;
+      if (car.stuckT > 1.1) {
+        car.stuckT = 0;
+        car.reverseT = 0.75;
+      }
+      car.speed *= 0.85;
+    } else {
+      car.stuckT = Math.max(0, car.stuckT - dt);
+      p.copy(next);
+    }
+
+    // Shove civilian traffic aside (GTA-style PIT maneuver energy)
+    for (const o of this.cars) {
+      if (o === car || o.state === 'wrecked' || o.state === 'falling' || o.state === 'police') continue;
+      const d = o.group.position.distanceTo(p);
+      if (d < 3.2 && d > 0.01) {
+        const push = o.group.position.clone().sub(p).setY(0).normalize().multiplyScalar((3.2 - d) * 0.55);
+        o.group.position.add(push);
+        if (o.state === 'traffic') o.state = 'parked';
+        car.speed *= 0.94;
+      }
+    }
+
+    // Ram the player on foot
+    if (dist < 2.7 && Math.abs(car.speed) > 5) {
+      world.damagePlayer(7);
+      world.shake(0.4);
+      world.audio.thud(0.05);
+      car.speed *= 0.45;
+    }
+
+    car.group.rotation.y = car.yaw;
+    this.spinWheels(car, dt, car.speed);
   }
 
   nearest(pos: THREE.Vector3, maxDist: number): Car | null {
@@ -392,6 +546,9 @@ export class Vehicles {
 
       if (car.state === 'traffic' && car !== car0) {
         this.driveTraffic(car, dt, world, playerPos);
+      }
+      if (car.state === 'police' && car !== car0) {
+        this.drivePolice(car, dt, world, playerPos);
       }
       if (car.state !== 'wrecked') {
         p.y = Math.max(p.y, 0);

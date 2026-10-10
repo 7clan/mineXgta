@@ -16,6 +16,10 @@ export class HyperionAudio {
   private engOsc: OscillatorNode | null = null;
   private engSub: OscillatorNode | null = null;
   private engGain: GainNode | null = null;
+  // Persistent police-siren loop nodes.
+  private sirOsc: OscillatorNode | null = null;
+  private sirLfo: OscillatorNode | null = null;
+  private sirGain: GainNode | null = null;
 
   constructor() {}
 
@@ -294,6 +298,50 @@ export class HyperionAudio {
     } catch { /* noop */ }
   }
 
+  /** Police siren wail: triangle osc 720Hz modulated by a slow sine LFO (±210Hz, 0.42Hz). */
+  sirenLoop(): void {
+    try {
+      if (!this.ctx || !this.master || this.sirOsc) return;
+      const t0 = this.ctx.currentTime;
+      const o = this.osc('triangle', 720);
+      const lfo = this.osc('sine', 0.42);
+      const depth = this.ctx.createGain();
+      depth.gain.value = 210;
+      const g = this.ctx.createGain();
+      if (!o || !lfo) return;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.setTargetAtTime(0.042, t0, 0.25);
+      lfo.connect(depth);
+      depth.connect(o.frequency); // AudioParam modulation
+      this.chain([o, g]);
+      o.start(t0);
+      lfo.start(t0);
+      this.sirOsc = o;
+      this.sirLfo = lfo;
+      this.sirGain = g;
+    } catch { /* noop */ }
+  }
+
+  /** Fade out and stop the siren loop (when no units are near). */
+  stopSiren(): void {
+    try {
+      if (!this.ctx || !this.sirOsc || !this.sirGain) return;
+      const t = this.ctx.currentTime;
+      this.sirGain.gain.setTargetAtTime(0.0001, t, 0.12);
+      const o = this.sirOsc;
+      const lfo = this.sirLfo;
+      this.sirOsc = null;
+      this.sirLfo = null;
+      this.sirGain = null;
+      window.setTimeout(() => {
+        try {
+          o?.stop();
+          lfo?.stop();
+        } catch { /* noop */ }
+      }, 500);
+    } catch { /* noop */ }
+  }
+
   /** Stop the engine loop (call when exiting a vehicle). */
   stopEngine(): void {
     try {
@@ -321,6 +369,7 @@ export class HyperionAudio {
 
   dispose(): void {
     try { this.stopEngine(); } catch { /* noop */ }
+    try { this.stopSiren(); } catch { /* noop */ }
     try { if (this.ctx) void this.ctx.close(); } catch { /* noop */ }
     this.ctx = null; this.master = null; this.noiseBuf = null;
   }
