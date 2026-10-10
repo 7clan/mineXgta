@@ -25,7 +25,7 @@ import { NPCs } from './npcs';
 import { Particles } from './particles';
 import { Vehicles, Car } from './vehicles';
 import { HyperionAudio } from './audio';
-import { Missions } from './missions';
+import { Missions, CHAIN_GOAL } from './missions';
 import { Weather } from './weather';
 import { SAVE_TYPES, clearSave, hasSave, loadSave, writeSave } from './save';
 import {
@@ -141,6 +141,14 @@ export class HyperionGame implements World {
   private policeWarned = false;
   private evadeT = 0; // seconds since any cop last had eyes on the player
   private loseWarned = false;
+  /** Occlusion-aware LOS result, recomputed at 4 Hz. */
+  private copsSee = false;
+  private losT = 0;
+  /** Jetpack (contract-chain reward): fuel 0..1 + live thrust flag. */
+  jetFuel = 1;
+  private jetThrusting = false;
+  /** Ground wetness 0..1 — rises in rain, dries slowly after. */
+  private wetT = 0;
   private lightningT = 0;
   private hitMark = 0;
   private clockStr = '17:20';
@@ -162,6 +170,12 @@ export class HyperionGame implements World {
       this.addScore(def.rewardScore);
       for (const r of def.rewards) this.addItem(r.id as ItemId, r.count, true);
       this.audio.pickup();
+    },
+    chainReward: () => {
+      this.addItem('jetpack', 1, true);
+      this.audio.pickup();
+      this.addScore(80);
+      this.toast('🔥 CHAIN BONUS — Chaos Jetpack! Select it, hold RMB to thrust');
     },
     pickBuilding: () => this.pickContractBuilding(),
   });
@@ -886,6 +900,47 @@ export class HyperionGame implements World {
     }
   }
 
+  /** Jetpack: hold RMB with it selected to thrust. Consumes fuel; refills when idle. */
+  private updateJetpack(dt: number): void {
+    const it = this.selectedItem();
+    const armed = !!it && it.id === 'jetpack';
+    const wantThrust = armed && this.input.rightDown && this.jetFuel > 0 && !this.player.dead;
+    this.jetThrusting = wantThrust;
+    if (wantThrust) {
+      // Rocket burn: strong vertical accel + forward boost, both velocity-capped.
+      this.player.vel.y = Math.min(this.player.vel.y + 34 * dt, 13.5);
+      const fwd = this.tmpV.set(-Math.sin(this.player.yaw), 0, -Math.cos(this.player.yaw));
+      const horiz = Math.hypot(this.player.vel.x, this.player.vel.z);
+      if (horiz < 17) {
+        this.player.vel.x += fwd.x * 26 * dt;
+        this.player.vel.z += fwd.z * 26 * dt;
+      }
+      this.player.onGround = false;
+      this.jetFuel = Math.max(0, this.jetFuel - dt / 6.5); // ~6.5s of continuous burn
+      // Exhaust plume at the nozzles (behind/below the player).
+      const p = this.playerPos();
+      if (Math.random() < dt * 55) {
+        this.particles.firePuff(this.tmpV2.set(p.x - fwd.x * 0.35, p.y + 0.25, p.z - fwd.z * 0.35), 1);
+      }
+      if (Math.random() < dt * 22) {
+        this.particles.smokePuff(this.tmpV2.set(p.x - fwd.x * 0.6, p.y + 0.05, p.z - fwd.z * 0.6), 1, 0.45, 1.8);
+      }
+      this.audio.jetThrust(true);
+    } else {
+      if (this.jetFuel < 1) this.jetFuel = Math.min(1, this.jetFuel + dt / 9); // refill in ~9s
+      if (this.jetFuel >= 0.08) {
+        this.audio.jetThrust(false);
+      }
+    }
+    if (this.jetFuel <= 0 && armed && this.input.rightDown && !this.jetDryWarned) {
+      this.jetDryWarned = true;
+      this.audio.jetThrust(false);
+      this.toast('Jetpack fuel depleted — cooling down');
+    }
+    if (!this.input.rightDown || this.jetFuel > 0.12) this.jetDryWarned = false;
+  }
+  private jetDryWarned = false;
+
   private enterNearestCar(): void {
     if (this.drivingCar) {
       const car = this.drivingCar;
@@ -999,6 +1054,7 @@ export class HyperionGame implements World {
       if (this.input.leftClicked) this.audio.horn(0.05);
       this.audio.setEngine(Math.min(1, Math.abs(this.drivingCar.speed) / 30));
     } else {
+      this.updateJetpack(dt);
       const res = this.player.update(dt, this.input, this, true);
       if (res.landed && res.fallVel < -18) this.damagePlayer((Math.abs(res.fallVel) - 18) * 0.7);
       this.ensureStrata(this.player.pos.y);
@@ -1134,6 +1190,7 @@ export class HyperionGame implements World {
       inventory: this.inventory.map((s) => (s ? { ...s } : null)),
       placed,
       radio: this.audio.radioStation,
+      jetFuel: this.jetFuel,
     });
     this.hasSaveFile = ok;
     if (manual) this.toast(ok ? 'World saved' : 'Save failed (storage blocked?)');
@@ -1183,6 +1240,9 @@ export class HyperionGame implements World {
       this.setSlot(this.slot);
       if (typeof d.radio === 'number' && d.radio >= 0 && d.radio < HyperionAudio.STATIONS.length) {
         this.audio.radioStation = d.radio;
+      }
+      if (typeof d.jetFuel === 'number' && d.jetFuel >= 0 && d.jetFuel <= 1) {
+        this.jetFuel = d.jetFuel;
       }
       return true;
     } catch {
@@ -1264,6 +1324,11 @@ export class HyperionGame implements World {
     // Rain audio bed
     this.audio.setRain(this.weather.raining ? rainI : Math.min(rainI, 0.18));
 
+    // Ground wetness: soaks in ~4s of rain, dries out over ~35s after.
+    if (rainI > 0.35) this.wetT = Math.min(1, this.wetT + dt * 0.24);
+    else this.wetT = Math.max(0, this.wetT - dt * 0.028);
+    this.city.setWet(this.wetT);
+
     // Lightning sky spike (decayed here; updateDayNight adds the boost)
     if (this.lightningT > 0) this.lightningT -= dt;
 
@@ -1311,17 +1376,16 @@ export class HyperionGame implements World {
       this.loseWarned = false;
     }
 
-    // --- Line-of-sight / evade logic (fixes corner-camping at high stars) ---
+    // --- Line-of-sight / evade logic (occlusion-aware, fixes corner-camping) ---
     if (want > 0 && active > 0) {
-      const pp = this.playerPos();
-      let seen = false;
-      for (const c of units) {
-        const d = c.group.position.distanceTo(pp);
-        if (d < 68) {
-          seen = true;
-          break;
-        }
+      // Recompute occlusion-aware LOS at 4 Hz: a cop only "sees" the player when
+      // nothing blocks the segment cop-eye → player-eye (building AABB test).
+      this.losT -= dt;
+      if (this.losT <= 0) {
+        this.losT = 0.25;
+        this.copsSee = this.computeCopLOS(units);
       }
+      let seen = this.copsSee;
       // Tunnels are safe: cops can't see you from the surface once underground.
       if (this.playerPos().y < -2.5) seen = false;
       if (seen) {
@@ -1352,6 +1416,34 @@ export class HyperionGame implements World {
       this.audio.stopSiren();
       this.sirenOn = false;
     }
+  }
+
+  /** True when any pursuit unit within 68 m has an unblocked line to the player
+   *  (segment vs standing-building AABBs — hides behind skyscrapers actually works). */
+  private computeCopLOS(units: Car[]): boolean {
+    const eye = this.playerEyeY();
+    const target = this.tmpV2.set(this.playerPos().x, eye + 1.1, this.playerPos().z);
+    for (const c of units) {
+      if (c.state !== 'police') continue;
+      const origin = this.tmpV.set(c.group.position.x, c.group.position.y + 1.5, c.group.position.z);
+      const dist = origin.distanceTo(target);
+      if (dist >= 68 || dist < 4) return true; // point-blank always sees
+      const dir = target.clone().sub(origin).normalize();
+      let blocked = false;
+      for (const b of this.city.buildings) {
+        if (b.collapsed || b.collapsing) continue;
+        // Cheap reject: player outside the AABB expanded to the segment length.
+        const reach = Math.max(dist, 0) + 1;
+        if (target.x > b.aabb.min.x - reach && target.x < b.aabb.max.x + reach && target.z > b.aabb.min.z - reach && target.z < b.aabb.max.z + reach) {
+          if (rayBox(origin, dir, b.aabb, dist - 0.6)) {
+            blocked = true;
+            break;
+          }
+        }
+      }
+      if (!blocked) return true;
+    }
+    return false;
   }
 
   // ------------------------------------------------------------------ day/night
@@ -1532,8 +1624,10 @@ export class HyperionGame implements World {
       })(),
       radio: this.drivingCar ? HyperionAudio.STATIONS[this.audio.radioStation].name : null,
       hasSave: this.hasSaveFile,
-      weather: { state: this.weather.state, intensity: this.weather.intensity },
+      weather: { state: this.weather.state, intensity: this.weather.intensity, wet: this.wetT },
       evading: this.stars >= 2 && this.evadeT > 0 ? Math.min(1, this.evadeT / 16) : 0,
+      jetFuel: this.jetFuel,
+      jetThrusting: this.jetThrusting,
     };
     this.cb.onState(state);
     this.drawMinimap();

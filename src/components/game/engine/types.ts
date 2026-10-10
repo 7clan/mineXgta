@@ -29,7 +29,8 @@ export type ItemId =
   | 'glass'
   | 'flint'
   | 'pearl'
-  | 'apple';
+  | 'apple'
+  | 'jetpack';
 
 export interface ItemStack {
   id: ItemId;
@@ -70,15 +71,23 @@ export interface HudState {
     offered: boolean;
     /** World-space marker (contract target) + live distance from the player. */
     marker: null | { x: number; z: number; dist: number };
+    /** Contracts completed toward the chain bonus (0..CHAIN_GOAL). */
+    chain: number;
+    /** True once the chain bonus (jetpack) has been claimed. */
+    chainDone: boolean;
   };
   /** Current car-radio station name (null = radio off / not driving). */
   radio: string | null;
   /** True when a localStorage save file exists (start screen CONTINUE button). */
   hasSave: boolean;
   /** Weather machine readout for the HUD chip. */
-  weather: { state: 'clear' | 'overcast' | 'rain'; intensity: number };
+  weather: { state: 'clear' | 'overcast' | 'rain'; intensity: number; wet: number };
   /** Police pursuit evade progress 0..1 (0 = not evading / not wanted). */
   evading: number;
+  /** Jetpack fuel 0..1 (shown by the HUD when a jetpack is selected). */
+  jetFuel: number;
+  /** True while jetpack thrust is active (hold RMB with jetpack selected). */
+  jetThrusting: boolean;
 }
 
 export const HUD_INITIAL: HudState = {
@@ -107,8 +116,10 @@ export const HUD_INITIAL: HudState = {
   mission: null,
   radio: null,
   hasSave: false,
-  weather: { state: 'clear', intensity: 0 },
+  weather: { state: 'clear', intensity: 0, wet: 0 },
   evading: 0,
+  jetFuel: 1,
+  jetThrusting: false,
 };
 
 /**

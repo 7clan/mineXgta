@@ -25,6 +25,8 @@ export interface SaveData {
   placed: number[][];
   /** Car-radio station index (0 = off) — optional for v1 saves made before this field. */
   radio?: number;
+  /** Jetpack fuel 0..1 — optional for v1 saves made before this field. */
+  jetFuel?: number;
 }
 
 export const SAVE_TYPES = ['dirt', 'cobblestone', 'planks', 'glass'] as const;

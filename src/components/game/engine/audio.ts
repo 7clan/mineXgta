@@ -24,6 +24,10 @@ export class HyperionAudio {
   private rainSrc: AudioBufferSourceNode | null = null;
   private rainGain: GainNode | null = null;
   private rainLevel = 0;
+  // Persistent jetpack-thrust loop (saw osc + looping noise).
+  private jetOsc: OscillatorNode | null = null;
+  private jetSrc: AudioBufferSourceNode | null = null;
+  private jetGain: GainNode | null = null;
   // Car radio: lookahead scheduler state.
   private radioTimer: ReturnType<typeof setInterval> | null = null;
   private radioStep = 0;
@@ -364,6 +368,46 @@ export class HyperionAudio {
     } catch { /* noop */ }
   }
 
+  // ------------------------------------------------------------------ jetpack
+
+  /** Jetpack thrust loop: 92Hz saw growl + bandpassed noise roar. on=false fades out. */
+  jetThrust(on: boolean): void {
+    try {
+      if (!on) {
+        if (!this.jetGain) return;
+        const g = this.jetGain, o = this.jetOsc, s = this.jetSrc, ctx = this.ctx;
+        this.jetGain = null; this.jetOsc = null; this.jetSrc = null;
+        if (ctx) g.gain.setTargetAtTime(0.0001, ctx.currentTime, 0.07);
+        window.setTimeout(() => {
+          try { o?.stop(); s?.stop(); } catch { /* noop */ }
+        }, 420);
+        return;
+      }
+      if (!this.ctx || !this.master || !this.noiseBuf || this.jetGain) return;
+      const t0 = this.ctx.currentTime;
+      const o = this.osc('sawtooth', 92);
+      const lp = this.filter('lowpass', 620);
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.noiseBuf;
+      src.loop = true;
+      const bp = this.filter('bandpass', 850, 0.8);
+      const g = this.ctx.createGain();
+      if (!o || !lp || !bp) return;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.setTargetAtTime(0.055, t0, 0.06);
+      this.chain([o, lp, g]);
+      const g2 = this.ctx.createGain();
+      g2.gain.setValueAtTime(0.0001, t0);
+      g2.gain.setTargetAtTime(0.03, t0, 0.06);
+      this.chain([src, bp, g2]);
+      o.start(t0);
+      src.start(t0);
+      this.jetOsc = o;
+      this.jetSrc = src;
+      this.jetGain = g;
+    } catch { /* noop */ }
+  }
+
   // ------------------------------------------------------------------ rain
 
   /** Start (or re-target) the looping rain bed: broadband noise through a soft bandpass.
@@ -604,6 +648,7 @@ export class HyperionAudio {
     try { this.stopSiren(); } catch { /* noop */ }
     try { this.stopRain(); } catch { /* noop */ }
     try { this.stopRadio(); } catch { /* noop */ }
+    try { this.jetThrust(false); } catch { /* noop */ }
     try { if (this.ctx) void this.ctx.close(); } catch { /* noop */ }
     this.ctx = null; this.master = null; this.noiseBuf = null;
   }

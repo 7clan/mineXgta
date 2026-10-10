@@ -172,3 +172,34 @@ Stage Summary:
 - All browser-verified; lint/tsc clean; zero console errors.
 - Known quirks: lightning flash only during rain state (by design); police LOS is distance-based (68m) not occlusion-raycast (cheap but means a 68m LOS through a building counts as seen — acceptable, units path around buildings); headless software renderer can't easily demonstrate probabilistic dousing (verified via simulated updates; ~75%/s at real 60fps).
 - Next-cycle priorities (suggested): (1) rain wet-road specular via envMapIntensity boost on ground material, (2) occlusion-aware police LOS (single raycast per unit per 0.25s), (3) mobile touch controls, (4) draw-call reduction via material atlas, (5) contract chain: complete 3 contracts → bonus unlock (jetpack item?).
+
+---
+
+Task ID: cron-review-4 (2026-10-10)
+Agent: Z.ai Code (webDevReview cycle 4)
+Task: Status assessment + QA, then feature development: wet-road rain specular, Chaos Jetpack + contract chain, occlusion-aware police LOS, HUD styling pass
+
+Work Log:
+- QA baseline: dev.log clean, lint 0 problems, tsc 0 errors (game code), agent-browser fresh session — start screen renders, NEW GAME → 34 cars / 26 NPCs / 175 buildings, carve pipeline works (15 voxels via carveSphere(Vector3, radius)), ZERO console errors. One environment-only hiccup: first browser launch landed on about:blank (session glitch, not a code bug) — re-open resolved it. Verdict: STABLE → feature development.
+- QA lesson: carveSphere takes (Vector3, radius) not (x,y,z,r); private TS members are runtime-callable through window.__hyperion which makes deterministic headless testing easy.
+- FEATURE: WET-ROAD RAIN SPECULAR (city.ts + game.ts) — cycle-3 priority #1:
+  - city.setWet(w): ground material roughness 0.94→0.32, envMapIntensity 1→3.4 (IBL sheen), color darkened/tinted bluish (wet asphalt).
+  - game.updateWeather: wetT accumulator — soaks at 0.24/s while raining (>0.35 intensity), dries at 0.028/s (~35s) after; drives city.setWet every frame. Verified numerically (r0 0.94 → r1 0.32) and visually (glossy reflective asphalt vs matte sidewalk in daylight screenshot).
+  - HUD: WeatherChip shows a 💧 WET tag while roads stay wet after rain stops (wet > 0.3 && !rain).
+- FEATURE: CHAOS JETPACK (contract-chain bonus) — new item across types/items/audio/game/hud/save:
+  - items.ts: 'jetpack' ItemId + ItemDef (kind 'jetpack', 16×16 pixel-art twin-tank + flame icon, maxStack 1).
+  - Mechanic: select it, HOLD RMB → 34 m/s² vertical accel (vy cap 13.5) + forward boost (horiz cap 17); fuel 0..1 drains over ~6.5s of continuous burn, refills over ~9s idle; sputter/stop at 0 with one-shot "fuel depleted" toast; fall damage applies if you run dry mid-air (verified: climbed to 43.95m, drained 0.93→0.315 in 4s = exactly 1/6.5 per s).
+  - Feedback: firePuff+smokePuff exhaust plume at the nozzles, new audio.jetThrust(on) loop (92Hz saw growl + bandpassed noise roar, fade-out teardown, dispose-safe).
+  - Unlock: Missions now tracks chainCount; every CHAIN_GOAL=3 completed contracts fires cb.chainReward → grants jetpack +80 score + toast. Verified E2E: chain 2→3 via WRECKAGE/DEMOLITION/DEMOLISH THE TOWER completions → claimed=true, item granted.
+  - Persistence: save.ts optional jetFuel field; saveNow/applySave round-trip verified (0.3 in localStorage).
+- FEATURE: OCCLUSION-AWARE POLICE LOS (game.ts) — fixes the known "68m ray through walls" quirk:
+  - computeCopLOS(): segment cop-eye→player-eye vs standing-building AABBs via rayBox at 4 Hz (losT); <4m point-blank always sees; collapsed/collapsing buildings skipped; underground (<−2.5y) still never seen. Evade/lose-them loop now consumes this.
+  - Verified: cop 15m in open → seen; cop on far side of a h≥25 building → blocked (LOS false).
+- STYLING PASS: JetFuelChip (orange gradient gauge, 🔥 BURNING flicker state via hyperion-flame keyframes, low-fuel red, "HOLD RMB — THRUST" hint, shown when jetpack selected or thrusting), MissionChip chain row (3 amber diamonds → "Jetpack" / "🔥 JETPACK CLAIMED ✓" emerald), start-screen copy mentions the jetpack, CONTROLS list + ["RMB (hold) 🚀", "Jetpack thrust (selected)"], globals.css hyperion-flame-flicker keyframes.
+- Verification: lint 0 problems, tsc 0 errors, 0 console errors, dev.log clean; agent-browser screenshots confirm wet-road gloss, JETPACK 47% gauge chip, WET tag, JETPACK CLAIMED chain row, jetpack hotbar icon.
+
+Stage Summary:
+- New systems this cycle: rain wet-road material response (with slow drying + HUD tag), Chaos Jetpack item with fuel/thrust/exhaust/audio + 3-contract chain unlock, occlusion-aware police line-of-sight, jetpack fuel-gauge + chain-progress HUD.
+- All browser-verified; lint/tsc clean; zero console errors.
+- Known quirks: jetpack fuel yo-yo sputters near empty (by design — sounds like a dying engine); police LOS still distance-capped at 68m (occlusion only refines within range); jetpack maxStack 1 means a second chain bonus can sit unused in the inventory (acceptable).
+- Next-cycle priorities (suggested): (1) mobile touch controls (dig/place/jetpack buttons), (2) draw-call reduction via material atlas for ~175 buildings, (3) contract chain tier 2 rewards (e.g. infinite-TNT "Mega Pack" or a tank vehicle), (4) police helicopter at 5 stars with spotlight, (5) jetpack recoil camera shake + surface scorch decals under thrust.

@@ -57,6 +57,8 @@ export class City {
   private roofMat: THREE.MeshStandardMaterial;
   private innerMat: THREE.MeshStandardMaterial;
   private rubbleMat: THREE.MeshStandardMaterial;
+  /** Composite city ground (asphalt + sidewalks) — driven by the rain wetness. */
+  private groundMat: THREE.MeshStandardMaterial | null = null;
   private rng = mulberry32(1337);
   nightMaterials: THREE.MeshStandardMaterial[] = [];
   private headMat: THREE.MeshStandardMaterial | null = null;
@@ -92,6 +94,7 @@ export class City {
     geo.rotateX(-Math.PI / 2);
     const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.94, metalness: 0.02 });
     this.disposables.push(geo, mat);
+    this.groundMat = mat;
     const mesh = new THREE.Mesh(geo, mat);
     mesh.receiveShadow = true;
     mesh.frustumCulled = false;
@@ -588,6 +591,18 @@ export class City {
     const emiss = 0.55 + night * 1.05;
     for (const m of this.nightMaterials) m.emissiveIntensity = emiss;
     if (this.headMat) this.headMat.emissiveIntensity = 0.45 + night * 2.8;
+  }
+
+  // ------------------------------------------------------------------ rain
+  /** Wet the city ground: w = 0 dry → 1 soaked. Drops roughness (mirror sheen),
+   *  boosts the IBL reflection and darkens/tints the asphalt slightly blue. */
+  setWet(w: number): void {
+    const m = this.groundMat;
+    if (!m) return;
+    const k = w < 0 ? 0 : w > 1 ? 1 : w;
+    m.roughness = 0.94 - k * 0.62;
+    m.envMapIntensity = 1 + k * 2.4;
+    m.color.setRGB(1 - k * 0.22, 1 - k * 0.22, 1 - k * 0.19);
   }
 
   // ------------------------------------------------------------------ collapse

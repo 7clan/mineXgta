@@ -37,7 +37,14 @@ export interface MissionSnapshot {
   offered: boolean;
   /** Contract target marker in world XZ (location contracts only). */
   marker: { x: number; z: number } | null;
+  /** Chain progress 0..CHAIN_GOAL (contracts completed toward the bonus). */
+  chain: number;
+  /** True when the chain bonus (jetpack) has already been claimed once. */
+  chainDone: boolean;
 }
+
+/** Contracts completed in a row (session) needed for the chain bonus. */
+export const CHAIN_GOAL = 3;
 
 const DEFS: MissionDef[] = [
   {
@@ -118,6 +125,8 @@ const OFFER_DELAY = 40;
 interface Callbacks {
   toast: (msg: string) => void;
   complete: (def: MissionDef) => void;
+  /** Fired after every CHAIN_GOAL completed contracts — the game grants the jetpack. */
+  chainReward: () => void;
   /** Pick a tall standing building near the player for location contracts. */
   pickBuilding?: () => { id: number; x: number; z: number } | null;
 }
@@ -127,6 +136,9 @@ export class Missions {
   private offerTimer = 18; // first offer lands ~18s in
   private offered: { def: MissionDef; ttl: number } | null = null;
   private active: { def: MissionDef; progress: number; timeLeft: number; buildingId?: number } | null = null;
+  /** Contracts completed this session (drives the chain bonus). */
+  chainCount = 0;
+  private chainClaimed = false;
 
   constructor(private cb: Callbacks) {}
 
@@ -191,6 +203,11 @@ export class Missions {
       this.active = null;
       this.cb.toast(`CONTRACT COMPLETE — ${a.def.rewardLabel}`);
       this.cb.complete(a.def);
+      this.chainCount++;
+      if (!this.chainClaimed && this.chainCount >= CHAIN_GOAL) {
+        this.chainClaimed = true;
+        this.cb.chainReward();
+      }
       this.offerTimer = 45;
     }
   }
@@ -244,6 +261,8 @@ export class Missions {
         progress: Math.min(a.progress, a.def.target),
         timeLeft: Math.max(0, a.timeLeft),
         offered: false,
+        chain: Math.min(this.chainCount, CHAIN_GOAL),
+        chainDone: this.chainClaimed,
       };
     }
     if (this.offered) {
@@ -252,6 +271,8 @@ export class Missions {
         ...mk(o.def),
         timeLeft: Math.max(0, o.ttl),
         offered: true,
+        chain: Math.min(this.chainCount, CHAIN_GOAL),
+        chainDone: this.chainClaimed,
       };
     }
     return null;

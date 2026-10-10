@@ -12,7 +12,7 @@ import { makeBlockTexture, makeTNTTextures } from './textures';
 export interface ItemDef {
   id: ItemId;
   name: string;
-  kind: 'tool' | 'weapon' | 'placeable' | 'tnt' | 'igniter' | 'throwable' | 'food';
+  kind: 'tool' | 'weapon' | 'placeable' | 'tnt' | 'igniter' | 'throwable' | 'food' | 'jetpack';
   maxStack: number;
   digRadius: number;
   cooldown: number;
@@ -305,6 +305,41 @@ export const ITEMS: Record<ItemId, ItemDef> = {
       '................',
     ]),
     palette: { a: '#e8b923', b: '#3f7a2a', c: '#fff0a0' },
+  },
+  jetpack: {
+    id: 'jetpack',
+    name: 'Chaos Jetpack',
+    kind: 'jetpack',
+    maxStack: 1,
+    digRadius: 0,
+    cooldown: 0,
+    heldColor: 0xb8bcc4,
+    icon: P([
+      '..aaa......aaa..',
+      '..aba......aba..',
+      '..aba......aba..',
+      '.aaba......abaa.',
+      '.aaba.dddd.abaa.',
+      '.abba.dffd.abba.',
+      '.abbb.dffd.abbb.',
+      '.abbb.dffd.abbb.',
+      '.abba.dffd.abba.',
+      '..aba.dddd.aba..',
+      '..aba..dd..aba..',
+      '...a...ff...a...',
+      '.......ff.......',
+      '.......ee.......',
+      '......gggg......',
+      '.....gggggg.....',
+    ]),
+    palette: {
+      a: '#9aa2ac',
+      b: '#6b7178',
+      d: '#ffd24a',
+      e: '#ff8c1a',
+      f: '#ff5722',
+      g: '#ffb74d',
+    },
   },
 };
 

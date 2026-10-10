@@ -110,6 +110,7 @@ const CONTROLS: Array<[string, string]> = [
   ['Mouse', 'Look'],
   ['LMB (hold)', 'Dig / carve micro-voxels'],
   ['RMB', 'Place block / use item'],
+  ['RMB (hold) 🚀', 'Jetpack thrust (selected)'],
   ['Space ×2', 'Toggle creative flight'],
   ['Space / C', 'Fly up / down'],
   ['Shift', 'Sprint'],
@@ -160,6 +161,25 @@ function MissionChip({ mission }: { mission: NonNullable<HudState['mission']> })
         </span>
         <span>{mission.reward}</span>
       </div>
+      {/* Contract chain — 3 completions unlock the Chaos Jetpack */}
+      <div className="mt-1 flex items-center justify-between border-t border-white/10 pt-1">
+        <span className="text-[8px] font-black uppercase tracking-[0.22em] text-white/40">Chain bonus</span>
+        {mission.chainDone ? (
+          <span className="text-[9px] font-black uppercase tracking-widest text-emerald-300">🔥 Jetpack claimed ✓</span>
+        ) : (
+          <span className="flex items-center gap-1">
+            {[0, 1, 2].map((i) => (
+              <span
+                key={i}
+                className={`inline-block h-[7px] w-[7px] rotate-45 rounded-[1px] ${
+                  i < mission.chain ? 'bg-amber-400 shadow-[0_0_5px_rgba(251,191,36,0.8)]' : 'bg-white/15'
+                }`}
+              />
+            ))}
+            <span className="ml-1 text-[9px] font-black uppercase tracking-widest text-white/55">→ Jetpack</span>
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -175,10 +195,11 @@ function EqBars() {
   );
 }
 
-/** Weather chip — clear / overcast / rain with animated droplets. */
+/** Weather chip — clear / overcast / rain with animated droplets + wet-roads tag. */
 function WeatherChip({ weather }: { weather: HudState['weather'] }) {
   const rain = weather.state === 'rain';
   const over = weather.state === 'overcast';
+  const wet = weather.wet > 0.3;
   return (
     <div
       className={`flex items-center gap-2 rounded-lg border px-2.5 py-1 backdrop-blur-[2px] transition-colors duration-700 ${
@@ -188,7 +209,7 @@ function WeatherChip({ weather }: { weather: HudState['weather'] }) {
             ? 'border-white/15 bg-black/55'
             : 'border-amber-300/20 bg-black/45'
       }`}
-      title={`Weather: ${weather.state}`}
+      title={`Weather: ${weather.state}${wet ? ' · wet roads' : ''}`}
     >
       {rain ? (
         <span className="relative block h-4 w-4 overflow-hidden">
@@ -201,8 +222,13 @@ function WeatherChip({ weather }: { weather: HudState['weather'] }) {
       )}
       <div className="leading-tight">
         <div className="text-[8px] font-bold uppercase tracking-[0.24em] text-white/45">Weather</div>
-        <div className={`text-[10px] font-black uppercase tracking-wider ${rain ? 'text-sky-300' : over ? 'text-white/70' : 'text-amber-200/90'}`}>
-          {weather.state}
+        <div className="flex items-center gap-1.5">
+          <span className={`text-[10px] font-black uppercase tracking-wider ${rain ? 'text-sky-300' : over ? 'text-white/70' : 'text-amber-200/90'}`}>
+            {weather.state}
+          </span>
+          {wet && !rain && (
+            <span className="rounded bg-sky-400/15 px-1 text-[8px] font-black uppercase tracking-widest text-sky-300/90">💧 wet</span>
+          )}
         </div>
       </div>
     </div>
@@ -223,6 +249,35 @@ function EvadeChip({ evading }: { evading: number }) {
           style={{ width: `${Math.round(evading * 100)}%` }}
         />
       </div>
+    </div>
+  );
+}
+
+/** Jetpack fuel gauge — shown while a Chaos Jetpack is selected (or thrusting). */
+function JetFuelChip({ fuel, thrusting }: { fuel: number; thrusting: boolean }) {
+  const pct = Math.round(fuel * 100);
+  const low = fuel < 0.22;
+  return (
+    <div
+      className={`mt-1 w-36 rounded border px-2 py-1 backdrop-blur-[2px] transition-colors duration-300 ${
+        thrusting ? 'border-orange-400/70 bg-[#1d1005]/80 shadow-[0_0_14px_rgba(255,120,30,0.35)]' : 'border-white/15 bg-black/60'
+      }`}
+    >
+      <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-[0.18em]">
+        <span className={thrusting ? 'text-orange-300' : 'text-white/60'}>
+          {thrusting ? <span className="hyperion-flame">🔥 BURNING</span> : '🚀 JETPACK'}
+        </span>
+        <span className={`tabular-nums ${low ? 'text-red-400' : 'text-white/85'}`}>{pct}%</span>
+      </div>
+      <div className="mt-0.5 h-1.5 overflow-hidden rounded-full bg-white/10">
+        <div
+          className={`h-full rounded-full transition-[width] duration-150 ${
+            low ? 'bg-gradient-to-r from-red-500 to-orange-400' : 'bg-gradient-to-r from-orange-500 via-amber-400 to-yellow-300'
+          }`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="mt-0.5 text-right text-[8px] font-bold uppercase tracking-widest text-white/35">Hold RMB — thrust</div>
     </div>
   );
 }
@@ -295,6 +350,11 @@ export function Hud(props: HudProps) {
             </div>
           )}
           {state.police > 0 && state.evading > 0 && <EvadeChip evading={state.evading} />}
+          {(() => {
+            const sel = state.hotbar[state.slot];
+            const showJet = state.playing && !state.dead && (sel?.id === 'jetpack' || state.jetThrusting);
+            return showJet ? <JetFuelChip fuel={state.jetFuel} thrusting={state.jetThrusting} /> : null;
+          })()}
           {state.driving && (
             <div className="mt-1 rounded bg-black/55 px-3 py-1 text-right">
               <div className="text-[10px] uppercase tracking-widest text-amber-300/90">{state.driving.name}</div>
@@ -498,7 +558,8 @@ export function Hud(props: HudProps) {
             <p className="mb-8 max-w-xl text-sm leading-relaxed text-white/80 md:text-base">
               A photoreal GTA-style open city, tunneled apart by Minecraft freedom. Every building, road and
               sidewalk is a dense micro-voxel lattice — dig through downtown with your pickaxe, rig engines with
-              flint &amp; steel, build sky-bridges from smooth dirt slabs, and fly like creative mode.
+              flint &amp; steel, build sky-bridges from smooth dirt slabs, and fly like creative mode. Complete
+              contract chains to unlock the 🔥 Chaos Jetpack.
             </p>
             {state.hasSave && (
               <button
