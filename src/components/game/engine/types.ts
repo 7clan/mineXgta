@@ -68,11 +68,17 @@ export interface HudState {
     timeLeft: number;
     reward: string;
     offered: boolean;
+    /** World-space marker (contract target) + live distance from the player. */
+    marker: null | { x: number; z: number; dist: number };
   };
   /** Current car-radio station name (null = radio off / not driving). */
   radio: string | null;
   /** True when a localStorage save file exists (start screen CONTINUE button). */
   hasSave: boolean;
+  /** Weather machine readout for the HUD chip. */
+  weather: { state: 'clear' | 'overcast' | 'rain'; intensity: number };
+  /** Police pursuit evade progress 0..1 (0 = not evading / not wanted). */
+  evading: number;
 }
 
 export const HUD_INITIAL: HudState = {
@@ -101,6 +107,8 @@ export const HUD_INITIAL: HudState = {
   mission: null,
   radio: null,
   hasSave: false,
+  weather: { state: 'clear', intensity: 0 },
+  evading: 0,
 };
 
 /**

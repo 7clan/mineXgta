@@ -151,8 +151,13 @@ function MissionChip({ mission }: { mission: NonNullable<HudState['mission']> })
           style={offer ? undefined : { width: `${pct}%` }}
         />
       </div>
-      <div className="mt-1 flex justify-between text-[9px] font-bold uppercase tracking-widest text-white/45">
-        <span>{offer ? 'Reward' : `${mission.progress} / ${mission.target}`}</span>
+      <div className="mt-1 flex items-center justify-between text-[9px] font-bold uppercase tracking-widest text-white/45">
+        <span>
+          {offer ? 'Reward' : `${mission.progress} / ${mission.target}`}
+          {mission.marker && (
+            <span className="ml-2 text-amber-300/90">◆ {Math.round(mission.marker.dist)}m</span>
+          )}
+        </span>
         <span>{mission.reward}</span>
       </div>
     </div>
@@ -167,6 +172,58 @@ function EqBars() {
         <span key={i} className="hyperion-eqbar block h-3 w-[3px] rounded-sm bg-emerald-400/90" />
       ))}
     </span>
+  );
+}
+
+/** Weather chip — clear / overcast / rain with animated droplets. */
+function WeatherChip({ weather }: { weather: HudState['weather'] }) {
+  const rain = weather.state === 'rain';
+  const over = weather.state === 'overcast';
+  return (
+    <div
+      className={`flex items-center gap-2 rounded-lg border px-2.5 py-1 backdrop-blur-[2px] transition-colors duration-700 ${
+        rain
+          ? 'border-sky-300/30 bg-[#0d1420]/70'
+          : over
+            ? 'border-white/15 bg-black/55'
+            : 'border-amber-300/20 bg-black/45'
+      }`}
+      title={`Weather: ${weather.state}`}
+    >
+      {rain ? (
+        <span className="relative block h-4 w-4 overflow-hidden">
+          <span className="absolute left-[3px] top-0 hyperion-drop h-[5px] w-[2px] rounded-full bg-sky-300" />
+          <span className="absolute left-[8px] top-0 hyperion-drop h-[5px] w-[2px] rounded-full bg-sky-300" style={{ animationDelay: '0.35s' }} />
+          <span className="absolute left-[13px] top-0 hyperion-drop h-[5px] w-[2px] rounded-full bg-sky-300" style={{ animationDelay: '0.7s' }} />
+        </span>
+      ) : (
+        <span className={`text-[13px] leading-none ${over ? 'opacity-70' : ''}`}>{over ? '☁️' : '☀️'}</span>
+      )}
+      <div className="leading-tight">
+        <div className="text-[8px] font-bold uppercase tracking-[0.24em] text-white/45">Weather</div>
+        <div className={`text-[10px] font-black uppercase tracking-wider ${rain ? 'text-sky-300' : over ? 'text-white/70' : 'text-amber-200/90'}`}>
+          {weather.state}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** "LOSING THEM" evade progress — amber sweep that fills as the cops lose sight. */
+function EvadeChip({ evading }: { evading: number }) {
+  return (
+    <div className="hyperion-losing mt-1 w-32 rounded border border-amber-300/35 bg-black/65 px-2 py-1">
+      <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-[0.18em] text-amber-300">
+        <span>👁 LOSING THEM</span>
+        <span className="tabular-nums">{Math.round(evading * 100)}%</span>
+      </div>
+      <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-white/10">
+        <div
+          className="h-full rounded-full bg-gradient-to-r from-amber-400 to-emerald-400 transition-[width] duration-200"
+          style={{ width: `${Math.round(evading * 100)}%` }}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -237,6 +294,7 @@ export function Hud(props: HudProps) {
               🚓 Police ×{state.police}
             </div>
           )}
+          {state.police > 0 && state.evading > 0 && <EvadeChip evading={state.evading} />}
           {state.driving && (
             <div className="mt-1 rounded bg-black/55 px-3 py-1 text-right">
               <div className="text-[10px] uppercase tracking-widest text-amber-300/90">{state.driving.name}</div>
@@ -278,6 +336,9 @@ export function Hud(props: HudProps) {
           </div>
         </div>
       )}
+
+      {/* Weather chip — above the minimap */}
+      {state.playing && !state.dead && <div className="absolute bottom-[172px] left-4"><WeatherChip weather={state.weather} /></div>}
 
       {/* Minimap — GTA style bottom-left */}
       {state.playing && (

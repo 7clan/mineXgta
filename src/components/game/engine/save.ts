@@ -23,6 +23,8 @@ export interface SaveData {
   inventory: (ItemStack | null)[];
   /** [ix, iy, iz, typeIndex] — typeIndex into SAVE_TYPES. */
   placed: number[][];
+  /** Car-radio station index (0 = off) — optional for v1 saves made before this field. */
+  radio?: number;
 }
 
 export const SAVE_TYPES = ['dirt', 'cobblestone', 'planks', 'glass'] as const;

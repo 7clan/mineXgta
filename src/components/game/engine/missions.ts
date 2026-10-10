@@ -2,15 +2,16 @@
  * Project Hyperion — chaos contract system ("missions").
  *
  * A tiny GTA-style contract loop: every so often the engine offers a timed
- * contract (wreck cars / carve voxels / collapse a building / rampage).
- * The player accepts with M and must complete the objective before the
- * timer runs out; rewards are Minecraft items + CHAOS score.
+ * contract (wreck cars / carve voxels / collapse a building / rampage /
+ * demolish a MARKED building / steal a police cruiser). The player accepts
+ * with M and must complete the objective before the timer runs out; rewards
+ * are Minecraft items + CHAOS score.
  *
- * The game orchestrator feeds events (onCarWreck / onVoxels / onCollapse /
- * onPed) and reads `snapshot()` for the HUD each emit.
+ * Location contracts carry a world-space marker (drawn on the minimap + a
+ * beacon pillar in-world) that the game reads from `snapshot()`.
  */
 
-export type MissionKind = 'wreck' | 'voxels' | 'collapse' | 'peds';
+export type MissionKind = 'wreck' | 'voxels' | 'collapse' | 'peds' | 'steal';
 
 export interface MissionDef {
   kind: MissionKind;
@@ -22,6 +23,8 @@ export interface MissionDef {
   /** Item rewards granted on completion. */
   rewards: Array<{ id: string; count: number }>;
   rewardLabel: string;
+  /** 'building' = pin a specific nearby skyscraper as the ONLY valid target. */
+  locate?: 'building';
 }
 
 export interface MissionSnapshot {
@@ -32,6 +35,8 @@ export interface MissionSnapshot {
   timeLeft: number;
   reward: string;
   offered: boolean;
+  /** Contract target marker in world XZ (location contracts only). */
+  marker: { x: number; z: number } | null;
 }
 
 const DEFS: MissionDef[] = [
@@ -78,6 +83,33 @@ const DEFS: MissionDef[] = [
     rewards: [{ id: 'apple', count: 3 }],
     rewardLabel: 'Golden Apple ×3 · +140 CHAOS',
   },
+  {
+    kind: 'collapse',
+    title: 'DEMOLISH THE TOWER',
+    desc: 'Level the MARKED tower',
+    target: 1,
+    time: 120,
+    rewardScore: 260,
+    rewards: [
+      { id: 'tnt', count: 24 },
+      { id: 'apple', count: 2 },
+    ],
+    rewardLabel: 'TNT ×24 · Golden Apple ×2 · +260 CHAOS',
+    locate: 'building',
+  },
+  {
+    kind: 'steal',
+    title: 'GRAND THEFT',
+    desc: 'Steal a police cruiser',
+    target: 1,
+    time: 110,
+    rewardScore: 220,
+    rewards: [
+      { id: 'pearl', count: 8 },
+      { id: 'apple', count: 2 },
+    ],
+    rewardLabel: 'Ender Pearl ×8 · Golden Apple ×2 · +220 CHAOS',
+  },
 ];
 
 const OFFER_TTL = 15;
@@ -86,22 +118,36 @@ const OFFER_DELAY = 40;
 interface Callbacks {
   toast: (msg: string) => void;
   complete: (def: MissionDef) => void;
+  /** Pick a tall standing building near the player for location contracts. */
+  pickBuilding?: () => { id: number; x: number; z: number } | null;
 }
 
 export class Missions {
   private lastIdx = -1;
   private offerTimer = 18; // first offer lands ~18s in
   private offered: { def: MissionDef; ttl: number } | null = null;
-  private active: { def: MissionDef; progress: number; timeLeft: number } | null = null;
+  private active: { def: MissionDef; progress: number; timeLeft: number; buildingId?: number } | null = null;
 
   constructor(private cb: Callbacks) {}
 
   /** Accept the pending offer. Returns true if a contract was accepted. */
   accept(): boolean {
     if (this.active || !this.offered) return false;
-    this.active = { def: this.offered.def, progress: 0, timeLeft: this.offered.def.time };
+    const def = this.offered.def;
+    let buildingId: number | undefined;
+    if (def.locate === 'building') {
+      const pick = this.cb.pickBuilding?.();
+      if (!pick) {
+        this.cb.toast('No target tower nearby — contract unavailable');
+        this.offered = null;
+        this.offerTimer = 12;
+        return false;
+      }
+      buildingId = pick.id;
+    }
+    this.active = { def, progress: 0, timeLeft: def.time, buildingId };
     this.offered = null;
-    this.cb.toast(`CONTRACT ACCEPTED — ${this.active.def.desc}`);
+    this.cb.toast(`CONTRACT ACCEPTED — ${def.desc}`);
     return true;
   }
 
@@ -120,11 +166,21 @@ export class Missions {
   onVoxels(n: number): void {
     this.progress('voxels', n);
   }
-  onCollapse(): void {
+  /** A building started collapsing — `id` is its index in city.buildings.
+   *  Location contracts only progress when the MARKED building falls. */
+  onCollapse(id?: number): void {
+    const a = this.active;
+    if (a && a.def.kind === 'collapse' && a.def.locate === 'building') {
+      if (id === undefined || a.buildingId === undefined || id !== a.buildingId) return;
+    }
     this.progress('collapse', 1);
   }
   onPed(): void {
     this.progress('peds', 1);
+  }
+  /** The player entered a car of `type` (GRAND THEFT: 'police'). */
+  onCarEnter(type: string): void {
+    if (type === 'police') this.progress('steal', 1);
   }
 
   private progress(kind: MissionKind, n: number): void {
@@ -170,28 +226,31 @@ export class Missions {
   }
 
   /** HUD snapshot: active contract first, then pending offer, else null. */
-  snapshot(): MissionSnapshot | null {
+  snapshot(markerFor?: (m: MissionDef, buildingId?: number) => { x: number; z: number } | null): MissionSnapshot | null {
+    const mk = (def: MissionDef, buildingId?: number) => ({
+      title: def.title,
+      desc: def.desc,
+      progress: 0,
+      target: def.target,
+      timeLeft: 0,
+      reward: def.rewardLabel,
+      offered: false,
+      marker: markerFor ? markerFor(def, buildingId) : null,
+    });
     if (this.active) {
       const a = this.active;
       return {
-        title: a.def.title,
-        desc: a.def.desc,
+        ...mk(a.def, a.buildingId),
         progress: Math.min(a.progress, a.def.target),
-        target: a.def.target,
         timeLeft: Math.max(0, a.timeLeft),
-        reward: a.def.rewardLabel,
         offered: false,
       };
     }
     if (this.offered) {
       const o = this.offered;
       return {
-        title: o.def.title,
-        desc: o.def.desc,
-        progress: 0,
-        target: o.def.target,
+        ...mk(o.def),
         timeLeft: Math.max(0, o.ttl),
-        reward: o.def.rewardLabel,
         offered: true,
       };
     }

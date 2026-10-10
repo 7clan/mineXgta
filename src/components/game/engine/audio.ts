@@ -20,6 +20,10 @@ export class HyperionAudio {
   private sirOsc: OscillatorNode | null = null;
   private sirLfo: OscillatorNode | null = null;
   private sirGain: GainNode | null = null;
+  // Persistent rain loop (looping noise -> bandpass -> gain).
+  private rainSrc: AudioBufferSourceNode | null = null;
+  private rainGain: GainNode | null = null;
+  private rainLevel = 0;
   // Car radio: lookahead scheduler state.
   private radioTimer: ReturnType<typeof setInterval> | null = null;
   private radioStep = 0;
@@ -360,6 +364,82 @@ export class HyperionAudio {
     } catch { /* noop */ }
   }
 
+  // ------------------------------------------------------------------ rain
+
+  /** Start (or re-target) the looping rain bed: broadband noise through a soft bandpass.
+   *  intensity 0..1 — 0 fades out and tears the loop down. */
+  setRain(intensity: number): void {
+    try {
+      if (!this.ctx || !this.master || !this.noiseBuf) return;
+      const v = intensity < 0 ? 0 : intensity > 1 ? 1 : intensity;
+      this.rainLevel = v;
+      if (v <= 0.001) {
+        this.stopRain();
+        return;
+      }
+      if (!this.rainSrc || !this.rainGain) {
+        const src = this.ctx.createBufferSource();
+        src.buffer = this.noiseBuf;
+        src.loop = true;
+        const hp = this.ctx.createBiquadFilter();
+        hp.type = 'highpass';
+        hp.frequency.value = 400;
+        const lp = this.ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = 5200;
+        const g = this.ctx.createGain();
+        g.gain.value = 0.0001;
+        this.chain([src, hp, lp, g]);
+        src.start(0, Math.random() * 0.9);
+        this.rainSrc = src;
+        this.rainGain = g;
+      }
+      const peak = 0.026 + v * 0.075;
+      this.rainGain!.gain.setTargetAtTime(peak, this.ctx.currentTime, 0.9);
+    } catch { /* noop */ }
+  }
+
+  /** Fade out and stop the rain loop. */
+  stopRain(): void {
+    try {
+      const src = this.rainSrc, g = this.rainGain;
+      this.rainSrc = null;
+      this.rainGain = null;
+      this.rainLevel = 0;
+      if (!this.ctx || !src || !g) return;
+      g.gain.setTargetAtTime(0.0001, this.ctx.currentTime, 0.5);
+      window.setTimeout(() => {
+        try { src.stop(); } catch { /* noop */ }
+      }, 1600);
+    } catch { /* noop */ }
+  }
+
+  /** Thunder clap: deep filtered noise rumble with a slow roll-off. */
+  thunder(far: number): void {
+    try {
+      if (!this.ctx || !this.master) return;
+      const fg = this.farGain(far);
+      const src = this.noise(2.6), lp = this.filter('lowpass', 240, 0.4), g = this.ctx.createGain();
+      if (!src || !lp) return;
+      const t0 = this.ctx.currentTime;
+      lp.frequency.setValueAtTime(300, t0);
+      lp.frequency.exponentialRampToValueAtTime(55, t0 + 2.2);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(0.34 * fg, t0 + 0.06);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 2.4);
+      this.chain([src, lp, g]);
+      // Second delayed roll for realism
+      const src2 = this.noise(1.6, 0.5), lp2 = this.filter('lowpass', 130), g2 = this.ctx.createGain();
+      if (src2 && lp2 && g2) {
+        const t1 = t0 + 0.5;
+        g2.gain.setValueAtTime(0.0001, t1);
+        g2.gain.linearRampToValueAtTime(0.2 * fg, t1 + 0.12);
+        g2.gain.exponentialRampToValueAtTime(0.0001, t1 + 1.5);
+        this.chain([src2, lp2, g2]);
+      }
+    } catch { /* noop */ }
+  }
+
   // ------------------------------------------------------------------ fire
 
   /** Call ~every 0.5s while something burns; plays a tiny random crackle with probability 0.6. */
@@ -522,6 +602,7 @@ export class HyperionAudio {
   dispose(): void {
     try { this.stopEngine(); } catch { /* noop */ }
     try { this.stopSiren(); } catch { /* noop */ }
+    try { this.stopRain(); } catch { /* noop */ }
     try { this.stopRadio(); } catch { /* noop */ }
     try { if (this.ctx) void this.ctx.close(); } catch { /* noop */ }
     this.ctx = null; this.master = null; this.noiseBuf = null;

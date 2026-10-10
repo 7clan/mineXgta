@@ -137,3 +137,38 @@ Stage Summary:
 - New systems: procedural car radio (3 stations), chaos contract loop, world save/load, plus one real bug fix (Esc-pause desync) and a HUD styling pass. All browser-verified; lint/tsc stay clean; zero console errors.
 - Known quirks: stale hint chip at very low fps (cosmetic, refreshes within 0.18s of gameplay time); building-carve geometry intentionally NOT serialized (city regenerates pristine, carve counter carries over); radio station resets to HYP FM on reload (station index not persisted).
 - Next-cycle priorities (suggested): (1) police lose-them cooldown (line-of-sight timer) to fix corner-camping at high stars; (2) draw-call reduction via material atlas; (3) mobile touch controls; (4) contract variety — location-based contracts ("demolish building X" with a minimap marker); (5) persist radio station + settings in the save file.
+
+Task ID: cron-review-3 (2026-10-10)
+Agent: Z.ai Code (webDevReview cycle 3)
+Task: Status assessment + QA, then feature development: police evade/lose-them system, location contracts, rain weather, radio persistence, HUD styling pass
+
+Work Log:
+- QA baseline: dev.log clean, lint 0 problems, tsc 0 errors (game code), agent-browser smoke test — start screen renders (CONTINUE SAVED CITY + NEW GAME), HUD renders (CHAOS/stars/hearts/hotbar/minimap/clock), zero console errors in cleared console, carve verified (38 voxels), saveNow() ok, 175 buildings / 26 NPCs / playing=true. Verdict: STABLE → feature development.
+- QA lesson: HUD DOM probing needs content-based selectors (body.innerText), not guessed class names; window.__hyperion runtime handle remains the reliable QA surface.
+- FEATURE: POLICE EVADE / LOSE-THEM SYSTEM (game.ts) — fixes corner-camping at high stars:
+  - updatePolice() now tracks line-of-sight: any unit within 68m = seen (underground y<-2.5 = never seen — tunnels are safe houses).
+  - Unseen → evadeT accumulates; at 5s "You are losing them — stay out of sight!" toast; at 16s heat ×0.4 + "You lost the cops!" + despawn all units.
+  - Heat decay is 10.5/s while evading (evadeT>1.5) vs 2.5/s normally — breaking LOS visibly drains the wanted meter.
+  - HUD: `evading` 0..1 emitted; new EvadeChip (👁 LOSING THEM + % + amber→emerald gradient bar, hyperion-losing pulse glow) shown when wanted + evading.
+- FEATURE: LOCATION CONTRACTS (missions.ts + game.ts) — 2 new contract types, 6 total:
+  - DEMOLISH THE TOWER: pins a specific tall building (h≥20, within 260m, picked via cb.pickBuilding) as the ONLY valid target — onCollapse(id) is building-index-gated; wrong building doesn't progress (verified: wrong→0, target→COMPLETED).
+  - GRAND THEFT: steal a police cruiser — progressed via onCarEnter('police') wired in enterNearestCar.
+  - snapshot(markerFor) callback pattern: game supplies missionMarker(buildingId) — marker {x,z} flows to HUD (◆ live distance in contract chip) + minimap (pulsing amber diamond, edge-clamped, upright distance label drawn in screen space via inverse map-rotation math).
+  - World-space beacon: additive translucent amber pillar (110m) pulsing at the marked building, auto-created/hidden by updateBeacon().
+- FEATURE: RAIN WEATHER SYSTEM (new weather.ts + audio.ts + game.ts):
+  - Weather machine: clear → overcast → rain, random 24-190s states, intensity eases toward target (0 / 0.35 / 1).
+  - Rendering: 1500 camera-anchored rain streak LineSegments (slanted by sinusoidal wind, wrapped in a 60m box), opacity ramped in above intensity 0.45.
+  - Atmosphere in updateDayNight(): rain lerps sky toward overcast grays, sun ×(1-0.82·I), fog compresses (near 150→88, far 620→380), stars hidden, windows brighten via applyNight(max(night, 0.45·I)).
+  - LIGHTNING: random 9-26s strikes during rain → 0.24s white sky/sun/hemi spike + 2-roll procedural thunder (lowpass sweep 300→55Hz + delayed second rumble) + small shake.
+  - Rain audio bed: looping noise through highpass 400 + lowpass 5200, gain 0.026-0.1 tracking intensity; setRain(0) tears down.
+  - Gameplay consequence: heavy rain douses fire patches (ttl ×4.5 decay + steam puffs) and burning cars (prob 1.4/s → vehicles.extinguish(): burning→parked (or police), health floored at 14, steam puff, toast).
+- FEATURE: RADIO PERSISTENCE — save.ts v1 optional `radio` field; saveNow writes audio.radioStation, applySave restores (verified round-trip 2→0→applySave→2).
+- STYLING PASS: WeatherChip (☀️/☁️/🌧 + 3 animated CSS droplets, state-colored borders — sky during rain, amber clear), EvadeChip, minimap contract diamond + distance, contract chip ◆ distance, hyperion-drop + hyperion-losing keyframes in globals.css.
+- Verification (agent-browser, deterministic via runtime where headless fps throttles): rain forced → streaks render + fog 391 + sun 0.12 + screenshot shows storm look; WEATHER chip renders; lightning boltIn=0.01 → boltFired=true + lightningT spike; location contract injected → beacon visible at target + minimap ◆ 215m + chip distance; collapse gating verified; GRAND THEFT verified (enter police car → COMPLETED); evade: cop 17m → evadeT stays 0, teleport 420m → accumulates, prime 15.9 → heat 400→158 + all units despawned; radio round-trip ok; extinguish → parked/health 25; final showcase screenshot (rain + 3 stars + POLICE ×1 + LOSING THEM 55% + storm sky) — all UI layers correct.
+- lint 0 problems, tsc 0 errors, zero console errors, dev.log clean after all tests.
+
+Stage Summary:
+- New systems this cycle: police lose-them/evade loop (LOS + fast heat drain + despawn), location-based contracts with beacon + minimap marker + gated completion, full rain weather (state machine, 1500-streak renderer, lightning + thunder, audio bed, fire/car dousing), radio persistence, weather/evade HUD chips.
+- All browser-verified; lint/tsc clean; zero console errors.
+- Known quirks: lightning flash only during rain state (by design); police LOS is distance-based (68m) not occlusion-raycast (cheap but means a 68m LOS through a building counts as seen — acceptable, units path around buildings); headless software renderer can't easily demonstrate probabilistic dousing (verified via simulated updates; ~75%/s at real 60fps).
+- Next-cycle priorities (suggested): (1) rain wet-road specular via envMapIntensity boost on ground material, (2) occlusion-aware police LOS (single raycast per unit per 0.25s), (3) mobile touch controls, (4) draw-call reduction via material atlas, (5) contract chain: complete 3 contracts → bonus unlock (jetpack item?).

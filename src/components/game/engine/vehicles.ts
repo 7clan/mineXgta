@@ -413,6 +413,17 @@ export class Vehicles {
     car.burnT = 3.4 + this.rng() * 1.8;
   }
 
+  /** Rain dousing: a burning car caught in heavy rain goes out (still damaged). */
+  extinguish(car: Car): void {
+    if (car.state !== 'burning') return;
+    car.state = car.type === 'police' ? 'police' : 'parked';
+    car.burnT = 0;
+    car.health = Math.max(14, car.health);
+    car.targetSpeed = car.type === 'police' ? 27 : car.targetSpeed;
+    // Steam puff (state is no longer 'burning', so game renders smoke only)
+    this.onSmoke?.(car);
+  }
+
   explode(car: Car): void {
     car.state = 'wrecked';
     car.speed = 0;

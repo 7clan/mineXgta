@@ -26,6 +26,7 @@ import { Particles } from './particles';
 import { Vehicles, Car } from './vehicles';
 import { HyperionAudio } from './audio';
 import { Missions } from './missions';
+import { Weather } from './weather';
 import { SAVE_TYPES, clearSave, hasSave, loadSave, writeSave } from './save';
 import {
   HUD_EMIT_INTERVAL,
@@ -55,6 +56,12 @@ const NIGHT_MID = new THREE.Color(0x0d1424);
 const NIGHT_BOTTOM = new THREE.Color(0x141d33);
 const DUSK_ORANGE = new THREE.Color(0xff9a4a);
 const NIGHT_FOG = new THREE.Color(0x0a0f1a);
+// Overcast/rain palette.
+const GRAY_TOP = new THREE.Color(0x4a5258);
+const GRAY_MID = new THREE.Color(0x6a7076);
+const GRAY_BOT = new THREE.Color(0x838a8e);
+const GRAY_FOG = new THREE.Color(0x7d858a);
+const WHITE = new THREE.Color(0xffffff);
 
 interface PlacedBlock {
   mesh: THREE.Mesh;
@@ -132,6 +139,9 @@ export class HyperionGame implements World {
   private policeTimer = 0;
   private sirenOn = false;
   private policeWarned = false;
+  private evadeT = 0; // seconds since any cop last had eyes on the player
+  private loseWarned = false;
+  private lightningT = 0;
   private hitMark = 0;
   private clockStr = '17:20';
   private raycaster = new THREE.Raycaster();
@@ -144,6 +154,8 @@ export class HyperionGame implements World {
   private currentHint: string | null = null;
   private drivingCar: Car | null = null;
   private disposed = false;
+  private weather: Weather;
+  private beacon: THREE.Mesh | null = null;
   private missions = new Missions({
     toast: (msg) => this.toast(msg),
     complete: (def) => {
@@ -151,6 +163,7 @@ export class HyperionGame implements World {
       for (const r of def.rewards) this.addItem(r.id as ItemId, r.count, true);
       this.audio.pickup();
     },
+    pickBuilding: () => this.pickContractBuilding(),
   });
   private autosaveT = 15;
   private hasSaveFile = false;
@@ -198,7 +211,7 @@ export class HyperionGame implements World {
     this.city.onCollapseStart = (b) => {
       this.audio.collapse(this.far(b.group.position));
       this.addScore(40);
-      this.missions.onCollapse();
+      this.missions.onCollapse(this.city.buildings.indexOf(b));
       this.toast('Structural collapse!');
     };
     this.city.onCollapseDust = (p, r) => this.particles.dustPuff(p, 6, r);
@@ -208,6 +221,12 @@ export class HyperionGame implements World {
     this.particles = new Particles(this.scene);
     this.vehicles = new Vehicles(this.scene);
     this.npcs = new NPCs(this.scene);
+    this.weather = new Weather(this.scene);
+    this.weather.onLightning = () => {
+      this.lightningT = 0.24;
+      this.audio.thunder(0.35 + Math.random() * 0.3);
+      this.shake(0.1);
+    };
 
     this.vehicles.onExplosion = (p, r) => this.explode(p, r, true);
     this.vehicles.onRagdollNPCs = (p, r) => {
@@ -882,6 +901,7 @@ export class HyperionGame implements World {
     if (car && car.state !== 'burning') {
       this.drivingCar = car;
       this.vehicles.enter(car);
+      this.missions.onCarEnter(car.type);
       this.audio.enterCar();
       this.audio.startEngine();
       this.audio.startRadio(this.audio.radioStation > 0 ? this.audio.radioStation : 1);
@@ -1050,9 +1070,17 @@ export class HyperionGame implements World {
     this.npcs.update(dt, this);
     // Traffic avoid dug holes handled in vehicles via floorHeightAt
 
-    // Heat decay + stars
-    this.heat = Math.max(0, this.heat - dt * 2.5);
+    // Weather machine + consequences
+    this.updateWeather(dt);
+
+    // Heat decay + stars (breaking line of sight burns heat 4× faster)
+    const heatDecay = this.evadeT > 1.5 ? 10.5 : 2.5;
+    this.heat = Math.max(0, this.heat - dt * heatDecay);
     this.stars = this.heat <= 0 ? 0 : Math.min(5, 1 + Math.floor(this.heat / 150));
+    if (this.heat <= 0) {
+      this.evadeT = 0;
+      this.loseWarned = false;
+    }
 
     // Police dispatch + day/night
     this.updatePolice(dt);
@@ -1060,6 +1088,7 @@ export class HyperionGame implements World {
     this.updateDayNight();
 
     // Contracts + autosave
+    this.updateBeacon(dt);
     this.missions.update(dt);
     this.autosaveT -= dt;
     if (this.autosaveT <= 0) {
@@ -1104,6 +1133,7 @@ export class HyperionGame implements World {
       hotbar: this.hotbar.map((s) => (s ? { ...s } : null)),
       inventory: this.inventory.map((s) => (s ? { ...s } : null)),
       placed,
+      radio: this.audio.radioStation,
     });
     this.hasSaveFile = ok;
     if (manual) this.toast(ok ? 'World saved' : 'Save failed (storage blocked?)');
@@ -1151,6 +1181,9 @@ export class HyperionGame implements World {
       this.inventory = d.inventory.map((s) => (s ? { ...s } : null));
       this.slot = ((d.slot % 9) + 9) % 9;
       this.setSlot(this.slot);
+      if (typeof d.radio === 'number' && d.radio >= 0 && d.radio < HyperionAudio.STATIONS.length) {
+        this.audio.radioStation = d.radio;
+      }
       return true;
     } catch {
       return false;
@@ -1163,16 +1196,99 @@ export class HyperionGame implements World {
     this.hasSaveFile = false;
   }
 
+  // ------------------------------------------------------------------ contracts
+  /** Pick a tall standing building within ~260 m of the player for location contracts. */
+  private pickContractBuilding(): { id: number; x: number; z: number } | null {
+    const p = this.playerPos();
+    const candidates: Array<{ id: number; d: number; x: number; z: number }> = [];
+    for (let i = 0; i < this.city.buildings.length; i++) {
+      const b = this.city.buildings[i];
+      if (b.collapsed || b.collapsing || b.h < 20) continue;
+      const d = Math.hypot(b.cx - p.x, b.cz - p.z);
+      if (d > 260) continue;
+      candidates.push({ id: i, d, x: b.cx, z: b.cz });
+    }
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => a.d - b.d);
+    return candidates[Math.floor(this.rng() * Math.min(6, candidates.length))];
+  }
+
+  /** Marker for a contract (active or offered), or null when it has none. */
+  private missionMarker(buildingId?: number): { x: number; z: number } | null {
+    if (buildingId === undefined) return null;
+    const b = this.city.buildings[buildingId];
+    if (!b || b.collapsed) return null;
+    return { x: b.cx, z: b.cz };
+  }
+
+  /** Pulsing amber beacon pillar over the contract target building. */
+  private updateBeacon(dt: number): void {
+    const snap = this.missions.snapshot((m, buildingId) => (m.locate === 'building' ? this.missionMarker(buildingId) : null));
+    const marker = snap && !snap.offered ? snap.marker : null;
+    if (marker) {
+      if (!this.beacon) {
+        const geo = new THREE.CylinderGeometry(3.2, 4.6, 110, 12, 1, true);
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0xffb020,
+          transparent: true,
+          opacity: 0.16,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        this.beacon = new THREE.Mesh(geo, mat);
+        this.beacon.renderOrder = 6;
+        this.scene.add(this.beacon);
+      }
+      this.beacon.visible = true;
+      this.beacon.position.set(marker.x, 55, marker.z);
+      const pulse = 0.1 + 0.09 * (0.5 + 0.5 * Math.sin(performance.now() * 0.004));
+      (this.beacon.material as THREE.MeshBasicMaterial).opacity = pulse;
+      this.beacon.rotation.y += dt * 0.5;
+    } else if (this.beacon) {
+      this.beacon.visible = false;
+    }
+  }
+
   private placedGeoCache: THREE.BufferGeometry | null = null;
   private placedGeo(): THREE.BufferGeometry {
     if (!this.placedGeoCache) this.placedGeoCache = new RoundedBoxGeometry(0.97, 0.97, 0.97, 2, 0.07);
     return this.placedGeoCache;
   }
 
+  // ------------------------------------------------------------------ weather
+  private updateWeather(dt: number): void {
+    this.weather.update(dt, this.playerPos());
+    const rainI = this.weather.intensity;
+
+    // Rain audio bed
+    this.audio.setRain(this.weather.raining ? rainI : Math.min(rainI, 0.18));
+
+    // Lightning sky spike (decayed here; updateDayNight adds the boost)
+    if (this.lightningT > 0) this.lightningT -= dt;
+
+    // Heavy rain douses fires & burning cars
+    if (this.weather.raining) {
+      for (let i = this.fires.length - 1; i >= 0; i--) {
+        this.fires[i].ttl -= dt * 4.5; // extra decay
+        if (Math.random() < dt * 2.2) {
+          this.particles.smokePuff(this.fires[i].pos, 2, 0.7, 2.6); // steam
+        }
+      }
+      for (const car of this.vehicles.cars) {
+        if (car.state === 'burning' && Math.random() < dt * 1.4) {
+          this.vehicles.extinguish(car);
+          this.toast(`Rain doused the ${car.name}`);
+        }
+      }
+    }
+  }
+
   // ------------------------------------------------------------------ police
   private updatePolice(dt: number): void {
     const want = this.stars >= 2 ? Math.min(4, this.stars - 1) : 0;
-    const active = this.vehicles.cars.filter((c) => c.state === 'police').length;
+    const units = this.vehicles.cars.filter((c) => c.state === 'police');
+    const active = units.length;
     if (active < want) {
       this.policeTimer -= dt;
       if (this.policeTimer <= 0) {
@@ -1180,6 +1296,8 @@ export class HyperionGame implements World {
         this.policeTimer = 5;
         if (!this.policeWarned) {
           this.policeWarned = true;
+          this.evadeT = 0;
+          this.loseWarned = false;
           this.toast('WANTED — police units responding!');
         }
       }
@@ -1187,7 +1305,44 @@ export class HyperionGame implements World {
       this.vehicles.despawnExtraPolice(want);
       this.policeTimer = 4;
     }
-    if (want === 0) this.policeWarned = false;
+    if (want === 0) {
+      this.policeWarned = false;
+      this.evadeT = 0;
+      this.loseWarned = false;
+    }
+
+    // --- Line-of-sight / evade logic (fixes corner-camping at high stars) ---
+    if (want > 0 && active > 0) {
+      const pp = this.playerPos();
+      let seen = false;
+      for (const c of units) {
+        const d = c.group.position.distanceTo(pp);
+        if (d < 68) {
+          seen = true;
+          break;
+        }
+      }
+      // Tunnels are safe: cops can't see you from the surface once underground.
+      if (this.playerPos().y < -2.5) seen = false;
+      if (seen) {
+        this.evadeT = 0;
+        this.loseWarned = false;
+      } else {
+        this.evadeT += dt;
+        if (this.evadeT > 5 && !this.loseWarned) {
+          this.loseWarned = true;
+          this.toast('You are losing them — stay out of sight!');
+        }
+        if (this.evadeT > 16) {
+          this.heat *= 0.4; // big drop; passive decay handles the rest
+          this.evadeT = 0;
+          this.loseWarned = false;
+          this.toast('You lost the cops!');
+          this.vehicles.despawnExtraPolice(0);
+        }
+      }
+    }
+
     const pp = this.playerPos();
     const near = this.vehicles.cars.some((c) => c.state === 'police' && c.group.position.distanceTo(pp) < 95);
     if (near && !this.sirenOn) {
@@ -1224,6 +1379,7 @@ export class HyperionGame implements World {
     }
     if (this.starsMat) this.starsMat.opacity = night * 0.95;
 
+    // Base fog from the day/night cycle.
     const fog = this.scene.fog as THREE.Fog | null;
     if (fog) {
       fog.color.setHex(0xe4c39a).lerp(NIGHT_FOG, night);
@@ -1231,6 +1387,36 @@ export class HyperionGame implements World {
       fog.far = 620 - night * 190;
     }
     this.city.applyNight(night);
+
+    // --- Weather dimming (overcast/rain gray-out + lightning spike) ---------
+    const rainI = this.weather.intensity;
+    if (rainI > 0.01) {
+      const w = rainI * 0.78;
+      this.sun.intensity *= 1 - 0.82 * rainI;
+      this.hemi.intensity = Math.max(0.1, this.hemi.intensity * (1 - 0.25 * rainI) + 0.05 * rainI);
+      if (this.skyUniforms) {
+        this.skyUniforms.top.value.lerp(GRAY_TOP, w);
+        this.skyUniforms.mid.value.lerp(GRAY_MID, w);
+        this.skyUniforms.bottom.value.lerp(GRAY_BOT, w);
+      }
+      if (this.starsMat) this.starsMat.opacity *= 1 - rainI;
+      if (fog) {
+        fog.color.lerp(GRAY_FOG, w);
+        fog.near = Math.min(fog.near, 150 - rainI * 62);
+        fog.far = Math.min(fog.far, 620 - rainI * 240);
+      }
+      this.city.applyNight(Math.max(night, rainI * 0.45));
+    }
+    if (this.lightningT > 0) {
+      const f = Math.min(1, this.lightningT / 0.24);
+      this.sun.intensity += 4.5 * f;
+      this.hemi.intensity += 1.4 * f;
+      if (this.skyUniforms) {
+        this.skyUniforms.top.value.lerp(WHITE, f * 0.85);
+        this.skyUniforms.mid.value.lerp(WHITE, f * 0.85);
+        this.skyUniforms.bottom.value.lerp(WHITE, f * 0.85);
+      }
+    }
 
     const mins = Math.floor(t * 24 * 60);
     this.clockStr = `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
@@ -1337,9 +1523,17 @@ export class HyperionGame implements World {
       clock: this.clockStr,
       hitMark: this.hitMark,
       police: this.vehicles.cars.reduce((n, c) => (c.state === 'police' ? n + 1 : n), 0),
-      mission: this.missions.snapshot(),
+      mission: (() => {
+        const s = this.missions.snapshot((m, buildingId) => (m.locate === 'building' ? this.missionMarker(buildingId) : null));
+        if (!s) return null;
+        const pp2 = this.playerPos();
+        const dist = s.marker ? Math.hypot(s.marker.x - pp2.x, s.marker.z - pp2.z) : 0;
+        return { ...s, marker: s.marker ? { ...s.marker, dist } : null };
+      })(),
       radio: this.drivingCar ? HyperionAudio.STATIONS[this.audio.radioStation].name : null,
       hasSave: this.hasSaveFile,
+      weather: { state: this.weather.state, intensity: this.weather.intensity },
+      evading: this.stars >= 2 && this.evadeT > 0 ? Math.min(1, this.evadeT / 16) : 0,
     };
     this.cb.onState(state);
     this.drawMinimap();
@@ -1412,7 +1606,60 @@ export class HyperionGame implements World {
         ctx.fillRect((t.pos.x - p.x) - 2.4, (t.pos.z - p.z) - 2.4, 4.8, 4.8);
       }
     }
+    // Contract target marker (pulsing amber diamond, clamped to map edges)
+    const snap = this.missions.snapshot((m, buildingId) => (m.locate === 'building' ? this.missionMarker(buildingId) : null));
+    let markerScreen: { x: number; y: number; dist: number } | null = null;
+    if (snap && snap.marker) {
+      const mx = snap.marker.x - p.x;
+      const mz = snap.marker.z - p.z;
+      const md = Math.hypot(mx, mz);
+      // Clamp to a rectangle inside the visible map area (world units).
+      const clX = 58;
+      const clZ = 38;
+      const k = Math.max(Math.abs(mx) / clX, Math.abs(mz) / clZ, 1);
+      const cx2 = mx / k;
+      const cz2 = mz / k;
+      const pulse = 0.55 + 0.45 * Math.sin(performance.now() * 0.006);
+      ctx.save();
+      ctx.translate(cx2, cz2);
+      ctx.rotate(Math.PI / 4);
+      ctx.globalAlpha = 0.45 + 0.55 * pulse;
+      ctx.fillStyle = '#ffb020';
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 1;
+      const s = 4.6;
+      ctx.beginPath();
+      ctx.rect(-s / 2, -s / 2, s, s);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+      // Convert to screen space for the upright label (undo map rotation).
+      const yaw = this.drivingCar ? this.drivingCar.yaw + Math.PI : this.player.yaw;
+      const cos = Math.cos(yaw);
+      const sin = Math.sin(yaw);
+      markerScreen = {
+        x: w / 2 + zoom * (cx2 * cos - cz2 * sin),
+        y: h / 2 + zoom * (cx2 * sin + cz2 * cos),
+        dist: md,
+      };
+    }
     ctx.restore();
+    // Contract marker distance label (screen space, upright)
+    if (markerScreen) {
+      const lx = Math.max(22, Math.min(w - 22, markerScreen.x));
+      const ly = Math.max(12, Math.min(h - 10, markerScreen.y - 9));
+      ctx.save();
+      ctx.globalAlpha = 0.95;
+      ctx.font = 'bold 10px monospace';
+      ctx.textAlign = 'center';
+      const label = `◆ ${Math.round(markerScreen.dist)}m`;
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 2.4;
+      ctx.strokeText(label, lx, ly);
+      ctx.fillStyle = '#ffcf6a';
+      ctx.fillText(label, lx, ly);
+      ctx.restore();
+    }
     // Player arrow
     ctx.save();
     ctx.translate(w / 2, h / 2);
@@ -1477,6 +1724,7 @@ export class HyperionGame implements World {
     this.detachInput();
     document.removeEventListener('pointerlockchange', this.onLockChange);
     window.removeEventListener('resize', this.onResize);
+    this.weather.dispose();
     this.city.dispose();
     this.vehicles.dispose();
     this.npcs.dispose();
