@@ -59,6 +59,20 @@ export interface HudState {
   clock: string;
   hitMark: number;
   police: number;
+  /** Active or offered chaos contract (missions system). */
+  mission: null | {
+    title: string;
+    desc: string;
+    progress: number;
+    target: number;
+    timeLeft: number;
+    reward: string;
+    offered: boolean;
+  };
+  /** Current car-radio station name (null = radio off / not driving). */
+  radio: string | null;
+  /** True when a localStorage save file exists (start screen CONTINUE button). */
+  hasSave: boolean;
 }
 
 export const HUD_INITIAL: HudState = {
@@ -84,6 +98,9 @@ export const HUD_INITIAL: HudState = {
   clock: '17:20',
   hitMark: 0,
   police: 0,
+  mission: null,
+  radio: null,
+  hasSave: false,
 };
 
 /**

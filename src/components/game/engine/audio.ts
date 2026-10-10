@@ -20,6 +20,11 @@ export class HyperionAudio {
   private sirOsc: OscillatorNode | null = null;
   private sirLfo: OscillatorNode | null = null;
   private sirGain: GainNode | null = null;
+  // Car radio: lookahead scheduler state.
+  private radioTimer: ReturnType<typeof setInterval> | null = null;
+  private radioStep = 0;
+  private radioNextT = 0;
+  radioStation = 0; // 0 = off, 1..3 = stations
 
   constructor() {}
 
@@ -365,11 +370,159 @@ export class HyperionAudio {
     } catch { /* noop */ }
   }
 
+  // ------------------------------------------------------------------ radio
+
+  /** Car radio station definitions (seeded procedural chiptune). */
+  static readonly STATIONS = [
+    { name: 'RADIO OFF', bpm: 0 },
+    { name: 'HYP FM 101.3', bpm: 128 },
+    { name: 'MIDNIGHT 84.5', bpm: 82 },
+    { name: 'VOXEL HARDWARE', bpm: 152 },
+  ];
+
+  /** Start the car radio at a station (or advance into station 1). */
+  startRadio(station = 1): void {
+    try {
+      if (!this.ctx || !this.master) return;
+      this.stopRadio();
+      this.radioStation = Math.max(1, Math.min(3, station));
+      this.radioStep = 0;
+      this.radioNextT = this.ctx.currentTime + 0.08;
+      this.radioTimer = setInterval(() => this.radioScheduler(), 50);
+    } catch { /* noop */ }
+  }
+
+  /** Stop the radio scheduler. */
+  stopRadio(): void {
+    try {
+      if (this.radioTimer !== null) {
+        clearInterval(this.radioTimer);
+        this.radioTimer = null;
+      }
+    } catch { /* noop */ }
+  }
+
+  /** Cycle station; returns the new station name. 0 = off. */
+  cycleRadio(): string {
+    try {
+      this.radioStation = (this.radioStation + 1) % HyperionAudio.STATIONS.length;
+      if (this.radioStation === 0) {
+        this.stopRadio();
+        return HyperionAudio.STATIONS[0].name;
+      }
+      this.startRadio(this.radioStation);
+      return HyperionAudio.STATIONS[this.radioStation].name;
+    } catch {
+      return HyperionAudio.STATIONS[0].name;
+    }
+  }
+
+  /** Lookahead scheduler: queues 16th-notes ~0.18s ahead. */
+  private radioScheduler(): void {
+    try {
+      if (!this.ctx) return;
+      const st = HyperionAudio.STATIONS[this.radioStation];
+      if (!st || st.bpm <= 0) return;
+      const stepDur = 60 / st.bpm / 4; // 16th note
+      while (this.radioNextT < this.ctx.currentTime + 0.18) {
+        this.scheduleRadioStep(this.radioStep, this.radioNextT, stepDur, this.radioStation);
+        this.radioStep = (this.radioStep + 1) % 64;
+        this.radioNextT += stepDur;
+      }
+    } catch { /* noop */ }
+  }
+
+  /** Absolute-time note (radio scheduler needs future-time scheduling). */
+  private radioNote(type: OscillatorType, f0: number, t0: number, dur: number, peak: number, lp?: number): void {
+    try {
+      if (!this.ctx || !this.master) return;
+      const o = this.osc(type, f0), g = this.ctx.createGain();
+      if (!o) return;
+      const p = g.gain;
+      p.setValueAtTime(0.0001, t0);
+      p.linearRampToValueAtTime(peak, t0 + 0.012);
+      p.setValueAtTime(peak, t0 + Math.max(0.013, dur - 0.05));
+      p.exponentialRampToValueAtTime(0.0001, t0 + dur + 0.02);
+      let tail: AudioNode = o;
+      if (lp) {
+        const f = this.filter('lowpass', lp);
+        if (f) { o.connect(f); tail = f; }
+      }
+      tail.connect(g);
+      g.connect(this.master);
+      o.start(t0);
+      o.stop(t0 + dur + 0.05);
+    } catch { /* noop */ }
+  }
+
+  /** Absolute-time hat/shaker from the cached noise buffer. */
+  private radioHat(t0: number, peak: number, open: boolean): void {
+    try {
+      if (!this.ctx || !this.master || !this.noiseBuf) return;
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.noiseBuf;
+      src.loop = true;
+      const f = this.filter('highpass', 6500);
+      const g = this.ctx.createGain();
+      if (!f) return;
+      const dur = open ? 0.09 : 0.03;
+      g.gain.setValueAtTime(peak, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      src.connect(f); f.connect(g); g.connect(this.master);
+      src.start(t0, Math.random() * 0.9);
+      src.stop(t0 + dur + 0.02);
+    } catch { /* noop */ }
+  }
+
+  /** One 16th-step of the station's pattern: bass / lead / hats / pad. */
+  private scheduleRadioStep(step: number, t0: number, stepDur: number, station: number): void {
+    try {
+      if (station === 1) {
+        // HYP FM: upbeat major-pentatonic square lead + triangle bass + offbeat hats
+        const C = [261.63, 293.66, 329.63, 392.0, 440.0, 523.25];
+        const bassRoot = [65.41, 65.41, 87.31, 98.0][Math.floor(step / 16) % 4];
+        if (step % 2 === 0) this.radioNote('triangle', bassRoot, t0, stepDur * 1.8, 0.16);
+        if (step % 4 === 2) this.radioHat(t0, 0.1, false);
+        if (step % 8 === 4) this.radioHat(t0, 0.13, true);
+        const mel = [0, 2, 4, 5, 4, 2, 5, 4, 0, 2, 5, 4, 2, 4, 5, 2];
+        if (step % 2 === 0) {
+          const n = C[mel[(step / 2) % 16]] * (step >= 32 ? 1.5 : 1);
+          this.radioNote('square', n, t0, stepDur * 1.6, 0.07, 3200);
+        }
+      } else if (station === 2) {
+        // MIDNIGHT: slow dreamy minor, sine lead + soft bass, sparse hats
+        const Am = [220.0, 261.63, 293.66, 329.63, 392.0, 440.0];
+        const bassRoot = [55.0, 55.0, 61.74, 49.0][Math.floor(step / 16) % 4];
+        if (step % 8 === 0) this.radioNote('triangle', bassRoot, t0, stepDur * 7, 0.15);
+        if (step % 8 === 4) this.radioHat(t0, 0.05, false);
+        const mel = [0, 3, 2, 4, 3, 5, 4, 2];
+        if (step % 8 === 0) {
+          const n = Am[mel[Math.floor(step / 8) % 8]];
+          this.radioNote('sine', n, t0, stepDur * 6, 0.09, 2400);
+          this.radioNote('sine', n * 2, t0 + stepDur, stepDur * 4, 0.035, 2400);
+        }
+      } else {
+        // VOXEL HARDWARE: aggressive saw riff + driving bass + every-16th hats
+        const Ph = [146.83, 155.56, 174.61, 185.0, 196.0, 220.0];
+        const bassRoot = [36.71, 36.71, 32.70, 38.89][Math.floor(step / 16) % 4];
+        this.radioNote('sawtooth', bassRoot * 2, t0, stepDur * 0.9, 0.14, 900);
+        if (step % 2 === 0) this.radioNote('sawtooth', bassRoot, t0, stepDur, 0.16, 600);
+        this.radioHat(t0, step % 4 === 0 ? 0.12 : 0.06, false);
+        const riff = [0, 0, 2, 0, 4, 0, 5, 4];
+        if (step % 2 === 0) {
+          const n = Ph[riff[(step / 2) % 8]] * (Math.floor(step / 16) % 2 === 1 ? 1.189 : 1);
+          this.radioNote('square', n, t0, stepDur * 0.85, 0.075, 4200);
+        }
+      }
+    } catch { /* noop */ }
+  }
+
   // --------------------------------------------------------------- cleanup
 
   dispose(): void {
     try { this.stopEngine(); } catch { /* noop */ }
     try { this.stopSiren(); } catch { /* noop */ }
+    try { this.stopRadio(); } catch { /* noop */ }
     try { if (this.ctx) void this.ctx.close(); } catch { /* noop */ }
     this.ctx = null; this.master = null; this.noiseBuf = null;
   }

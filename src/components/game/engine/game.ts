@@ -25,6 +25,8 @@ import { NPCs } from './npcs';
 import { Particles } from './particles';
 import { Vehicles, Car } from './vehicles';
 import { HyperionAudio } from './audio';
+import { Missions } from './missions';
+import { SAVE_TYPES, clearSave, hasSave, loadSave, writeSave } from './save';
 import {
   HUD_EMIT_INTERVAL,
   MINIMAP_SPAN,
@@ -41,6 +43,8 @@ export interface GameCallbacks {
   onState: (s: HudState) => void;
   onToast: (msg: string) => void;
   onDeath: () => void;
+  /** Engine-initiated pause (Esc without pointer lock) — syncs the React pause menu. */
+  onPauseRequest: () => void;
 }
 
 const DAY_CYCLE = 300; // seconds of game-time for a full 24h cycle
@@ -140,6 +144,16 @@ export class HyperionGame implements World {
   private currentHint: string | null = null;
   private drivingCar: Car | null = null;
   private disposed = false;
+  private missions = new Missions({
+    toast: (msg) => this.toast(msg),
+    complete: (def) => {
+      this.addScore(def.rewardScore);
+      for (const r of def.rewards) this.addItem(r.id as ItemId, r.count, true);
+      this.audio.pickup();
+    },
+  });
+  private autosaveT = 15;
+  private hasSaveFile = false;
 
   constructor(canvas: HTMLCanvasElement, cb: GameCallbacks) {
     this.canvas = canvas;
@@ -184,6 +198,7 @@ export class HyperionGame implements World {
     this.city.onCollapseStart = (b) => {
       this.audio.collapse(this.far(b.group.position));
       this.addScore(40);
+      this.missions.onCollapse();
       this.toast('Structural collapse!');
     };
     this.city.onCollapseDust = (p, r) => this.particles.dustPuff(p, 6, r);
@@ -213,11 +228,12 @@ export class HyperionGame implements World {
     this.buildMinimapBase();
 
     this.detachInput = this.input.attach(canvas, () => {
-      if (this.playing && !this.uiOpen) this.paused = true;
+      if (this.playing && !this.uiOpen) this.cb.onPauseRequest();
     });
     document.addEventListener('pointerlockchange', this.onLockChange);
     window.addEventListener('resize', this.onResize);
     this.onResize();
+    this.hasSaveFile = hasSave();
   }
 
   private onLockChange = (): void => {
@@ -378,6 +394,7 @@ export class HyperionGame implements World {
     });
     if (res.removed > 0) {
       void color;
+      this.missions.onVoxels(res.removed);
       this.city.checkCollapses();
       this.ensureStrata(this.player.pos.y);
     }
@@ -516,7 +533,10 @@ export class HyperionGame implements World {
   }
 
   ragdollNPCsNear(pos: THREE.Vector3, r: number): void {
-    if (this.npcs.ragdollNear(pos, r)) this.addScore(15);
+    if (this.npcs.ragdollNear(pos, r)) {
+      this.addScore(15);
+      this.missions.onPed();
+    }
   }
 
   fleeNPCs(pos: THREE.Vector3, r: number): void {
@@ -621,6 +641,7 @@ export class HyperionGame implements World {
       if (this.npcs.hitNear(hit.point, 1.5)) {
         this.hitMark++;
         this.addScore(15);
+        this.missions.onPed();
         this.audio.thud(0.1);
         this.toast('Pedestrian down');
         this.fleeNPCs(hit.point, 18);
@@ -853,6 +874,7 @@ export class HyperionGame implements World {
       this.vehicles.exit(car, this.player.pos);
       this.audio.enterCar();
       this.audio.stopEngine();
+      this.audio.stopRadio();
       this.player.group.visible = this.thirdPerson;
       return;
     }
@@ -862,6 +884,7 @@ export class HyperionGame implements World {
       this.vehicles.enter(car);
       this.audio.enterCar();
       this.audio.startEngine();
+      this.audio.startRadio(this.audio.radioStation > 0 ? this.audio.radioStation : 1);
       this.player.group.visible = false;
       this.toast(`Driving ${car.name}`);
     }
@@ -878,6 +901,7 @@ export class HyperionGame implements World {
     this.audio.boom(this.far(pos));
     this.shake(0.9);
     this.addScore(30);
+    if (isCar) this.missions.onCarWreck();
     this.city.checkCollapses();
     this.ensureStrata(this.player.pos.y);
 
@@ -939,6 +963,13 @@ export class HyperionGame implements World {
     if (this.input.justPressed('F3')) this.debugVisible = !this.debugVisible;
     if (this.input.justPressed('KeyF')) this.enterNearestCar();
     if (this.input.justPressed('KeyH') && this.drivingCar) this.audio.horn(0.1);
+    if (this.input.justPressed('KeyM')) {
+      if (!this.missions.accept()) this.missions.abandon();
+    }
+    if (this.input.justPressed('KeyR') && this.drivingCar) {
+      const st = this.audio.cycleRadio();
+      this.toast(`📻 ${st}`);
+    }
 
     // Player or car
     if (this.drivingCar) {
@@ -1028,6 +1059,14 @@ export class HyperionGame implements World {
     this.timeT = (this.timeT + dt / DAY_CYCLE) % 1;
     this.updateDayNight();
 
+    // Contracts + autosave
+    this.missions.update(dt);
+    this.autosaveT -= dt;
+    if (this.autosaveT <= 0) {
+      this.autosaveT = 15;
+      this.saveNow(false);
+    }
+
     // Hints
     this.hintT -= dt;
     if (this.hintT <= 0) {
@@ -1041,6 +1080,93 @@ export class HyperionGame implements World {
 
     this.hurtVignette = Math.max(0, this.hurtVignette - dt * 1.6);
     this.shakeT = Math.max(0, this.shakeT - dt * 2.2);
+  }
+
+  // ------------------------------------------------------------------ save / load
+  /** Serialize world state to localStorage. manual=true toasts. */
+  saveNow(manual: boolean): void {
+    const placed: number[][] = [];
+    for (const [key, b] of this.placed) {
+      const [xs, ys, zs] = key.split(',');
+      const ti = SAVE_TYPES.indexOf(b.type as (typeof SAVE_TYPES)[number]);
+      if (ti < 0) continue;
+      placed.push([Number(xs), Number(ys), Number(zs), ti]);
+    }
+    const p = this.player;
+    const ok = writeSave({
+      v: 1,
+      t: Date.now(),
+      player: { x: p.pos.x, y: p.pos.y, z: p.pos.z, yaw: p.yaw, pitch: p.pitch, health: p.health, flying: p.flying },
+      timeT: this.timeT,
+      heat: this.heat,
+      removed: this.destruction.totalRemoved,
+      slot: this.slot,
+      hotbar: this.hotbar.map((s) => (s ? { ...s } : null)),
+      inventory: this.inventory.map((s) => (s ? { ...s } : null)),
+      placed,
+    });
+    this.hasSaveFile = ok;
+    if (manual) this.toast(ok ? 'World saved' : 'Save failed (storage blocked?)');
+  }
+
+  /** Restore a saved world (placed blocks, player, inventory, clock). */
+  applySave(): boolean {
+    const d = loadSave();
+    if (!d) return false;
+    try {
+      // Placed blocks — one shared rounded-voxel geometry.
+      for (const [ix, iy, iz, ti] of d.placed) {
+        const type = SAVE_TYPES[ti];
+        if (!type) continue;
+        const key = `${ix},${iy},${iz}`;
+        if (this.placed.has(key)) continue;
+        const center = new THREE.Vector3(ix + 0.5, iy + 0.5, iz + 0.5);
+        const mesh = new THREE.Mesh(this.placedGeo(), makeBlockMaterial(type));
+        mesh.position.copy(center);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        this.scene.add(mesh);
+        this.placed.set(key, {
+          mesh,
+          aabb: new THREE.Box3().setFromCenterAndSize(center.clone(), new THREE.Vector3(1, 1, 1)),
+          type,
+        });
+        this.placedOrder.push(key);
+      }
+      // Player
+      const p = this.player;
+      p.pos.set(d.player.x, d.player.y, d.player.z);
+      p.vel.set(0, 0, 0);
+      p.yaw = d.player.yaw;
+      p.pitch = d.player.pitch;
+      p.flying = d.player.flying;
+      if (d.player.health < p.health) p.damage(p.health - d.player.health);
+      else if (d.player.health > p.health) p.heal(d.player.health - p.health);
+      // Stats + clock + inventory
+      this.timeT = d.timeT;
+      this.updateDayNight();
+      this.heat = d.heat;
+      this.destruction.totalRemoved = d.removed;
+      this.hotbar = d.hotbar.map((s) => (s ? { ...s } : null));
+      this.inventory = d.inventory.map((s) => (s ? { ...s } : null));
+      this.slot = ((d.slot % 9) + 9) % 9;
+      this.setSlot(this.slot);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Fresh game: wipe any previous save. */
+  resetNewGame(): void {
+    clearSave();
+    this.hasSaveFile = false;
+  }
+
+  private placedGeoCache: THREE.BufferGeometry | null = null;
+  private placedGeo(): THREE.BufferGeometry {
+    if (!this.placedGeoCache) this.placedGeoCache = new RoundedBoxGeometry(0.97, 0.97, 0.97, 2, 0.07);
+    return this.placedGeoCache;
   }
 
   // ------------------------------------------------------------------ police
@@ -1211,6 +1337,9 @@ export class HyperionGame implements World {
       clock: this.clockStr,
       hitMark: this.hitMark,
       police: this.vehicles.cars.reduce((n, c) => (c.state === 'police' ? n + 1 : n), 0),
+      mission: this.missions.snapshot(),
+      radio: this.drivingCar ? HyperionAudio.STATIONS[this.audio.radioStation].name : null,
+      hasSave: this.hasSaveFile,
     };
     this.cb.onState(state);
     this.drawMinimap();

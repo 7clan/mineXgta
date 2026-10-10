@@ -5,11 +5,13 @@ import { HyperionGame } from './engine/game';
 import { HUD_INITIAL, HudState } from './engine/types';
 import { Hud } from './hud';
 import { initIcons, initUIIcons } from './engine/items';
+import { hasSave } from './engine/save';
 
 export default function HyperionClient() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const gameRef = useRef<HyperionGame | null>(null);
-  const [state, setState] = useState<HudState>(HUD_INITIAL);
+  // Seed hasSave at first paint so the CONTINUE button never pops in late.
+  const [state, setState] = useState<HudState>(() => ({ ...HUD_INITIAL, hasSave: hasSave() }));
   const [toast, setToast] = useState<string | null>(null);
   const [showStart, setShowStart] = useState(true);
   const [paused, setPaused] = useState(false);
@@ -53,6 +55,11 @@ export default function HyperionClient() {
           onDeath: () => {
             game.inputExitLock();
           },
+          onPauseRequest: () => {
+            setPaused(true);
+            game.setPaused(true);
+            game.inputExitLock();
+          },
         });
         gameRef.current = game;
         // Expose for browser-automation QA (harmless in production).
@@ -77,11 +84,27 @@ export default function HyperionClient() {
   const handlePlay = useCallback(() => {
     const game = gameRef.current;
     if (!game) return;
+    game.resetNewGame(); // fresh run: wipe any previous save
     setShowStart(false);
     setPaused(false);
     game.setPlaying(true);
     game.setPaused(false);
     game.requestLock();
+  }, []);
+
+  const handleContinue = useCallback(() => {
+    const game = gameRef.current;
+    if (!game) return;
+    game.applySave();
+    setShowStart(false);
+    setPaused(false);
+    game.setPlaying(true);
+    game.setPaused(false);
+    game.requestLock();
+  }, []);
+
+  const handleSave = useCallback(() => {
+    gameRef.current?.saveNow(true);
   }, []);
 
   const handleResume = useCallback(() => {
@@ -141,6 +164,8 @@ export default function HyperionClient() {
         onResume={handleResume}
         onRespawn={handleRespawn}
         onPlay={handlePlay}
+        onContinue={handleContinue}
+        onSave={handleSave}
         paused={paused}
         inventoryOpen={inventoryOpen}
         onCloseInventory={handleCloseInventory}

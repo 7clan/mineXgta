@@ -97,6 +97,8 @@ export interface HudProps {
   onResume: () => void;
   onRespawn: () => void;
   onPlay: () => void;
+  onContinue: () => void;
+  onSave: () => void;
   paused: boolean;
   inventoryOpen: boolean;
   onCloseInventory: () => void;
@@ -114,10 +116,59 @@ const CONTROLS: Array<[string, string]> = [
   ['1–9 / Wheel', 'Select hotbar slot'],
   ['E', 'Inventory'],
   ['F', 'Enter / exit car'],
+  ['M', 'Accept / quit contract'],
+  ['R', 'Car radio station'],
   ['F5', 'Third-person view'],
   ['F3', 'Debug overlay'],
   ['Esc', 'Pause'],
 ];
+
+/** Contract tracker — GTA-style offer/active chip with progress + countdown. */
+function MissionChip({ mission }: { mission: NonNullable<HudState['mission']> }) {
+  const pct = mission.target > 0 ? Math.min(100, (mission.progress / mission.target) * 100) : 0;
+  const offer = mission.offered;
+  return (
+    <div
+      className={`hyperion-missionchip absolute left-1/2 top-4 w-[300px] max-w-[80vw] -translate-x-1/2 rounded-lg border bg-black/70 px-3 py-2 backdrop-blur-[2px] ${
+        offer ? 'hyperion-offer border-amber-400/70' : 'border-amber-400/25'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-[11px] font-black uppercase tracking-[0.16em] text-amber-300">
+          <span className="text-[13px] leading-none">{offer ? '📡' : '🎯'}</span>
+          {offer ? 'CONTRACT OFFER' : 'CONTRACT'} · {mission.title}
+        </div>
+        <div className={`text-[12px] font-black tabular-nums ${mission.timeLeft < 10 && !offer ? 'text-red-400' : 'text-white/90'}`}>
+          {Math.ceil(mission.timeLeft)}s
+        </div>
+      </div>
+      <div className="mt-1 text-[11px] font-bold text-white/80">
+        {offer ? `${mission.desc} — press M to accept` : mission.desc}
+      </div>
+      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/10">
+        <div
+          className={`h-full rounded-full transition-[width] duration-200 ${offer ? 'w-full bg-amber-400/50' : 'bg-amber-400'}`}
+          style={offer ? undefined : { width: `${pct}%` }}
+        />
+      </div>
+      <div className="mt-1 flex justify-between text-[9px] font-bold uppercase tracking-widest text-white/45">
+        <span>{offer ? 'Reward' : `${mission.progress} / ${mission.target}`}</span>
+        <span>{mission.reward}</span>
+      </div>
+    </div>
+  );
+}
+
+/** Animated radio equalizer bars. */
+function EqBars() {
+  return (
+    <span className="flex h-3 items-end gap-[2px]">
+      {[0, 1, 2, 3].map((i) => (
+        <span key={i} className="hyperion-eqbar block h-3 w-[3px] rounded-sm bg-emerald-400/90" />
+      ))}
+    </span>
+  );
+}
 
 export function Hud(props: HudProps) {
   const { state, toast } = props;
@@ -162,12 +213,24 @@ export function Hud(props: HudProps) {
         </div>
       )}
 
+      {/* Police light wash across screen edges (only with active pursuit) */}
+      {state.playing && !state.dead && state.police > 0 && <div className="hyperion-policeflash absolute inset-0" />}
+
+      {/* Contract tracker (top center) */}
+      {state.playing && !state.dead && state.mission && <MissionChip mission={state.mission} />}
+
       {/* Stars — GTA chaos level (top right) */}
       {state.playing && (
         <div className="absolute right-4 top-4 flex flex-col items-end gap-1">
           <Stars count={state.stars} />
           <div className="rounded bg-black/55 px-2 py-0.5 text-right text-[11px] font-bold tracking-widest text-white/90">
             CHAOS {state.score}
+          </div>
+          <div className="h-1 w-24 overflow-hidden rounded-full bg-black/50">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-amber-500 to-red-400 transition-[width] duration-300"
+              style={{ width: `${Math.min(100, ((state.score % 150) / 150) * 100)}%` }}
+            />
           </div>
           {state.police > 0 && (
             <div className="hyperion-policechip mt-1 rounded border border-red-400/40 bg-black/60 px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.18em] text-red-300">
@@ -197,11 +260,22 @@ export function Hud(props: HudProps) {
         </div>
       )}
 
-      {/* Quick-hints chip (bottom right, above depth) */}
+      {/* Quick-hints chip (bottom right) */}
       {state.playing && !state.dead && state.depth <= 0 && (
         <div className="absolute bottom-6 right-4 rounded bg-black/45 px-2.5 py-1 text-right text-[10px] font-bold leading-relaxed tracking-wide text-white/55">
           <div>E INVENTORY · F5 VIEW</div>
-          <div>F CAR · F3 DEBUG</div>
+          <div>F CAR · M CONTRACT</div>
+        </div>
+      )}
+
+      {/* Radio chip — animated EQ + station name while driving */}
+      {state.playing && !state.dead && state.radio && (
+        <div className="absolute bottom-24 right-4 flex items-center gap-2 rounded-lg border border-emerald-400/25 bg-black/65 px-3 py-1.5">
+          <EqBars />
+          <div>
+            <div className="text-[9px] font-bold uppercase tracking-[0.22em] text-emerald-300/80">Radio · R</div>
+            <div className="text-[11px] font-black leading-tight text-white/90">{state.radio}</div>
+          </div>
         </div>
       )}
 
@@ -306,6 +380,12 @@ export function Hud(props: HudProps) {
             >
               RESUME
             </button>
+            <button
+              onClick={props.onSave}
+              className="mb-4 w-full rounded-lg border border-emerald-400/40 bg-emerald-500/15 py-2 text-sm font-black uppercase tracking-widest text-emerald-300 transition hover:bg-emerald-500/25 active:scale-[0.98]"
+            >
+              💾 Save world
+            </button>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1 rounded-lg bg-black/40 p-3 text-left text-[11px] text-white/75">
               {CONTROLS.map(([k, v]) => (
                 <div key={k} className="flex justify-between gap-2">
@@ -359,11 +439,19 @@ export function Hud(props: HudProps) {
               sidewalk is a dense micro-voxel lattice — dig through downtown with your pickaxe, rig engines with
               flint &amp; steel, build sky-bridges from smooth dirt slabs, and fly like creative mode.
             </p>
+            {state.hasSave && (
+              <button
+                onClick={props.onContinue}
+                className="mb-3 rounded-lg border border-emerald-400/40 bg-emerald-500/15 px-10 py-2.5 text-base font-black tracking-wide text-emerald-300 transition hover:bg-emerald-500/25 active:scale-[0.98]"
+              >
+                ⟳ CONTINUE SAVED CITY
+              </button>
+            )}
             <button
               onClick={props.onPlay}
               className="mb-8 rounded-lg bg-amber-500 px-14 py-4 text-2xl font-black tracking-wide text-black shadow-[0_6px_0_#8a5a00] transition hover:bg-amber-400 active:translate-y-[3px] active:shadow-[0_3px_0_#8a5a00]"
             >
-              ▶ PLAY
+              ▶ NEW GAME
             </button>
             <div className="grid max-w-2xl grid-cols-2 gap-x-8 gap-y-1 rounded-xl bg-black/55 p-4 text-left text-[11px] text-white/75 md:grid-cols-3">
               {CONTROLS.map(([k, v]) => (
