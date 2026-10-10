@@ -1,0 +1,1229 @@
+import * as THREE from 'three';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import {
+  BEDROCK_Y,
+  CAR_EXPLODE_RADIUS,
+  GRID_HALF,
+  BLOCK,
+  HAND_COOLDOWN,
+  HAND_RADIUS,
+  LAYER0_Y,
+  LAYER_GAP,
+  MAX_STRATA,
+  PICK_COOLDOWN,
+  REACH,
+  TNT_FUSE,
+  TNT_RADIUS,
+  mulberry32,
+} from './constants';
+import { DestructionSystem } from './destruction';
+import { Input } from './input';
+import { City } from './city';
+import { Player } from './player';
+import { NPCs } from './npcs';
+import { Particles } from './particles';
+import { Vehicles, Car } from './vehicles';
+import { HyperionAudio } from './audio';
+import {
+  HUD_EMIT_INTERVAL,
+  MINIMAP_SPAN,
+  buildSky,
+  rayBox,
+  updateClouds,
+} from './game-utils';
+import { ITEMS, makeBlockMaterial, makeTNTMaterials } from './items';
+import { AimHit, HudState, ItemId, ItemStack, World } from './types';
+import { makeCloudTexture, makeSunSprite } from './textures';
+
+export interface GameCallbacks {
+  onState: (s: HudState) => void;
+  onToast: (msg: string) => void;
+  onDeath: () => void;
+}
+
+interface PlacedBlock {
+  mesh: THREE.Mesh;
+  aabb: THREE.Box3;
+  type: ItemId;
+}
+interface TntEntity {
+  mesh: THREE.Mesh;
+  fuse: number;
+  pos: THREE.Vector3;
+}
+interface Pearl {
+  mesh: THREE.Mesh;
+  vel: THREE.Vector3;
+  t: number;
+}
+interface FirePatch {
+  pos: THREE.Vector3;
+  ttl: number;
+}
+
+export class HyperionGame implements World {
+  private canvas: HTMLCanvasElement;
+  private minimap: HTMLCanvasElement | null = null;
+  private cb: GameCallbacks;
+  private renderer: THREE.WebGLRenderer;
+  private scene = new THREE.Scene();
+  private camera: THREE.PerspectiveCamera;
+  private sun: THREE.DirectionalLight;
+  private destruction = new DestructionSystem();
+  private input = new Input();
+  city: City;
+  player: Player;
+  vehicles: Vehicles;
+  npcs: NPCs;
+  particles: Particles;
+  audio = new HyperionAudio();
+  private detachInput: () => void = () => {};
+
+  private placed = new Map<string, PlacedBlock>();
+  private placedOrder: string[] = [];
+  private tnts: TntEntity[] = [];
+  private pearls: Pearl[] = [];
+  private fires: FirePatch[] = [];
+
+  playing = false;
+  paused = false;
+  uiOpen = false;
+  private deadNotified = false;
+  private thirdPerson = false;
+
+  private slot = 0;
+  private hotbar: (ItemStack | null)[] = new Array(9).fill(null);
+  private inventory: (ItemStack | null)[] = new Array(18).fill(null);
+
+  private heat = 0;
+  private stars = 0;
+  private digTimer = 0;
+  private shakeT = 0;
+  private hurtVignette = 0;
+  debugVisible = false;
+
+  private clock = new THREE.Clock();
+  private raf = 0;
+  private stateT = 0;
+  private fps = 60;
+  private frameAcc = 0;
+  private frameN = 0;
+  private fpsT = 0;
+  private qualityTier = 0;
+  private raycaster = new THREE.Raycaster();
+  private tmpV = new THREE.Vector3();
+  private tmpV2 = new THREE.Vector3();
+  private rng = mulberry32(777);
+  private minimapBase: HTMLCanvasElement | null = null;
+  private minimapT = 0;
+  private hintT = 0;
+  private currentHint: string | null = null;
+  private drivingCar: Car | null = null;
+  private disposed = false;
+
+  constructor(canvas: HTMLCanvasElement, cb: GameCallbacks) {
+    this.canvas = canvas;
+    this.cb = cb;
+
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.06;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    this.camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1600);
+    this.scene.fog = new THREE.Fog(0xe4c39a, 130, 620);
+
+    // Lighting — golden hour
+    const hemi = new THREE.HemisphereLight(0xcfe0f2, 0x8a7a5a, 0.75);
+    this.scene.add(hemi);
+    this.sun = new THREE.DirectionalLight(0xffd9ae, 2.6);
+    this.sun.castShadow = true;
+    this.sun.shadow.mapSize.set(2048, 2048);
+    this.sun.shadow.camera.left = -95;
+    this.sun.shadow.camera.right = 95;
+    this.sun.shadow.camera.top = 95;
+    this.sun.shadow.camera.bottom = -95;
+    this.sun.shadow.camera.far = 420;
+    this.sun.shadow.bias = -0.0004;
+    this.scene.add(this.sun);
+    this.scene.add(this.sun.target);
+
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    this.scene.environmentIntensity = 0.35;
+    pmrem.dispose();
+
+    buildSky(this.scene, makeSunSprite(), makeCloudTexture());
+
+    this.city = new City(this.scene, this.destruction);
+    this.city.onCollapseStart = (b) => {
+      this.audio.collapse(this.far(b.group.position));
+      this.addScore(40);
+      this.toast('Structural collapse!');
+    };
+    this.city.onCollapseDust = (p, r) => this.particles.dustPuff(p, 6, r);
+    this.city.onCollapsed = (b) => this.particles.dustPuff(new THREE.Vector3(b.cx, 1, b.cz), 40, b.w);
+
+    this.player = new Player(this.scene);
+    this.particles = new Particles(this.scene);
+    this.vehicles = new Vehicles(this.scene);
+    this.npcs = new NPCs(this.scene);
+
+    this.vehicles.onExplosion = (p, r) => this.explode(p, r, true);
+    this.vehicles.onRagdollNPCs = (p, r) => {
+      if (this.npcs.ragdollNear(p, r)) this.addScore(14);
+    };
+    this.vehicles.onSmoke = (car) => {
+      const p = car.group.position.clone();
+      p.y += 0.9;
+      if (car.state === 'burning') this.particles.firePuff(p, 3);
+      this.particles.smokePuff(p, car.state === 'burning' ? 2 : 1, 0.5, 2.4);
+      this.audio.fireCrackle(this.far(p));
+    };
+    this.npcs.spawn(26, (bi, bj) => this.city.blockType(bi, bj) === 'built');
+    this.vehicles.spawnTraffic(20);
+    this.vehicles.spawnParked(this.city.parkingLots, BLOCK);
+
+    this.initInventory();
+    this.buildMinimapBase();
+
+    this.detachInput = this.input.attach(canvas, () => {
+      if (this.playing && !this.uiOpen) this.paused = true;
+    });
+    document.addEventListener('pointerlockchange', this.onLockChange);
+    window.addEventListener('resize', this.onResize);
+    this.onResize();
+  }
+
+  private onLockChange = (): void => {
+    this.input.setLocked(!!document.pointerLockElement);
+  };
+
+  private onResize = (): void => {
+    const w = this.canvas.clientWidth || window.innerWidth;
+    const h = this.canvas.clientHeight || window.innerHeight;
+    this.renderer.setSize(w, h, false);
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+  };
+
+  setMinimap(c: HTMLCanvasElement | null): void {
+    this.minimap = c;
+  }
+
+  // ------------------------------------------------------------------ inventory
+  private initInventory(): void {
+    const give = (id: ItemId, count: number) => this.addItem(id, count, true);
+    give('pickaxe', 1);
+    give('tnt', 32);
+    give('dirt', 64);
+    give('cobblestone', 64);
+    give('planks', 64);
+    give('glass', 32);
+    give('flint', 1);
+    give('pearl', 16);
+    give('apple', 8);
+    give('sword', 1);
+  }
+
+  addItem(id: ItemId, count: number, silent = false): void {
+    const def = ITEMS[id];
+    let left = count;
+    for (const arr of [this.hotbar, this.inventory]) {
+      for (const s of arr) {
+        if (left <= 0) break;
+        if (s && s.id === id && s.count < def.maxStack) {
+          const take = Math.min(def.maxStack - s.count, left);
+          s.count += take;
+          left -= take;
+        }
+      }
+    }
+    for (const arr of [this.hotbar, this.inventory]) {
+      for (let i = 0; i < arr.length; i++) {
+        if (left <= 0) break;
+        if (!arr[i]) {
+          const take = Math.min(def.maxStack, left);
+          arr[i] = { id, count: take };
+          left -= take;
+        }
+      }
+    }
+    if (left > 0 && !silent) this.toast('Inventory full');
+  }
+
+  private selectedItem(): ItemStack | null {
+    return this.hotbar[this.slot];
+  }
+
+  setSlot(i: number): void {
+    this.slot = ((i % 9) + 9) % 9;
+    const it = this.selectedItem();
+    if (it) {
+      this.toast(ITEMS[it.id].name);
+      const held = ITEMS[it.id].heldColor;
+      this.player.setHeldItem(held);
+    } else this.player.setHeldItem(null);
+  }
+
+  swapInventorySlot(invIndex: number): void {
+    const inv = this.inventory[invIndex];
+    this.inventory[invIndex] = this.hotbar[this.slot];
+    this.hotbar[this.slot] = inv;
+  }
+
+  // ------------------------------------------------------------------ World impl
+  floorHeightAt(x: number, z: number, feetY: number): number {
+    let best = -Infinity;
+    // Strata layers (destruction system knows about all of them)
+    for (const e of this.destruction.all()) {
+      if (e.label !== 'layer' || e.hidden) continue;
+      if (e.layerY > feetY + 0.6) continue;
+      if (Math.abs(x - e.layerCX) > e.layerHalf || Math.abs(z - e.layerCZ) > e.layerHalf) continue;
+      if (!this.destruction.columnCarved(x, z, e.layerY)) best = Math.max(best, e.layerY);
+    }
+    if (best === -Infinity) best = BEDROCK_Y; // fell past everything: bedrock catches
+    // Ground surface extras
+    if (best >= LAYER0_Y - 0.01 && !this.destruction.columnCarved(x, z, LAYER0_Y)) {
+      best = Math.max(best, this.city.sidewalkHeight(x, z));
+    }
+    // Placed blocks
+    const x0 = Math.floor(x - 0.4);
+    const x1 = Math.floor(x + 0.4);
+    const z0 = Math.floor(z - 0.4);
+    const z1 = Math.floor(z + 0.4);
+    for (let ix = x0; ix <= x1; ix++) {
+      for (let iz = z0; iz <= z1; iz++) {
+        for (let iy = Math.floor(feetY - 1.2); iy <= Math.floor(feetY + 1.2); iy++) {
+          const b = this.placed.get(`${ix},${iy},${iz}`);
+          if (!b) continue;
+          const top = b.aabb.max.y;
+          if (top <= feetY + 0.55) best = Math.max(best, top);
+        }
+      }
+    }
+    return best;
+  }
+
+  resolveCircleXZ(pos: THREE.Vector3, radius: number, feetY: number, height: number): void {
+    // Buildings
+    const b = this.city.buildingAt(pos, radius);
+    if (b && !this.destruction.isCarved(pos.x, feetY + height * 0.5, pos.z)) {
+      const a = b.aabb;
+      const pushLeft = pos.x + radius - a.min.x;
+      const pushRight = a.max.x - (pos.x - radius);
+      const pushNear = pos.z + radius - a.min.z;
+      const pushFar = a.max.z - (pos.z - radius);
+      const minX = Math.min(pushLeft, pushRight);
+      const minZ = Math.min(pushNear, pushFar);
+      if (minX < minZ) pos.x += pushLeft < pushRight ? -pushLeft : pushRight;
+      else pos.z += pushNear < pushFar ? -pushNear : pushFar;
+    }
+    // Placed blocks
+    const x0 = Math.floor(pos.x - radius);
+    const x1 = Math.floor(pos.x + radius);
+    const z0 = Math.floor(pos.z - radius);
+    const z1 = Math.floor(pos.z + radius);
+    for (let ix = x0; ix <= x1; ix++) {
+      for (let iz = z0; iz <= z1; iz++) {
+        for (let iy = Math.floor(feetY - 0.5); iy <= Math.floor(feetY + height); iy++) {
+          const blk = this.placed.get(`${ix},${iy},${iz}`);
+          if (!blk) continue;
+          if (blk.aabb.max.y <= feetY + 0.55) continue; // below feet: walkable
+          if (blk.aabb.min.y >= feetY + height) continue; // above head
+          const pushLeft = pos.x + radius - blk.aabb.min.x;
+          const pushRight = blk.aabb.max.x - (pos.x - radius);
+          const pushNear = pos.z + radius - blk.aabb.min.z;
+          const pushFar = blk.aabb.max.z - (pos.z - radius);
+          if (pushLeft <= 0 || pushRight <= 0 || pushNear <= 0 || pushFar <= 0) continue;
+          const minX = Math.min(pushLeft, pushRight);
+          const minZ = Math.min(pushNear, pushFar);
+          if (minX < minZ) pos.x += pushLeft < pushRight ? -pushLeft : pushRight;
+          else pos.z += pushNear < pushFar ? -pushNear : pushFar;
+        }
+      }
+    }
+  }
+
+  carveSphere(point: THREE.Vector3, radius: number, color?: THREE.Color): number {
+    const res = this.destruction.carveAt(point, radius, {
+      debris: (p, n, c) => {
+        this.particles.spawnDebris(p, Math.min(10, 3 + Math.floor(n / 6)), c, 0.8);
+      },
+    });
+    if (res.removed > 0) {
+      void color;
+      this.city.checkCollapses();
+      this.ensureStrata(this.player.pos.y);
+    }
+    return res.removed;
+  }
+
+  spawnDebris(p: THREE.Vector3, n: number, color: THREE.Color, power = 1): void {
+    this.particles.spawnDebris(p, n, color, power);
+  }
+
+  aimRaycast(): AimHit | null {
+    const origin = this.camera.getWorldPosition(this.tmpV).clone();
+    const dir = this.camera.getWorldDirection(this.tmpV2).clone();
+    this.raycaster.set(origin, dir);
+    this.raycaster.far = REACH;
+    let best: AimHit | null = null;
+
+    const consider = (h: AimHit) => {
+      if (!best || h.distance < best.distance) best = h;
+    };
+
+    // 1) Strata layers (analytic, skips carved cells)
+    const layerHit = this.destruction.analyticLayerHit(origin, dir, REACH);
+    if (layerHit) {
+      const e = layerHit.entry;
+      consider({
+        point: layerHit.point,
+        normal: new THREE.Vector3(0, 1, 0),
+        distance: layerHit.distance,
+        kind: 'layer',
+        grant: e.layerY >= LAYER0_Y - 0.01 && !this.city.isOnRoad(layerHit.point.x, layerHit.point.z) ? 'dirt' : e.grant,
+      });
+    }
+
+    // 2) Destructible meshes (buildings + shafts) via prefiltered raycast
+    const meshes = this.destruction.raycastCandidates(this.raycaster.ray, REACH);
+    const hits = this.raycaster.intersectObjects(meshes, false);
+    if (hits.length) {
+      const h = hits[0];
+      const n = h.face ? h.face.normal.clone().transformDirection(h.object.matrixWorld) : new THREE.Vector3(0, 1, 0);
+      consider({
+        point: h.point.clone(),
+        normal: n,
+        distance: h.distance,
+        kind: h.object.userData.shaft ? 'shaft' : 'building',
+        grant: 'cobblestone',
+        object: h.object,
+      });
+    }
+
+    // 3) Placed blocks (ray vs AABB)
+    for (const [key, b] of this.placed) {
+      const rb = rayBox(origin, dir, b.aabb, REACH);
+      if (rb !== null) {
+        consider({ point: rb.point, normal: rb.normal, distance: rb.t, kind: 'block', blockKey: key, grant: b.type === 'dirt' ? 'dirt' : b.type === 'glass' ? 'glass' : b.type === 'planks' ? 'planks' : 'cobblestone' });
+      }
+    }
+
+    // 4) Cars & NPCs & TNT (sphere prefilter then mesh raycast)
+    for (const car of this.vehicles.cars) {
+      if (car.state === 'falling') continue;
+      const c = car.group.position;
+      const toC = c.clone().add(new THREE.Vector3(0, 0.7, 0)).sub(origin);
+      const t = toC.dot(dir);
+      if (t < 0 || t > REACH + 2.5) continue;
+      if (toC.lengthSq() - t * t > 6.5) continue;
+      const hs = this.raycaster.intersectObject(car.group, true);
+      if (hs.length) {
+        consider({
+          point: hs[0].point.clone(),
+          normal: new THREE.Vector3(0, 1, 0),
+          distance: hs[0].distance,
+          kind: 'car',
+          carId: car.id,
+        });
+      }
+    }
+    for (const n of this.npcs.list) {
+      if (n.state === 'down') continue;
+      const c = n.group.position;
+      const toC = c.clone().add(new THREE.Vector3(0, 1, 0)).sub(origin);
+      const t = toC.dot(dir);
+      if (t < 0 || t > REACH) continue;
+      if (toC.lengthSq() - t * t > 1.4) continue;
+      const hs = this.raycaster.intersectObject(n.group, true);
+      if (hs.length) {
+        consider({ point: hs[0].point.clone(), normal: new THREE.Vector3(0, 1, 0), distance: hs[0].distance, kind: 'npc' });
+      }
+    }
+    for (const t of this.tnts) {
+      const toC = t.pos.clone().add(new THREE.Vector3(0, 0.5, 0)).sub(origin);
+      const d = toC.length();
+      if (d < REACH) {
+        consider({ point: t.pos.clone(), normal: new THREE.Vector3(0, 1, 0), distance: d, kind: 'tnt' });
+      }
+    }
+    return best;
+  }
+
+  audioSfx = {
+    dig: () => this.audio.dig(),
+    breakBlock: () => this.audio.breakBlock(),
+    place: () => this.audio.place(),
+    boom: (far: number) => this.audio.boom(far),
+    horn: (far: number) => this.audio.horn(far),
+    ignite: (far: number) => this.audio.ignite(far),
+    pearl: () => this.audio.pearl(),
+    eat: () => this.audio.eat(),
+    hurt: () => this.audio.hurt(),
+    thud: (far: number) => this.audio.thud(far),
+    enterCar: () => this.audio.enterCar(),
+    pickup: () => this.audio.pickup(),
+  };
+
+  addScore(n: number): void {
+    this.heat = Math.min(760, this.heat + n);
+  }
+
+  playerPos(): THREE.Vector3 {
+    return this.drivingCar ? this.drivingCar.group.position : this.player.pos;
+  }
+
+  playerEyeY(): number {
+    return this.player.pos.y + 1.62;
+  }
+
+  damagePlayer(n: number): void {
+    this.player.damage(n);
+    this.audio.hurt();
+    this.hurtVignette = 1;
+    if (this.player.dead && !this.deadNotified) {
+      this.deadNotified = true;
+      this.cb.onDeath();
+    }
+  }
+
+  ragdollNPCsNear(pos: THREE.Vector3, r: number): void {
+    if (this.npcs.ragdollNear(pos, r)) this.addScore(15);
+  }
+
+  fleeNPCs(pos: THREE.Vector3, r: number): void {
+    this.npcs.fleeFrom(pos, r);
+  }
+
+  igniteCarsNear(pos: THREE.Vector3, r: number, excludeId?: number): void {
+    for (const car of this.vehicles.cars) {
+      if (car.id === excludeId) continue;
+      if (car.state === 'burning' || car.state === 'wrecked' || car.state === 'player') continue;
+      if (car.group.position.distanceTo(pos) < r) this.vehicles.ignite(car);
+    }
+  }
+
+  isOnRoad(x: number, z: number): boolean {
+    return this.city.isOnRoad(x, z);
+  }
+
+  shake(amount: number): void {
+    this.shakeT = Math.min(1.2, this.shakeT + amount);
+  }
+
+  far(p: THREE.Vector3): number {
+    return Math.min(1, p.distanceTo(this.playerPos()) / 95);
+  }
+
+  toast(msg: string): void {
+    this.cb.onToast(msg);
+  }
+
+  // ------------------------------------------------------------------ strata
+  private ensureStrata(feetY: number): void {
+    let deepest = LAYER0_Y;
+    let count = 0;
+    const layerEntries: Array<{ y: number; x: number; z: number; entry: unknown }> = [];
+    for (const e of this.destruction.all()) {
+      if (e.label !== 'layer' || e.hidden) continue;
+      count++;
+      deepest = Math.min(deepest, e.layerY);
+      layerEntries.push({ y: e.layerY, x: e.layerCX, z: e.layerCZ, entry: e });
+    }
+    // Create new layers below as the player descends
+    const p = this.player.pos;
+    while (deepest > Math.max(BEDROCK_Y, feetY - 2 * LAYER_GAP) && count < MAX_STRATA && deepest > BEDROCK_Y) {
+      const ny = deepest - LAYER_GAP;
+      const y = Math.max(ny, BEDROCK_Y);
+      const mesh = this.city.createStrataLayer(y, p.x, p.z);
+      if (y <= BEDROCK_Y + 0.01) {
+        // bedrock is unbreakable
+        const entry = this.destruction.getEntry(mesh);
+        if (entry) entry.occ.clear();
+        this.destruction.unregister(mesh);
+      }
+      deepest = y;
+      count++;
+    }
+    // Recycle layers far from the player (underground only)
+    for (const le of layerEntries) {
+      const e = le.entry as { mesh: THREE.Mesh; layerY: number };
+      if (le.y >= LAYER0_Y) continue;
+      const tooDeepAbove = le.y < feetY - 5 * LAYER_GAP; // far above the player
+      const tooFarXZ = Math.abs(le.x - p.x) > MINIMAP_SPAN || Math.abs(le.z - p.z) > MINIMAP_SPAN;
+      if (tooDeepAbove || tooFarXZ) {
+        this.destruction.unregister(e.mesh);
+        this.scene.remove(e.mesh);
+        e.mesh.geometry.dispose();
+        (e.mesh.material as THREE.Material).dispose();
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------ actions
+  private tryDig(dt: number): void {
+    this.digTimer -= dt;
+    if (!this.input.leftDown || this.digTimer > 0) return;
+    const it = this.selectedItem();
+    const def = it ? ITEMS[it.id] : null;
+    const isTool = def && (def.kind === 'tool' || def.kind === 'weapon');
+    const radius = isTool ? def!.digRadius : HAND_RADIUS;
+    this.digTimer = isTool ? def!.cooldown : HAND_COOLDOWN;
+    if (this.drivingCar) return;
+
+    const hit = this.aimRaycast();
+    if (!hit) return;
+
+    if (hit.kind === 'block' && hit.blockKey) {
+      this.breakPlaced(hit.blockKey);
+      return;
+    }
+    if (hit.kind === 'car' && hit.carId !== undefined) {
+      const car = this.vehicles.cars.find((c) => c.id === hit.carId);
+      if (car && car.state !== 'wrecked') {
+        car.health -= 9;
+        this.audio.thud(0.1);
+        this.particles.spawnDebris(hit.point, 3, new THREE.Color(0x999999), 0.6);
+        if (car.health <= 0) this.vehicles.ignite(car);
+      }
+      return;
+    }
+    if (hit.kind === 'npc') {
+      if (this.npcs.hitNear(hit.point, 1.5)) {
+        this.addScore(15);
+        this.audio.thud(0.1);
+        this.toast('Pedestrian down');
+        this.fleeNPCs(hit.point, 18);
+      }
+      return;
+    }
+    if (hit.kind === 'tnt') return;
+
+    // World carving (micro-voxels)
+    const color = hit.grant === 'dirt' ? new THREE.Color(0x6b4a2f) : new THREE.Color(0x55555a);
+    const removed = this.carveSphere(hit.point, Math.max(radius, 0.42), color);
+    if (removed > 0) {
+      this.audio.dig();
+      this.addScore(removed * 0.04);
+      const grant = hit.grant ?? 'cobblestone';
+      if (grant) this.addItem(grant, 1 + Math.floor(removed / 34), true);
+      // Bedrock check
+      if (hit.point.y <= BEDROCK_Y + 0.4) this.toast('Bedrock is unbreakable');
+    }
+  }
+
+  private breakPlaced(key: string): void {
+    const b = this.placed.get(key);
+    if (!b) return;
+    this.placed.delete(key);
+    const idx = this.placedOrder.indexOf(key);
+    if (idx >= 0) this.placedOrder.splice(idx, 1);
+    this.scene.remove(b.mesh);
+    b.mesh.geometry.dispose();
+    this.particles.spawnDebris(b.aabb.getCenter(new THREE.Vector3()), 6, new THREE.Color(ITEMS[b.type].heldColor ?? 0x888888), 0.8);
+    this.addItem(b.type, 1, true);
+    this.audio.breakBlock();
+  }
+
+  private snapPlace(pos: THREE.Vector3, normal: THREE.Vector3): THREE.Vector3 | null {
+    const p = pos.clone().addScaledVector(normal, 0.5);
+    return new THREE.Vector3(Math.floor(p.x) + 0.5, Math.floor(p.y) + 0.5, Math.floor(p.z) + 0.5);
+  }
+
+  private canPlaceAt(center: THREE.Vector3): boolean {
+    // Overlap with player?
+    const pp = this.player.pos;
+    if (
+      Math.abs(pp.x - center.x) < 0.85 &&
+      Math.abs(pp.z - center.z) < 0.85 &&
+      center.y + 0.5 > pp.y &&
+      center.y - 0.5 < pp.y + 1.9
+    )
+      return false;
+    // Overlap with cars / npcs / tnt
+    for (const car of this.vehicles.cars) {
+      const c = car.group.position;
+      if (c.distanceTo(center) < 2.6) return false;
+    }
+    for (const n of this.npcs.list) {
+      if (n.group.position.distanceTo(center) < 1.1) return false;
+    }
+    return true;
+  }
+
+  private placeBlock(type: ItemId): void {
+    const hit = this.aimRaycast();
+    if (!hit || hit.kind === 'car' || hit.kind === 'npc' || hit.kind === 'tnt') return;
+    const center = this.snapPlace(hit.point, hit.normal);
+    if (!center || center.y <= BEDROCK_Y - 1) return;
+    const key = `${Math.floor(center.x)},${Math.floor(center.y)},${Math.floor(center.z)}`;
+    if (this.placed.has(key) || !this.canPlaceAt(center)) return;
+    const geo = new RoundedBoxGeometry(0.97, 0.97, 0.97, 2, 0.07);
+    const mesh = new THREE.Mesh(geo, makeBlockMaterial(type === 'dirt' ? 'dirt' : type === 'cobblestone' ? 'cobblestone' : type === 'planks' ? 'planks' : 'glass'));
+    mesh.position.copy(center);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    this.scene.add(mesh);
+    this.placed.set(key, {
+      mesh,
+      aabb: new THREE.Box3().setFromCenterAndSize(center.clone(), new THREE.Vector3(1, 1, 1)),
+      type,
+    });
+    this.placedOrder.push(key);
+    if (this.placedOrder.length > 900) {
+      const oldest = this.placedOrder.shift();
+      if (oldest) this.breakPlacedSilent(oldest);
+    }
+    const it = this.selectedItem();
+    if (it) {
+      it.count--;
+      if (it.count <= 0) this.hotbar[this.slot] = null;
+    }
+    this.audio.place();
+  }
+
+  private breakPlacedSilent(key: string): void {
+    const b = this.placed.get(key);
+    if (!b) return;
+    this.placed.delete(key);
+    this.scene.remove(b.mesh);
+    b.mesh.geometry.dispose();
+  }
+
+  private placeTNT(): void {
+    const hit = this.aimRaycast();
+    if (!hit || hit.kind === 'car' || hit.kind === 'npc') return;
+    const center = this.snapPlace(hit.point, hit.normal);
+    if (!center) return;
+    const key = `${Math.floor(center.x)},${Math.floor(center.y)},${Math.floor(center.z)}`;
+    if (this.placed.has(key)) return;
+    const mats = makeTNTMaterials();
+    const geo = new THREE.BoxGeometry(0.98, 0.98, 0.98);
+    const mesh = new THREE.Mesh(geo, [mats.side, mats.side, mats.top, mats.bottom, mats.side, mats.side].map((m) => (m as THREE.MeshLambertMaterial).clone()));
+    mesh.position.copy(center);
+    mesh.castShadow = true;
+    this.scene.add(mesh);
+    this.tnts.push({ mesh, fuse: TNT_FUSE, pos: center.clone() });
+    const it = this.selectedItem();
+    if (it) {
+      it.count--;
+      if (it.count <= 0) this.hotbar[this.slot] = null;
+    }
+    this.audio.place();
+    this.toast('TNT armed — 3s fuse');
+  }
+
+  private useFlint(): void {
+    const hit = this.aimRaycast();
+    if (!hit) return;
+    if (hit.kind === 'car' && hit.carId !== undefined) {
+      const car = this.vehicles.cars.find((c) => c.id === hit.carId);
+      if (car) {
+        this.vehicles.ignite(car);
+        this.audio.ignite(this.far(car.group.position));
+        this.particles.firePuff(car.group.position.clone().add(new THREE.Vector3(0, 0.9, 0)), 14);
+        this.toast(`${car.name} set on fire!`);
+        this.addScore(25);
+        this.fleeNPCs(car.group.position, 20);
+        return;
+      }
+    }
+    if (hit.kind === 'tnt') {
+      for (const t of this.tnts) {
+        if (t.pos.distanceTo(hit.point) < 1.2) t.fuse = Math.min(t.fuse, 0.5);
+      }
+      this.audio.ignite(0.2);
+      return;
+    }
+    // Fire patch on ground
+    this.particles.addFireEmitter(
+      () => hit.point,
+      6,
+      1
+    );
+    this.fires.push({ pos: hit.point.clone(), ttl: 6 });
+    this.audio.ignite(this.far(hit.point));
+    this.particles.firePuff(hit.point, 10);
+  }
+
+  private throwPearl(): void {
+    const dir = this.camera.getWorldDirection(new THREE.Vector3());
+    const origin = this.camera.getWorldPosition(new THREE.Vector3());
+    const geo = new THREE.SphereGeometry(0.1, 8, 6);
+    const mat = new THREE.MeshStandardMaterial({ color: 0x1f8a7a, emissive: 0x1f8a7a, emissiveIntensity: 0.7 });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(origin).addScaledVector(dir, 0.6);
+    this.scene.add(mesh);
+    this.pearls.push({ mesh, vel: dir.multiplyScalar(24).add(new THREE.Vector3(0, 3, 0)), t: 6 });
+    this.audio.pearl();
+    const it = this.selectedItem();
+    if (it) {
+      it.count--;
+      if (it.count <= 0) this.hotbar[this.slot] = null;
+    }
+  }
+
+  private useItem(): void {
+    if (this.drivingCar) return;
+    const it = this.selectedItem();
+    if (!it) return;
+    const def = ITEMS[it.id];
+    switch (def.kind) {
+      case 'placeable':
+        if (it.count > 0) this.placeBlock(it.id);
+        break;
+      case 'tnt':
+        if (it.count > 0) this.placeTNT();
+        break;
+      case 'igniter':
+        this.useFlint();
+        break;
+      case 'throwable':
+        if (it.count > 0) this.throwPearl();
+        break;
+      case 'food':
+        if (this.player.health < 20 && it.count > 0) {
+          this.player.heal(6);
+          this.audio.eat();
+          it.count--;
+          if (it.count <= 0) this.hotbar[this.slot] = null;
+          this.toast('Munch — +3 hearts');
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  private enterNearestCar(): void {
+    if (this.drivingCar) {
+      const car = this.drivingCar;
+      this.drivingCar = null;
+      this.vehicles.exit(car, this.player.pos);
+      this.audio.enterCar();
+      this.audio.stopEngine();
+      this.player.group.visible = this.thirdPerson;
+      return;
+    }
+    const car = this.vehicles.nearest(this.player.pos, 3.8);
+    if (car && car.state !== 'burning') {
+      this.drivingCar = car;
+      this.vehicles.enter(car);
+      this.audio.enterCar();
+      this.audio.startEngine();
+      this.player.group.visible = false;
+      this.toast(`Driving ${car.name}`);
+    }
+  }
+
+  // ------------------------------------------------------------------ explosion
+  explode(pos: THREE.Vector3, radius: number, isCar = false): void {
+    const r = isCar ? CAR_EXPLODE_RADIUS * 0.9 : radius;
+    this.destruction.carveAt(pos, r, {
+      debris: (p, n, c) => this.particles.spawnDebris(p, 12, c, 1.6),
+      maxDebris: 26,
+    });
+    this.particles.explosion(pos, r);
+    this.audio.boom(this.far(pos));
+    this.shake(0.9);
+    this.addScore(30);
+    this.city.checkCollapses();
+    this.ensureStrata(this.player.pos.y);
+
+    // Damage & chaos
+    this.ragdollNPCsNear(pos, r * 1.35);
+    this.fleeNPCs(pos, 55);
+    this.igniteCarsNear(pos, r * 1.15);
+    const pd = this.playerPos().distanceTo(pos);
+    if (pd < r * 1.6) this.damagePlayer(Math.max(0, (1 - pd / (r * 1.6)) * 13));
+    // Fire aftermath
+    this.particles.addFireEmitter(() => pos.clone(), 3.5, 1.4);
+  }
+
+  // ------------------------------------------------------------------ loop
+  start(): void {
+    this.clock.start();
+    const loop = () => {
+      if (this.disposed) return;
+      this.raf = requestAnimationFrame(loop);
+      const dt = Math.min(0.05, this.clock.getDelta());
+      this.frame(dt);
+    };
+    this.raf = requestAnimationFrame(loop);
+  }
+
+  private frame(dt: number): void {
+    const active = this.playing && !this.paused && !this.uiOpen && !this.player.dead;
+
+    if (active) this.updateGameplay(dt);
+    this.city.update(dt);
+    this.particles.update(dt);
+    updateClouds(this.scene, dt);
+    this.updateCamera(dt);
+    this.updateHudEmit(dt);
+    this.renderer.render(this.scene, this.camera);
+    this.input.endFrame();
+  }
+
+  private updateGameplay(dt: number): void {
+    // Mouse look
+    const { dx, dy } = this.input.consumeMouse();
+    if (!this.drivingCar) {
+      this.player.yaw -= dx * 0.0023;
+      this.player.pitch = Math.max(-1.55, Math.min(1.55, this.player.pitch - dy * 0.0023));
+    }
+
+    // Hotbar select
+    for (let i = 0; i < 9; i++) {
+      if (this.input.justPressed(`Digit${i + 1}`)) this.setSlot(i);
+    }
+    if (this.input.wheelDelta !== 0) this.setSlot(this.slot + this.input.wheelDelta);
+    if (this.input.justPressed('KeyE')) {
+      this.cb.onToast('__OPEN_INVENTORY__');
+    }
+    if (this.input.justPressed('F5')) {
+      this.thirdPerson = !this.thirdPerson;
+      this.player.thirdPerson = this.thirdPerson;
+    }
+    if (this.input.justPressed('F3')) this.debugVisible = !this.debugVisible;
+    if (this.input.justPressed('KeyF')) this.enterNearestCar();
+    if (this.input.justPressed('KeyH') && this.drivingCar) this.audio.horn(0.1);
+
+    // Player or car
+    if (this.drivingCar) {
+      const throttle = (this.input.isDown('KeyW') ? 1 : 0) + (this.input.isDown('KeyS') ? -1 : 0);
+      const steer = (this.input.isDown('KeyA') ? 1 : 0) + (this.input.isDown('KeyD') ? -1 : 0);
+      this.vehicles.drivePlayer(this.drivingCar, dt, throttle, steer, this.input.isDown('Space'), this);
+      if (this.input.leftClicked) this.audio.horn(0.05);
+      this.audio.setEngine(Math.min(1, Math.abs(this.drivingCar.speed) / 30));
+    } else {
+      const res = this.player.update(dt, this.input, this, true);
+      if (res.landed && res.fallVel < -18) this.damagePlayer((Math.abs(res.fallVel) - 18) * 0.7);
+      this.ensureStrata(this.player.pos.y);
+    }
+
+    this.vehicles.setPlayerRef(this.playerPos());
+    this.vehicles.update(this.drivingCar, dt, this, this.playerPos());
+
+    // Digging (LMB)
+    this.tryDig(dt);
+    if (this.input.rightClicked) this.useItem();
+
+    // TNT fuses
+    for (let i = this.tnts.length - 1; i >= 0; i--) {
+      const t = this.tnts[i];
+      t.fuse -= dt;
+      const flash = Math.sin(t.fuse * 18) > 0 ? 2.4 : 0;
+      for (const m of t.mesh.material as THREE.MeshLambertMaterial[]) {
+        m.emissive = new THREE.Color(0xffffff);
+        m.emissiveIntensity = flash;
+      }
+      if (t.fuse <= 0) {
+        this.scene.remove(t.mesh);
+        (t.mesh.material as THREE.Material[]).forEach((m) => m.dispose());
+        t.mesh.geometry.dispose();
+        this.tnts.splice(i, 1);
+        this.explode(t.pos, TNT_RADIUS);
+      }
+    }
+
+    // Pearls
+    for (let i = this.pearls.length - 1; i >= 0; i--) {
+      const p = this.pearls[i];
+      p.t -= dt;
+      p.vel.y -= 21 * dt;
+      p.mesh.position.addScaledVector(p.vel, dt);
+      const floor = this.floorHeightAt(p.mesh.position.x, p.mesh.position.z, p.mesh.position.y) ;
+      const inBuilding = !!this.city.buildingAt(p.mesh.position);
+      if (p.t <= 0 || p.mesh.position.y <= floor + 0.05 || inBuilding) {
+        this.player.pos.set(p.mesh.position.x, Math.max(floor, BEDROCK_Y) + 0.3, p.mesh.position.z);
+        this.player.vel.set(0, 0, 0);
+        this.particles.smokePuff(this.player.pos, 8, 0.8, 1.6);
+        this.audio.pearl();
+        this.scene.remove(p.mesh);
+        this.pearls.splice(i, 1);
+      }
+    }
+
+    // Fire patches ignite cars/NPCs
+    for (let i = this.fires.length - 1; i >= 0; i--) {
+      const f = this.fires[i];
+      f.ttl -= dt;
+      if (f.ttl <= 0) {
+        this.fires.splice(i, 1);
+        continue;
+      }
+      for (const car of this.vehicles.cars) {
+        if (car.state === 'traffic' || car.state === 'parked') {
+          if (car.group.position.distanceTo(f.pos) < 2.4) {
+            this.vehicles.ignite(car);
+            this.toast('Car caught fire!');
+          }
+        }
+      }
+      this.npcs.fleeFrom(f.pos, 8);
+    }
+
+    // NPC update
+    this.npcs.update(dt, this);
+    // Traffic avoid dug holes handled in vehicles via floorHeightAt
+
+    // Heat decay + stars
+    this.heat = Math.max(0, this.heat - dt * 2.5);
+    this.stars = this.heat <= 0 ? 0 : Math.min(5, 1 + Math.floor(this.heat / 150));
+
+    // Hints
+    this.hintT -= dt;
+    if (this.hintT <= 0) {
+      this.hintT = 0.18;
+      if (this.drivingCar) this.currentHint = 'F — exit vehicle   ·   H — horn';
+      else {
+        const near = this.vehicles.nearest(this.player.pos, 3.8);
+        this.currentHint = near && near.state !== 'burning' ? `F — enter ${near.name}` : null;
+      }
+    }
+
+    this.hurtVignette = Math.max(0, this.hurtVignette - dt * 1.6);
+    this.shakeT = Math.max(0, this.shakeT - dt * 2.2);
+  }
+
+  private updateCamera(dt: number): void {
+    const eye = this.player.eyePosition(new THREE.Vector3());
+    const quat = new THREE.Quaternion().setFromEuler(new THREE.Euler(this.player.pitch, this.player.yaw, 0, 'YXZ'));
+
+    if (this.drivingCar) {
+      const car = this.drivingCar;
+      const heading = new THREE.Vector3(Math.sin(car.yaw), 0, Math.cos(car.yaw));
+      const target = car.group.position.clone().addScaledVector(heading, -8.2).add(new THREE.Vector3(0, 3.4, 0));
+      this.camera.position.lerp(target, 1 - Math.exp(-5.5 * dt));
+      this.camera.lookAt(car.group.position.x, car.group.position.y + 1.5, car.group.position.z);
+      this.camera.fov = 72;
+    } else if (this.thirdPerson) {
+      const back = new THREE.Vector3(0, 0, 1).applyQuaternion(quat);
+      const desired = eye.clone().addScaledVector(back, 4.6);
+      // Pull camera in if it would clip a building
+      const ray = new THREE.Ray(eye, back);
+      const b = this.city.rayBuildingCandidates(ray, 4.6);
+      let maxD = 4.6;
+      if (b.length) {
+        this.raycaster.set(eye, back);
+        this.raycaster.far = 4.6;
+        const hits = this.raycaster.intersectObjects(
+          b.map((bb) => bb.mesh),
+          false
+        );
+        if (hits.length) maxD = Math.max(0.5, hits[0].distance - 0.3);
+      }
+      this.camera.position.copy(eye).addScaledVector(back, maxD);
+      this.camera.quaternion.copy(quat);
+      this.camera.fov = 75;
+    } else {
+      this.camera.position.copy(eye);
+      this.camera.quaternion.copy(quat);
+      const sprinting = this.input.isDown('ShiftLeft') && !this.player.flying;
+      const targetFov = sprinting ? 82 : 75;
+      this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, 8 * dt);
+    }
+    if (this.shakeT > 0) {
+      const s = this.shakeT * 0.14;
+      this.camera.position.x += (Math.random() - 0.5) * s;
+      this.camera.position.y += (Math.random() - 0.5) * s;
+      this.camera.position.z += (Math.random() - 0.5) * s;
+    }
+    this.camera.updateProjectionMatrix();
+
+    // Sun follows player for tight shadows
+    const p = this.playerPos();
+    this.sun.position.set(p.x - 120, p.y + 95, p.z - 155);
+    this.sun.target.position.set(p.x, p.y, p.z);
+    this.sun.target.updateMatrixWorld();
+  }
+
+  private updateHudEmit(dt: number): void {
+    // fps
+    this.frameAcc += dt;
+    this.frameN++;
+    this.fpsT += dt;
+    if (this.fpsT >= 0.5) {
+      this.fps = Math.round(this.frameN / this.frameAcc);
+      this.frameAcc = 0;
+      this.frameN = 0;
+      this.fpsT = 0;
+      // auto quality
+      if (this.fps < 36 && this.qualityTier < 2) {
+        this.qualityTier++;
+        this.renderer.setPixelRatio(this.qualityTier === 1 ? 1.1 : 0.8);
+        if (this.qualityTier === 2) {
+          this.sun.shadow.mapSize.set(1024, 1024);
+          if (this.sun.shadow.map) {
+            this.sun.shadow.map.dispose();
+            this.sun.shadow.map = null as unknown as THREE.WebGLRenderTarget;
+          }
+        }
+      }
+    }
+    this.stateT += dt;
+    if (this.stateT < HUD_EMIT_INTERVAL) return;
+    this.stateT = 0;
+    const state: HudState = {
+      playing: this.playing,
+      health: this.player.health,
+      flying: this.player.flying,
+      thirdPerson: this.thirdPerson,
+      driving: this.drivingCar ? { name: this.drivingCar.name, speed: Math.abs(this.drivingCar.speed) * 3.6 } : null,
+      slot: this.slot,
+      hotbar: this.hotbar.map((s) => (s ? { ...s } : null)),
+      inventory: this.inventory.map((s) => (s ? { ...s } : null)),
+      stars: this.stars,
+      score: Math.floor(this.heat),
+      pos: [this.playerPos().x, this.playerPos().y, this.playerPos().z],
+      depth: Math.max(0, Math.floor(-this.playerPos().y)),
+      removed: this.destruction.totalRemoved,
+      fps: this.fps,
+      hint: this.currentHint,
+      dead: this.player.dead,
+      hurt: this.hurtVignette,
+      debug: this.debugVisible,
+      removedPerSecond: 0,
+    };
+    this.cb.onState(state);
+    this.drawMinimap();
+  }
+
+  // ------------------------------------------------------------------ minimap
+  private buildMinimapBase(): void {
+    const size = 512;
+    const cv = document.createElement('canvas');
+    cv.width = size;
+    cv.height = size;
+    const ctx = cv.getContext('2d')!;
+    const k = size / MINIMAP_SPAN;
+    const w2m = (m: number) => (m + MINIMAP_SPAN / 2) * k;
+    ctx.fillStyle = '#42552f';
+    ctx.fillRect(0, 0, size, size);
+    // blocks
+    for (let bi = -GRID_HALF; bi < GRID_HALF; bi++) {
+      for (let bj = -GRID_HALF; bj < GRID_HALF; bj++) {
+        const t = this.city.blockType(bi, bj);
+        ctx.fillStyle = t === 'park' ? '#4e7a37' : t === 'lot' ? '#3c3c40' : '#6e6e66';
+        ctx.fillRect(w2m(bi * BLOCK + 4), w2m(bj * BLOCK + 4), (BLOCK - 8) * k, (BLOCK - 8) * k);
+      }
+    }
+    // roads
+    ctx.fillStyle = '#2e2e30';
+    for (const c of this.city.roadCoords) {
+      ctx.fillRect(w2m(c - 4), 0, 8 * k, size);
+      ctx.fillRect(0, w2m(c - 4), size, 8 * k);
+    }
+    // buildings footprint (lighter = taller)
+    for (const b of this.city.buildings) {
+      const shade = Math.min(230, 120 + b.h * 2);
+      ctx.fillStyle = `rgb(${shade},${shade - 6},${shade - 12})`;
+      ctx.fillRect(w2m(b.aabb.min.x), w2m(b.aabb.min.z), (b.aabb.max.x - b.aabb.min.x) * k, (b.aabb.max.z - b.aabb.min.z) * k);
+    }
+    this.minimapBase = cv;
+  }
+
+  private drawMinimap(): void {
+    const cv = this.minimap;
+    if (!cv || !this.minimapBase) return;
+    const ctx = cv.getContext('2d');
+    if (!ctx) return;
+    const w = cv.width;
+    const h = cv.height;
+    const p = this.playerPos();
+    const zoom = 1.5;
+    ctx.save();
+    ctx.clearRect(0, 0, w, h);
+    ctx.beginPath();
+    ctx.roundRect(0, 0, w, h, 10);
+    ctx.clip();
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, w, h);
+    ctx.translate(w / 2, h / 2);
+    ctx.rotate(this.drivingCar ? this.drivingCar.yaw + Math.PI : this.player.yaw);
+    ctx.scale(zoom, zoom);
+    ctx.drawImage(this.minimapBase, -(p.x + MINIMAP_SPAN / 2), -(p.z + MINIMAP_SPAN / 2));
+    // cars
+    for (const car of this.vehicles.cars) {
+      const c = car.group.position;
+      ctx.fillStyle = car.state === 'wrecked' ? '#555' : car.state === 'burning' ? '#ff5030' : '#e8c34a';
+      ctx.fillRect((c.x - p.x) - 1.6, (c.z - p.z) - 1.6, 3.2, 3.2);
+    }
+    // tnt
+    for (const t of this.tnts) {
+      if (Math.sin(t.fuse * 14) > 0) {
+        ctx.fillStyle = '#ff2020';
+        ctx.fillRect((t.pos.x - p.x) - 2.4, (t.pos.z - p.z) - 2.4, 4.8, 4.8);
+      }
+    }
+    ctx.restore();
+    // player arrow
+    ctx.save();
+    ctx.translate(w / 2, h / 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#111';
+    ctx.beginPath();
+    ctx.moveTo(0, -7);
+    ctx.lineTo(5, 6);
+    ctx.lineTo(0, 3);
+    ctx.lineTo(-5, 6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ------------------------------------------------------------------ controls from React
+  setPlaying(v: boolean): void {
+    this.playing = v;
+    if (v) this.audio.unlock();
+  }
+
+  setPaused(v: boolean): void {
+    this.paused = v;
+    if (!v) this.audio.unlock();
+  }
+
+  setUiOpen(v: boolean): void {
+    this.uiOpen = v;
+  }
+
+  respawn(): void {
+    this.player.respawn(2, 8);
+    this.deadNotified = false;
+    this.hurtVignette = 0;
+  }
+
+  requestLock(): void {
+    this.input.requestLock();
+  }
+
+  inputExitLock(): void {
+    this.input.exitLock();
+  }
+
+  get lockFailed(): boolean {
+    return this.input.pointerLockFailed;
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    cancelAnimationFrame(this.raf);
+    this.detachInput();
+    document.removeEventListener('pointerlockchange', this.onLockChange);
+    window.removeEventListener('resize', this.onResize);
+    this.city.dispose();
+    this.vehicles.dispose();
+    this.npcs.dispose();
+    this.particles.dispose();
+    this.destruction.dispose();
+    this.renderer.dispose();
+  }
+}
