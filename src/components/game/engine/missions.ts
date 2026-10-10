@@ -11,7 +11,7 @@
  * beacon pillar in-world) that the game reads from `snapshot()`.
  */
 
-export type MissionKind = 'wreck' | 'voxels' | 'collapse' | 'peds' | 'steal';
+export type MissionKind = 'wreck' | 'voxels' | 'collapse' | 'peds' | 'steal' | 'smash' | 'gas';
 
 export interface MissionDef {
   kind: MissionKind;
@@ -119,6 +119,32 @@ const DEFS: MissionDef[] = [
     ],
     rewardLabel: 'Ender Pearl ×8 · Golden Apple ×2 · +220 CHAOS',
   },
+  {
+    kind: 'smash',
+    title: 'ROADBLOCK RUN',
+    desc: 'Smash through a police roadblock',
+    target: 1,
+    time: 150,
+    rewardScore: 250,
+    rewards: [
+      { id: 'tnt', count: 12 },
+      { id: 'pearl', count: 4 },
+    ],
+    rewardLabel: 'TNT ×12 · Ender Pearl ×4 · +250 CHAOS',
+  },
+  {
+    kind: 'gas',
+    title: 'FUEL CRISIS',
+    desc: 'Blow up a gas station pump',
+    target: 1,
+    time: 100,
+    rewardScore: 180,
+    rewards: [
+      { id: 'flint', count: 2 },
+      { id: 'tnt', count: 6 },
+    ],
+    rewardLabel: 'Flint & Steel ×2 · TNT ×6 · +180 CHAOS',
+  },
 ];
 
 const OFFER_TTL = 15;
@@ -196,6 +222,14 @@ export class Missions {
   /** The player entered a car of `type` (GRAND THEFT: 'police'). */
   onCarEnter(type: string): void {
     if (type === 'police') this.progress('steal', 1);
+  }
+  /** The player smashed through a police roadblock barrier. */
+  onRoadblockSmash(): void {
+    this.progress('smash', 1);
+  }
+  /** A fuel pump detonated (FUEL CRISIS). */
+  onGasBlowup(): void {
+    this.progress('gas', 1);
   }
 
   private progress(kind: MissionKind, n: number): void {

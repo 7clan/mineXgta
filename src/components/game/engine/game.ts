@@ -93,6 +93,8 @@ interface TankShell {
 interface ScorchDecal {
   mesh: THREE.Mesh;
   life: number;
+  /** Fade ceiling for this decal (scorch 0.52, puddles fainter). */
+  base: number;
 }
 interface Tracer {
   line: THREE.Line;
@@ -210,13 +212,18 @@ export class HyperionGame implements World {
   private roadblockCd = 8;
   private roadblockToastT = 0;
   private rbAssets: Array<{ geo: THREE.BufferGeometry; mat: THREE.Material }> = [];
-  private rbGeo: { plane: THREE.PlaneGeometry; strip: THREE.BoxGeometry; tooth: THREE.ConeGeometry; cone: THREE.ConeGeometry; leg: THREE.BoxGeometry; hazardMat: THREE.MeshStandardMaterial; steelMat: THREE.MeshStandardMaterial; toothMat: THREE.MeshStandardMaterial; coneMat: THREE.MeshStandardMaterial } | null = null;
+  private rbGeo: { plane: THREE.PlaneGeometry; strip: THREE.BoxGeometry; tooth: THREE.ConeGeometry; cone: THREE.ConeGeometry; leg: THREE.BoxGeometry; endLight: THREE.BoxGeometry; hazardMat: THREE.MeshStandardMaterial; steelMat: THREE.MeshStandardMaterial; toothMat: THREE.MeshStandardMaterial; coneMat: THREE.MeshStandardMaterial; spikeLightMat: THREE.MeshStandardMaterial } | null = null;
   /** Fire hydrants: instanced street furniture that bursts into water geysers. */
   private hydrants: Array<{ pos: THREE.Vector3; broken: boolean; geyserT: number }> = [];
   private hydBody: THREE.InstancedMesh | null = null;
   private hydCap: THREE.InstancedMesh | null = null;
   private hydAssets: Array<{ geo: THREE.BufferGeometry; mat: THREE.Material }> = [];
   private hydToastT = 0;
+  /** Gas stations: explosive fuel pumps (GTA classic — shoot one and the block burns). */
+  private gasPumps: Array<{ pos: THREE.Vector3; mesh: THREE.Group; blown: boolean }> = [];
+  private gasStations: Array<{ pos: THREE.Vector3 }> = [];
+  private gasAssets: Array<{ geo: THREE.BufferGeometry; mat: THREE.Material }> = [];
+  private gasSignMat: THREE.MeshStandardMaterial | null = null;
   /** User settings (volume / touch) — persisted separately from the world save. */
   private settings: Settings;
   private missions = new Missions({
@@ -318,6 +325,7 @@ export class HyperionGame implements World {
     this.audio.setMasterVolume(this.settings.volume);
     this.buildSprayGarages();
     this.buildHydrants();
+    this.buildGasStations();
     this.vehicles.onSmoke = (car) => {
       const p = car.group.position.clone();
       p.y += 0.9;
@@ -1064,6 +1072,7 @@ export class HyperionGame implements World {
     this.ensureStrata(this.player.pos.y);
     this.addScorch(pos, r * 0.85);
     this.maybeBreakHydrants(pos, r * 1.1);
+    this.maybeBlowPumps(pos, r);
 
     // Damage & chaos
     this.ragdollNPCsNear(pos, r * 1.35);
@@ -1168,6 +1177,7 @@ export class HyperionGame implements World {
     this.updateSprays(dt);
     this.updateRoadblocks(dt);
     this.updateHydrants(dt);
+    this.updateGasStations();
 
     // Digging (LMB / touch DIG hold)
     this.tryDig(dt);
@@ -1272,6 +1282,7 @@ export class HyperionGame implements World {
         (h) => h.broken && h.geyserT > 0 && Math.hypot(h.pos.x - this.player.pos.x, h.pos.z - this.player.pos.z) < 26
       );
       if (this.drivingCar) this.currentHint = 'F — exit vehicle   ·   H — horn';
+      else if (this.nearGasHint()) this.currentHint = '⛽ Gas station — keep flames away from the pumps!';
       else if (geyserNear) this.currentHint = '💧 Burst hydrant — the geyser douses fires & burning cars';
       else if (this.nearSpray !== null && this.nearSpray < 42) this.currentHint = `🎨 Pay'n'Spray — ${Math.round(this.nearSpray)}m · drive in to clear heat & repair`;
       else {
@@ -1365,8 +1376,34 @@ export class HyperionGame implements World {
     m.rotation.z = Math.random() * Math.PI * 2;
     m.position.set(p.x, fy + 0.03 + Math.random() * 0.025, p.z);
     m.renderOrder = 3;
-    this.scene.add(m);
-    this.decals.push({ mesh: m, life: 70 });
+    this.pushDecal(m, 70, 0.52);
+  }
+
+  /** Wet sheen circle left on the asphalt under an active geyser, fading over ~25 s. */
+  private addPuddle(p: THREE.Vector3, radius: number): void {
+    const fy = this.floorHeightAt(p.x, p.z, p.y);
+    if (p.y - fy > 3) return;
+    const geo = new THREE.CircleGeometry(radius * (0.7 + Math.random() * 0.5), 12);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x8fd4ef,
+      transparent: true,
+      opacity: 0.2,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+    });
+    const m = new THREE.Mesh(geo, mat);
+    m.rotation.x = -Math.PI / 2;
+    m.rotation.z = Math.random() * Math.PI * 2;
+    m.position.set(p.x + (Math.random() - 0.5) * 1.5, fy + 0.045 + Math.random() * 0.02, p.z + (Math.random() - 0.5) * 1.5);
+    m.renderOrder = 3;
+    this.pushDecal(m, 25, 0.2);
+  }
+
+  /** FIFO registry shared by scorch + puddle decals. */
+  private pushDecal(mesh: THREE.Mesh, life: number, base: number): void {
+    this.scene.add(mesh);
+    this.decals.push({ mesh, life, base });
     if (this.decals.length > 26) {
       const old = this.decals.shift();
       if (old) {
@@ -1382,7 +1419,7 @@ export class HyperionGame implements World {
       const d = this.decals[i];
       d.life -= dt;
       const mat = d.mesh.material as THREE.MeshBasicMaterial;
-      mat.opacity = d.life < 18 ? Math.max(0, (d.life / 18) * 0.52) : 0.52;
+      mat.opacity = d.life < 18 ? Math.max(0, (d.life / 18) * d.base) : d.base;
       if (d.life <= 0) {
         this.scene.remove(d.mesh);
         d.mesh.geometry.dispose();
@@ -1745,10 +1782,12 @@ export class HyperionGame implements World {
         tooth: new THREE.ConeGeometry(0.07, 0.3, 5),
         cone: new THREE.ConeGeometry(0.28, 0.68, 9),
         leg: new THREE.BoxGeometry(0.08, 0.62, 0.08),
+        endLight: new THREE.BoxGeometry(0.34, 0.12, 0.34),
         hazardMat,
         steelMat,
         toothMat,
         coneMat,
+        spikeLightMat: new THREE.MeshStandardMaterial({ color: 0x400000, emissive: 0xff2418, emissiveIntensity: 2.2, roughness: 0.4 }),
       };
       this.rbAssets.push(
         { geo: this.rbGeo.plane, mat: hazardMat },
@@ -1756,6 +1795,7 @@ export class HyperionGame implements World {
         { geo: this.rbGeo.tooth, mat: toothMat },
         { geo: this.rbGeo.cone, mat: coneMat },
         { geo: this.rbGeo.leg, mat: steelMat },
+        { geo: this.rbGeo.endLight, mat: this.rbGeo.spikeLightMat },
       );
     }
     const G = this.rbGeo;
@@ -1792,6 +1832,12 @@ export class HyperionGame implements World {
       group.add(cone);
     }
     group.position.copy(pos);
+    // Blinking end-cap lights: the strip reads at night from blocks away
+    for (const side of [-1, 1]) {
+      const light = new THREE.Mesh(G.endLight, G.spikeLightMat);
+      light.position.set(side * 3.2, 0.14, 0);
+      group.add(light);
+    }
     this.scene.add(group);
 
     // Two angled cruisers sealing the center gap (parked — lightbars flashed manually)
@@ -1836,6 +1882,8 @@ export class HyperionGame implements World {
           (c.lightbar[1].material as THREE.MeshStandardMaterial).emissiveIntensity = phase === 1 ? 3.4 : 0.12;
         }
       }
+      // Spike-strip end lights blink in sync (night visibility)
+      if (this.rbGeo) this.rbGeo.spikeLightMat.emissiveIntensity = 0.9 + 2.2 * (0.5 + 0.5 * Math.sin(performance.now() * 0.011));
       // Flying barrier animation after a smash-through
       if (rb.flyT > 0) {
         rb.flyT -= dt;
@@ -1867,6 +1915,7 @@ export class HyperionGame implements World {
           this.shake(0.3);
           this.particles.spawnDebris(new THREE.Vector3(rb.pos.x, 0.8, rb.pos.z), 6, new THREE.Color(0xe03a2a), 1.2);
           this.addScore(8);
+          this.missions.onRoadblockSmash();
         } else if (Math.abs(car.speed) > 1) {
           car.speed *= -0.14;
           this.audio.thud(0.12);
@@ -1921,8 +1970,13 @@ export class HyperionGame implements World {
     let n = 0;
     for (let i = 0; i < max; i++) {
       const s = spots[i];
-      // Skip corners swallowed by building footprints (hydrants need open sidewalk)
-      if (this.city.buildingAt(new THREE.Vector3(s.x, 1, s.z))) continue;
+      // Open-corner bias: skip hydrants wedged between buildings (they end up
+      // invisible from the street). Require clear sidewalk on at least 3 sides.
+      let blocked = 0;
+      for (const [ox, oz] of [[3.5, 0], [-3.5, 0], [0, 3.5], [0, -3.5]] as const) {
+        if (this.city.buildingAt(new THREE.Vector3(s.x + ox, 1, s.z + oz))) blocked++;
+      }
+      if (this.city.buildingAt(new THREE.Vector3(s.x, 1, s.z)) || blocked > 1) continue;
       d.position.set(s.x, 0.43, s.z);
       d.rotation.set(0, this.rng() * Math.PI, 0);
       d.scale.setScalar(1);
@@ -1990,6 +2044,8 @@ export class HyperionGame implements World {
       const pressure = Math.min(1, h.geyserT / 6);
       this.particles.waterJet(h.pos, Math.random() < 0.7 ? 3 : 4, 0.55 + 0.65 * pressure);
       if (Math.random() < dt * 9) this.particles.smokePuff(new THREE.Vector3(h.pos.x, 0.4, h.pos.z), 1, 1.3, 0.7);
+      // Wet asphalt sheen pools around the burst (fades like a scorch decal)
+      if (Math.random() < dt * 0.8) this.addPuddle(h.pos, 2.4);
       // Douse fires + burning cars nearby
       for (let i = this.fires.length - 1; i >= 0; i--) {
         const f = this.fires[i];
@@ -2008,6 +2064,149 @@ export class HyperionGame implements World {
       loudest = Math.max(loudest, Math.max(0, 1 - d / 42) * pressure);
     }
     this.audio.setGeyser(loudest);
+  }
+
+  // ------------------------------------------------------------------ gas stations
+
+  /** "XY Fuels" gas stations on parking lots: canopy, price sign, two fuel pumps.
+   *  Pumps detonate when damaged — explosions, crashes or nearby fire light the
+   *  whole block up (GTA classic). Blown pumps char and go inert. */
+  private buildGasStations(): void {
+    const lots = this.city.parkingLots;
+    if (lots.length < 4) return;
+    // Different lots than the Pay'n'Spray bays (lots[0] and lots[mid]).
+    const mid = Math.floor(lots.length / 2);
+    const spots = [lots[1].clone(), lots[Math.min(mid + 1, lots.length - 1)].clone()];
+
+    const canopyGeo = new RoundedBoxGeometry(15, 0.8, 11, 2, 0.25);
+    const poleGeo = new THREE.CylinderGeometry(0.24, 0.3, 5.2, 10);
+    const pumpBodyGeo = new RoundedBoxGeometry(1.0, 1.7, 0.62, 2, 0.12);
+    const screenGeo = new THREE.BoxGeometry(0.62, 0.44, 0.06);
+    const hoseGeo = new THREE.TorusGeometry(0.28, 0.045, 7, 16, Math.PI * 1.25);
+    const signPoleGeo = new THREE.CylinderGeometry(0.16, 0.2, 8.4, 8);
+    const signBoxGeo = new THREE.BoxGeometry(3.4, 2.1, 0.28);
+    const canopyMat = new THREE.MeshStandardMaterial({ color: 0xe8e4da, roughness: 0.5, metalness: 0.3 });
+    const bandMat = new THREE.MeshStandardMaterial({ color: 0xc2261a, roughness: 0.55, metalness: 0.2 });
+    const steelMat = new THREE.MeshStandardMaterial({ color: 0x34383e, roughness: 0.4, metalness: 0.7 });
+    const pumpMat = new THREE.MeshStandardMaterial({ color: 0xd8d3c6, roughness: 0.45, metalness: 0.35 });
+    const screenMat = new THREE.MeshStandardMaterial({ color: 0x0d1a12, emissive: 0x2fd97c, emissiveIntensity: 1.1, roughness: 0.3 });
+    const hoseMat = new THREE.MeshStandardMaterial({ color: 0x191b1e, roughness: 0.85 });
+    this.gasSignMat = new THREE.MeshStandardMaterial({ color: 0xc2261a, emissive: 0xff3b25, emissiveIntensity: 0.55, roughness: 0.5 });
+    this.gasAssets.push(
+      { geo: canopyGeo, mat: canopyMat },
+      { geo: poleGeo, mat: steelMat },
+      { geo: pumpBodyGeo, mat: pumpMat },
+      { geo: screenGeo, mat: screenMat },
+      { geo: hoseGeo, mat: hoseMat },
+      { geo: signPoleGeo, mat: steelMat },
+      { geo: signBoxGeo, mat: this.gasSignMat },
+      { geo: new THREE.BoxGeometry(15, 0.3, 11), mat: bandMat },
+    );
+
+    for (const s of spots) {
+      // Keep stations clear of other POIs on the same lot
+      if (this.sprays.some((sp) => Math.hypot(sp.pos.x - s.x, sp.pos.z - s.z) < 26)) continue;
+      this.gasStations.push({ pos: s.clone() });
+      const y = s.y;
+      // Canopy on 4 poles + red trim band under the slab
+      const canopy = new THREE.Mesh(canopyGeo, canopyMat);
+      canopy.position.set(s.x, y + 5.6, s.z);
+      canopy.castShadow = true;
+      const band = new THREE.Mesh(this.gasAssets[this.gasAssets.length - 1].geo as THREE.BoxGeometry, bandMat);
+      band.position.set(s.x, y + 5.14, s.z);
+      for (const [px, pz] of [[-6, -4], [6, -4], [-6, 4], [6, 4]] as const) {
+        const pole = new THREE.Mesh(poleGeo, steelMat);
+        pole.position.set(s.x + px, y + 2.6, s.z + pz);
+        this.scene.add(pole);
+      }
+      // Roadside price sign
+      const signPole = new THREE.Mesh(signPoleGeo, steelMat);
+      signPole.position.set(s.x - 8.5, y + 4.2, s.z + 6.5);
+      const sign = new THREE.Mesh(signBoxGeo, this.gasSignMat);
+      sign.position.set(s.x - 8.5, y + 9.2, s.z + 6.5);
+      this.scene.add(canopy, band, signPole, sign);
+      // Two pumps under the canopy (fuel islands) — cloned materials so
+      // charring one wrecked pump doesn't blacken its twin.
+      for (const off of [-2.6, 2.6]) {
+        const pump = new THREE.Group();
+        const pm = pumpMat.clone();
+        const sm = screenMat.clone();
+        const hm = hoseMat.clone();
+        const body = new THREE.Mesh(pumpBodyGeo, pm);
+        body.position.y = 0.85;
+        body.castShadow = true;
+        const screen = new THREE.Mesh(screenGeo, sm);
+        screen.position.set(0, 1.28, 0.33);
+        const hose = new THREE.Mesh(hoseGeo, hm);
+        hose.position.set(0.52, 1.05, 0);
+        hose.rotation.y = Math.PI / 2;
+        pump.add(body, screen, hose);
+        pump.position.set(s.x + off, y, s.z + 1.2);
+        this.scene.add(pump);
+        this.gasPumps.push({ pos: pump.position.clone(), mesh: pump, blown: false });
+      }
+    }
+  }
+
+  /** Explosions near a pump blow it sky-high (chain reaction fuel). */
+  private maybeBlowPumps(pos: THREE.Vector3, radius: number): void {
+    for (const p of this.gasPumps) {
+      if (p.blown) continue;
+      if (p.pos.distanceTo(pos) < radius + 1.2) this.blowPump(p);
+    }
+  }
+
+  private blowPump(p: { pos: THREE.Vector3; mesh: THREE.Group; blown: boolean }): void {
+    p.blown = true;
+    // Char the pump (keep it as a blackened wreck)
+    p.mesh.traverse((o) => {
+      if (o instanceof THREE.Mesh) {
+        const m = o.material as THREE.MeshStandardMaterial;
+        if (m && m.color) {
+          m.color.multiplyScalar(0.14);
+          m.roughness = 0.95;
+          m.metalness = 0.1;
+          if (m.emissive) m.emissive.setHex(0x000000);
+        }
+      }
+    });
+    p.mesh.rotation.z = (Math.random() - 0.5) * 0.3;
+    // Fuel-air blast: bigger than a car, ignites everything nearby (and can
+    // chain-detonate the island's second pump through explode → maybeBlowPumps)
+    this.explode(p.pos.clone().setY(0.9), 8.6);
+    this.particles.addFireEmitter(() => p.pos.clone().setY(0.7), 9, 1.5);
+    this.addScore(45);
+    this.missions.onGasBlowup();
+    this.toast('⛽ FUEL PUMP EXPLODED — the whole block is burning!');
+  }
+
+  private updateGasStations(): void {
+    // Sign glow breathes at night; pumps detonate from flame/heat contact.
+    const night = Math.max(0, Math.min(1, (this.timeT - 0.78) * 12) + Math.max(0, (0.24 - this.timeT) * 12));
+    if (this.gasSignMat) this.gasSignMat.emissiveIntensity = 0.35 + night * 1.5 + 0.25 * Math.sin(performance.now() * 0.0026);
+    for (const p of this.gasPumps) {
+      if (p.blown) continue;
+      // Burning cars parked beside a pump eventually light it.
+      for (const c of this.vehicles.cars) {
+        if (c.state === 'burning' && c.group.position.distanceTo(p.pos) < 4.2) {
+          this.blowPump(p);
+          break;
+        }
+      }
+      if (p.blown) continue;
+      // Fast crashes into pumps set them off too.
+      const car = this.drivingCar;
+      if (car && Math.abs(car.speed) > 10 && car.group.position.distanceTo(p.pos) < 2.6) {
+        this.blowPump(p);
+        this.toast('🚗 You crashed into the pumps!');
+      }
+    }
+  }
+
+  /** True when the player is close enough to a station to warrant the hint. */
+  private nearGasHint(): boolean {
+    const pp = this.playerPos();
+    return this.gasStations.some((s) => Math.hypot(s.pos.x - pp.x, s.pos.z - pp.z) < 38);
   }
 
   // ------------------------------------------------------------------ weather
@@ -2571,6 +2770,18 @@ export class HyperionGame implements World {
       ctx.fillText('S', gx, gz + 2.4);
       ctx.textAlign = 'left';
     }
+    // Gas stations — amber squares with a pump glyph
+    for (const st of this.gasStations) {
+      const gx = st.pos.x - p.x;
+      const gz = st.pos.z - p.z;
+      ctx.fillStyle = 'rgba(255,150,40,0.85)';
+      ctx.fillRect(gx - 3, gz - 3, 6, 6);
+      ctx.fillStyle = '#1a0e02';
+      ctx.font = 'bold 6.5px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('⛽', gx, gz + 2.3);
+      ctx.textAlign = 'left';
+    }
     // Contract target marker (pulsing amber diamond, clamped to map edges)
     const snap = this.missions.snapshot((m, buildingId) => (m.locate === 'building' ? this.missionMarker(buildingId) : null));
     let markerScreen: { x: number; y: number; dist: number } | null = null;
@@ -2777,6 +2988,20 @@ export class HyperionGame implements World {
       a.mat.dispose();
     }
     this.hydrants.length = 0;
+    for (const p of this.gasPumps) {
+      this.scene.remove(p.mesh);
+      p.mesh.traverse((o) => {
+        if (o instanceof THREE.Mesh) (o.material as THREE.Material).dispose();
+      });
+    }
+    this.gasPumps.length = 0;
+    this.gasStations.length = 0;
+    for (const a of this.gasAssets) {
+      a.geo.dispose();
+      a.mat.dispose();
+    }
+    this.gasAssets.length = 0;
+    this.gasSignMat = null;
     this.weather.dispose();
     this.city.dispose();
     this.vehicles.dispose();
