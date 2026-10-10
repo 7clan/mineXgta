@@ -331,6 +331,48 @@ body {
   animation: hyperion-radar-spin 1.5s linear infinite;
 }
 
+/* AIR TIME: landing pop — big scale-in, drift up + fade out */
+@keyframes hyperion-airpop {
+  0% {
+    transform: scale(0.4) translateY(20px);
+    opacity: 0;
+  }
+  16% {
+    transform: scale(1.24) translateY(0);
+    opacity: 1;
+  }
+  30% {
+    transform: scale(1);
+  }
+  76% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.07) translateY(-16px);
+  }
+}
+
+.hyperion-airpop {
+  animation: hyperion-airpop 2.1s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+
+/* AIR TIME: live airborne counter — subtle heartbeat pulse */
+@keyframes hyperion-airlive {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+}
+
+.hyperion-airlive {
+  animation: hyperion-airlive 0.85s ease-in-out infinite;
+}
+
 /* SPOTTED chip: harsh searchlight flicker (amber -> red) */
 @keyframes hyperion-spotted-flicker {
   0%,

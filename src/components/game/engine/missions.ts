@@ -11,7 +11,7 @@
  * beacon pillar in-world) that the game reads from `snapshot()`.
  */
 
-export type MissionKind = 'wreck' | 'voxels' | 'collapse' | 'peds' | 'steal' | 'smash' | 'gas';
+export type MissionKind = 'wreck' | 'voxels' | 'collapse' | 'peds' | 'steal' | 'smash' | 'gas' | 'stunt';
 
 export interface MissionDef {
   kind: MissionKind;
@@ -145,6 +145,19 @@ const DEFS: MissionDef[] = [
     ],
     rewardLabel: 'Flint & Steel ×2 · TNT ×6 · +180 CHAOS',
   },
+  {
+    kind: 'stunt',
+    title: 'STUNT MAN',
+    desc: 'Log 4.5s of air time off the yellow stunt ramps',
+    target: 4.5,
+    time: 95,
+    rewardScore: 190,
+    rewards: [
+      { id: 'pearl', count: 6 },
+      { id: 'tnt', count: 6 },
+    ],
+    rewardLabel: 'Ender Pearl ×6 · TNT ×6 · +190 CHAOS',
+  },
 ];
 
 const OFFER_TTL = 15;
@@ -230,6 +243,10 @@ export class Missions {
   /** A fuel pump detonated (FUEL CRISIS). */
   onGasBlowup(): void {
     this.progress('gas', 1);
+  }
+  /** Player air time accumulated off a stunt ramp (STUNT MAN). */
+  onStuntAir(seconds: number): void {
+    this.progress('stunt', seconds);
   }
 
   private progress(kind: MissionKind, n: number): void {

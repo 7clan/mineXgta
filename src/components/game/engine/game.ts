@@ -224,6 +224,16 @@ export class HyperionGame implements World {
   private gasStations: Array<{ pos: THREE.Vector3 }> = [];
   private gasAssets: Array<{ geo: THREE.BufferGeometry; mat: THREE.Material }> = [];
   private gasSignMat: THREE.MeshStandardMaterial | null = null;
+  /** Stunt ramps: yellow chevron wedges on mid-block roads — hit fast, get AIR TIME. */
+  private stuntRamps: Array<{ group: THREE.Group; pos: THREE.Vector3; yaw: number; coolT: number }> = [];
+  private rampAssets: Array<{ geo: THREE.BufferGeometry; mat: THREE.Material }> = [];
+  private rampGeo: { wedge: THREE.BufferGeometry; edge: THREE.BoxGeometry; inclineMat: THREE.MeshStandardMaterial; bodyMat: THREE.MeshStandardMaterial; edgeMat: THREE.MeshStandardMaterial } | null = null;
+  /** Airborne cars (launch physics live here; vehicles.ts owns ground physics). */
+  private airCars = new Map<Car, { vy: number; t: number; player: boolean; state: Car['state']; last: THREE.Vector3 }>();
+  private bestAir = 0;
+  private airPop: { sec: number; score: number; record: boolean; key: number } | null = null;
+  private airPopKey = 0;
+  private airPopT = 0;
   /** User settings (volume / touch) — persisted separately from the world save. */
   private settings: Settings;
   private missions = new Missions({
@@ -326,6 +336,7 @@ export class HyperionGame implements World {
     this.buildSprayGarages();
     this.buildHydrants();
     this.buildGasStations();
+    this.buildStuntRamps();
     this.vehicles.onSmoke = (car) => {
       const p = car.group.position.clone();
       p.y += 0.9;
@@ -1150,7 +1161,8 @@ export class HyperionGame implements World {
       // double-counting the virtual axis mapping in isDown()).
       const throttle = Math.max(-1, Math.min(1, (this.input.keyDown('KeyW') ? 1 : 0) + (this.input.keyDown('KeyS') ? -1 : 0) + this.input.virtualMove.z));
       const steer = Math.max(-1, Math.min(1, (this.input.keyDown('KeyA') ? 1 : 0) + (this.input.keyDown('KeyD') ? -1 : 0) - this.input.virtualMove.x));
-      this.vehicles.drivePlayer(this.drivingCar, dt, throttle, steer, this.input.isDown('Space'), this);
+      // Airborne: momentum carries the car — steering/drive forces freeze mid-air.
+      if (!this.airCars.has(this.drivingCar)) this.vehicles.drivePlayer(this.drivingCar, dt, throttle, steer, this.input.isDown('Space'), this);
       if (this.input.leftClicked) {
         if (this.drivingCar.type === 'tank') this.fireCannon();
         else this.audio.horn(0.05);
@@ -1178,6 +1190,10 @@ export class HyperionGame implements World {
     this.updateRoadblocks(dt);
     this.updateHydrants(dt);
     this.updateGasStations();
+
+    // Stunt ramps + airborne car physics
+    this.updateStunts(dt);
+    this.updateAirCars(dt);
 
     // Digging (LMB / touch DIG hold)
     this.tryDig(dt);
@@ -1288,6 +1304,16 @@ export class HyperionGame implements World {
       else {
         const near = this.vehicles.nearest(this.player.pos, 3.8);
         this.currentHint = near && near.state !== 'burning' ? `F — enter ${near.name}` : null;
+      }
+      // Ramp approach hint (driving fast toward one)
+      if (this.drivingCar && Math.abs(this.drivingCar.speed) > 12) {
+        const pp3 = this.drivingCar.group.position;
+        for (const r of this.stuntRamps) {
+          if (Math.hypot(r.pos.x - pp3.x, r.pos.z - pp3.z) < 34) {
+            this.currentHint = '🛫 Stunt ramp ahead — hit it at speed for AIR TIME!';
+            break;
+          }
+        }
       }
     }
 
@@ -1477,6 +1503,7 @@ export class HyperionGame implements World {
       placed,
       radio: this.audio.radioStation,
       jetFuel: this.jetFuel,
+      bestAir: this.bestAir,
     });
     this.hasSaveFile = ok;
     if (manual) this.toast(ok ? 'World saved' : 'Save failed (storage blocked?)');
@@ -1529,6 +1556,9 @@ export class HyperionGame implements World {
       }
       if (typeof d.jetFuel === 'number' && d.jetFuel >= 0 && d.jetFuel <= 1) {
         this.jetFuel = d.jetFuel;
+      }
+      if (typeof d.bestAir === 'number' && d.bestAir >= 0) {
+        this.bestAir = d.bestAir;
       }
       return true;
     } catch {
@@ -1750,19 +1780,23 @@ export class HyperionGame implements World {
   private spawnRoadblock(): void {
     const car = this.drivingCar;
     if (!car) return;
-    const heading = new THREE.Vector3(Math.sin(car.yaw), 0, Math.cos(car.yaw));
+    // Dispatch prediction: use the ACTUAL travel direction (velocity sign flips
+    // it when reversing) and snap onto the road the car is CURRENTLY driving on
+    // (centerline nearest the car, not the projected point — mid-turn the point
+    // can snap to a cross street the player isn't on).
+    const dirSign = car.speed >= 0 ? 1 : -1;
+    const heading = new THREE.Vector3(Math.sin(car.yaw) * dirSign, 0, Math.cos(car.yaw) * dirSign);
     const p = car.group.position;
-    const ahead = this.tmpV.set(p.x + heading.x * 105, 0, p.z + heading.z * 105);
-    // Snap onto the nearest road centerline (perpendicular axis) so the blockade
-    // sits across the street the player is driving on.
+    const alongX = Math.abs(heading.x) > Math.abs(heading.z); // driving along X
     const roads = this.city.roadCoords;
     let bestRoad = roads[0];
     let bestD = Infinity;
     for (const c of roads) {
-      const d = Math.abs(c - (Math.abs(heading.x) > Math.abs(heading.z) ? ahead.z : ahead.x));
+      const d = Math.abs(c - (alongX ? p.z : p.x));
       if (d < bestD) { bestD = d; bestRoad = c; }
     }
-    const alongX = Math.abs(heading.x) > Math.abs(heading.z); // driving along X
+    if (bestD > 5) return; // off-road / crossing a lot — no sensible lane to block
+    const ahead = this.tmpV.set(p.x + heading.x * 105, 0, p.z + heading.z * 105);
     const bx = alongX ? ahead.x : bestRoad;
     const bz = alongX ? bestRoad : ahead.z;
     const pos = new THREE.Vector3(bx, 0, bz);
@@ -1891,9 +1925,10 @@ export class HyperionGame implements World {
         rb.barrier.rotation.x += dt * 9;
         rb.barrier.rotation.z += dt * 4;
       }
-      // Spike strip: non-tank cars at speed shred their tires
+      // Spike strip: non-tank cars at speed shred their tires (grounded only —
+      // a car launched off a stunt ramp sails clean over it)
       const car = this.drivingCar;
-      if (car && car.type !== 'tank' && car.tires >= 0.5 && Math.abs(car.speed) > 6) {
+      if (car && car.type !== 'tank' && car.tires >= 0.5 && Math.abs(car.speed) > 6 && car.group.position.y < 0.5) {
         if (Math.hypot(car.group.position.x - rb.spike.x, car.group.position.z - rb.spike.z) < 2.1) {
           car.tires = 0;
           car.speed *= 0.72;
@@ -1905,7 +1940,7 @@ export class HyperionGame implements World {
         }
       }
       // Barrier crash: smash through fast, bounce off slow (tank always smashes)
-      if (rb.flyT <= 0 && car && Math.hypot(car.group.position.x - rb.pos.x, car.group.position.z - rb.pos.z) < 2.4) {
+      if (rb.flyT <= 0 && car && car.group.position.y < 0.6 && Math.hypot(car.group.position.x - rb.pos.x, car.group.position.z - rb.pos.z) < 2.4) {
         const smash = Math.abs(car.speed) > (car.type === 'tank' ? 2 : 9);
         if (smash) {
           rb.flyT = 1.6;
@@ -2207,6 +2242,264 @@ export class HyperionGame implements World {
   private nearGasHint(): boolean {
     const pp = this.playerPos();
     return this.gasStations.some((s) => Math.hypot(s.pos.x - pp.x, s.pos.z - pp.z) < 38);
+  }
+
+  // ------------------------------------------------------------------ stunt ramps
+
+  /** Yellow/black chevron canvas for the ramp incline. */
+  private makeChevronTexture(): THREE.CanvasTexture {
+    const cv = document.createElement('canvas');
+    cv.width = 128;
+    cv.height = 128;
+    const ctx = cv.getContext('2d')!;
+    ctx.fillStyle = '#e8b018';
+    ctx.fillRect(0, 0, 128, 128);
+    ctx.fillStyle = '#151513';
+    for (let band = 0; band < 2; band++) {
+      const y0 = band * 64;
+      for (const off of [-32, 0, 32, 64, 96, 128]) {
+        ctx.beginPath();
+        ctx.moveTo(off - 22, y0 + 52);
+        ctx.lineTo(off, y0 + 22);
+        ctx.lineTo(off + 22, y0 + 52);
+        ctx.lineTo(off + 22, y0 + 64);
+        ctx.lineTo(off, y0 + 34);
+        ctx.lineTo(off - 22, y0 + 64);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    return tex;
+  }
+
+  /** Right-triangle prism: incline rises from z=-hl (y=0) to z=+hl (y=h); the
+   *  tall end is a vertical back wall. Group 0 = incline face, group 1 = body. */
+  private buildWedgeGeometry(w: number, l: number, h: number): THREE.BufferGeometry {
+    const hw = w / 2;
+    const hl = l / 2;
+    const pos: number[] = [];
+    const uv: number[] = [];
+    const tri = (
+      a: [number, number, number],
+      b: [number, number, number],
+      c: [number, number, number],
+      uvs: Array<[number, number]>,
+    ) => {
+      for (const [v, uvp] of [[a, uvs[0]], [b, uvs[1]], [c, uvs[2]]] as const) {
+        pos.push(v[0], v[1], v[2]);
+        uv.push(uvp[0], uvp[1]);
+      }
+    };
+    // incline (facing up toward -z): A(-hw,0,-hl) B(hw,0,-hl) C(hw,h,hl) D(-hw,h,hl)
+    tri([-hw, 0, -hl], [hw, h, hl], [hw, 0, -hl], [[0, 0], [1, 1], [1, 0]]);
+    tri([-hw, 0, -hl], [-hw, h, hl], [hw, h, hl], [[0, 0], [0, 1], [1, 1]]);
+    // back wall (facing +z)
+    tri([hw, 0, hl], [-hw, h, hl], [-hw, 0, hl], [[1, 0], [0, 1], [0, 0]]);
+    tri([hw, 0, hl], [hw, h, hl], [-hw, h, hl], [[1, 0], [1, 1], [0, 1]]);
+    // right side (facing +x)
+    tri([hw, 0, -hl], [hw, h, hl], [hw, 0, hl], [[0, 0], [1, 1], [1, 0]]);
+    // left side (facing -x)
+    tri([-hw, 0, -hl], [-hw, 0, hl], [-hw, h, hl], [[0, 0], [1, 0], [1, 1]]);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    geo.computeVertexNormals();
+    geo.addGroup(0, 6, 0); // incline → chevron material
+    geo.addGroup(6, 12, 1); // walls/sides → steel
+    return geo;
+  }
+
+  /** Four mid-block launch ramps across the city (kept clear of POI lots). */
+  private buildStuntRamps(): void {
+    const R = this.city.roadCoords;
+    const slots = [
+      { road: R[3], mid: R[4] + BLOCK / 2, alongX: true, dir: 1 },
+      { road: R[9], mid: R[8] + BLOCK / 2, alongX: true, dir: -1 },
+      { road: R[5], mid: R[8] + BLOCK / 2, alongX: false, dir: 1 },
+      { road: R[8], mid: R[2] + BLOCK / 2, alongX: false, dir: -1 },
+    ];
+    const W = 6.6;
+    const L = 6.0;
+    const H = 2.4;
+    if (!this.rampGeo) {
+      const inclineMat = new THREE.MeshStandardMaterial({ map: this.makeChevronTexture(), roughness: 0.55, metalness: 0.15 });
+      const bodyMat = new THREE.MeshStandardMaterial({ color: 0x2c2f34, roughness: 0.5, metalness: 0.6 });
+      const edgeMat = new THREE.MeshStandardMaterial({ color: 0x3a2c08, emissive: 0xffb020, emissiveIntensity: 1.7, roughness: 0.4 });
+      this.rampGeo = {
+        wedge: this.buildWedgeGeometry(W, L, H),
+        edge: new THREE.BoxGeometry(0.14, 0.07, Math.hypot(L, H)),
+        inclineMat,
+        bodyMat,
+        edgeMat,
+      };
+      this.rampAssets.push(
+        { geo: this.rampGeo.wedge, mat: inclineMat },
+        { geo: this.rampGeo.wedge, mat: bodyMat },
+        { geo: this.rampGeo.edge, mat: edgeMat },
+      );
+    }
+    const G = this.rampGeo;
+    for (const s of slots) {
+      let along = s.mid;
+      // Nudge off lots occupied by POIs (gas station canopies / spray garages)
+      const clash = (x: number, z: number) =>
+        this.gasStations.some((g) => Math.hypot(g.pos.x - x, g.pos.z - z) < 26) ||
+        this.sprays.some((sp) => Math.hypot(sp.pos.x - x, sp.pos.z - z) < 26);
+      let x = s.alongX ? along : s.road;
+      let z = s.alongX ? s.road : along;
+      if (clash(x, z)) {
+        along += 24;
+        x = s.alongX ? along : s.road;
+        z = s.alongX ? s.road : along;
+        if (clash(x, z)) continue;
+      }
+      if (Math.abs(x) > CITY_HALF - 18 || Math.abs(z) > CITY_HALF - 18) continue;
+      const yaw = s.alongX ? (s.dir > 0 ? Math.PI / 2 : -Math.PI / 2) : s.dir > 0 ? 0 : Math.PI;
+      const group = new THREE.Group();
+      const wedge = new THREE.Mesh(G.wedge, [G.inclineMat, G.bodyMat]);
+      wedge.castShadow = true;
+      wedge.receiveShadow = true;
+      group.add(wedge);
+      // Glowing edge strips along both incline sides (night visibility)
+      const inclineAng = -Math.atan2(H, L);
+      for (const side of [-1, 1]) {
+        const edge = new THREE.Mesh(G.edge, G.edgeMat);
+        edge.position.set(side * (W / 2 - 0.1), H / 2 + 0.05, 0);
+        edge.rotation.x = inclineAng;
+        group.add(edge);
+      }
+      group.position.set(x, 0, z);
+      group.rotation.y = yaw;
+      this.scene.add(group);
+      this.stuntRamps.push({ group, pos: new THREE.Vector3(x, 0, z), yaw, coolT: 0 });
+    }
+  }
+
+  /** Per-frame ramp logic: launch cars that hit the incline at speed, hard-stop
+   *  back-wall hits. Traffic cop cars get launched too (pure spectacle). */
+  private updateStunts(dt: number): void {
+    for (const r of this.stuntRamps) {
+      if (r.coolT > 0) r.coolT -= dt;
+    }
+    for (const car of this.vehicles.cars) {
+      if (car.state === 'wrecked' || car.state === 'burning' || car.state === 'falling') continue;
+      if (this.airCars.has(car)) continue;
+      const p = car.group.position;
+      if (p.y > 0.25) continue;
+      const spd = Math.abs(car.speed);
+      if (spd < 8) continue;
+      const dirSign = car.speed >= 0 ? 1 : -1;
+      const vx = Math.sin(car.yaw) * dirSign;
+      const vz = Math.cos(car.yaw) * dirSign;
+      for (const r of this.stuntRamps) {
+        if (r.coolT > 0) continue;
+        const dx = p.x - r.pos.x;
+        const dz = p.z - r.pos.z;
+        const lx = dx * Math.cos(r.yaw) - dz * Math.sin(r.yaw);
+        const lz = dx * Math.sin(r.yaw) + dz * Math.cos(r.yaw);
+        if (Math.abs(lx) > 3.0) continue;
+        const heading = vx * Math.sin(r.yaw) + vz * Math.cos(r.yaw);
+        // Back-wall crash: arriving from the tall end against the launch direction
+        if (lz > 2.0 && lz < 3.8 && heading < -0.5) {
+          car.speed *= -0.22;
+          r.coolT = 1.2;
+          this.audio.thud(this.far(p));
+          this.particles.spawnDebris(new THREE.Vector3(p.x, 0.6, p.z), 4, new THREE.Color(0xe8b018), 0.9);
+          if (car === this.drivingCar) {
+            this.shake(0.3);
+            this.hitMark++;
+            this.toast('🧱 Ramp wall! Hit it FROM the incline side at speed');
+          }
+          break;
+        }
+        // Launch: crossing the incline face driving up it
+        if (lz > -3.2 && lz < 2.4 && heading > 0.55) {
+          r.coolT = 1.4;
+          this.airCars.set(car, {
+            vy: Math.min(19, spd * 0.6),
+            t: 0,
+            player: car === this.drivingCar,
+            state: car.state,
+            last: p.clone(),
+          });
+          car.group.rotation.x = -0.08;
+          this.audio.thud(this.far(p));
+          if (car === this.drivingCar) this.shake(0.14);
+          break;
+        }
+      }
+    }
+  }
+
+  /** Airborne integration: gravity, nose pitch, facade splats, landing effects
+   *  + AIR TIME scoring for the player's car. */
+  private updateAirCars(dt: number): void {
+    // Landing pop lifetime is engine-driven (CSS animation fills can stall in
+    // throttled/render-blocked tabs — the unmount is the reliable fade-out).
+    if (this.airPopT > 0) {
+      this.airPopT -= dt;
+      if (this.airPopT <= 0) this.airPop = null;
+    }
+    for (const [car, st] of this.airCars) {
+      // vehicles.update re-flags deep-pit floors as 'falling' — reclaim the car.
+      if (car.state === 'falling' && car.state !== st.state) {
+        car.state = st.state;
+        car.fallVel = 0;
+      }
+      st.vy -= 22 * dt;
+      const p = car.group.position;
+      p.y += st.vy * dt;
+      if (car === this.drivingCar) st.t += dt;
+      car.group.rotation.x = THREE.MathUtils.clamp(-st.vy * 0.026, -0.42, 0.4);
+      // Facade splat: airborne car flying into a building face stops dead
+      if (this.city.buildingAt(p, 0.4) && p.y > 0.5) {
+        p.copy(st.last);
+        car.speed *= -0.18;
+        st.vy = Math.min(st.vy, 0) * 0.35;
+        this.audio.thud(this.far(p));
+        this.particles.spawnDebris(p.clone().setY(p.y + 0.6), 5, new THREE.Color(0x9a948a), 1.0);
+        if (car === this.drivingCar) {
+          this.shake(0.3);
+          this.hitMark++;
+          if (car.type !== 'tank') car.health -= 6;
+        }
+        continue;
+      }
+      st.last.copy(p);
+      const floor = this.floorHeightAt(p.x, p.z, p.y);
+      if (st.vy < 0 && p.y <= floor + 0.04) {
+        const impact = -st.vy;
+        p.y = floor;
+        car.group.rotation.x = 0;
+        this.airCars.delete(car);
+        this.particles.spawnDebris(new THREE.Vector3(p.x, Math.max(0.25, floor + 0.25), p.z), 8, new THREE.Color(0x6b5b45), 1.4);
+        this.audio.thud(this.far(p));
+        if (car === this.drivingCar) {
+          if (impact > 15 && car.type !== 'tank') car.health = Math.max(1, car.health - Math.round((impact - 14) * 1.5));
+          this.shake(Math.min(0.5, 0.16 + impact * 0.02));
+          const t = st.t;
+          if (t >= 0.55) {
+            const score = Math.round(t * 26);
+            const record = t > this.bestAir;
+            if (record) this.bestAir = t;
+            this.addScore(score);
+            this.missions.onStuntAir(t);
+            this.airPopKey++;
+            this.airPop = { sec: t, score, record, key: this.airPopKey };
+            this.airPopT = 2.2;
+            this.audio.pickup();
+            this.toast(record ? `🏆 NEW RECORD AIR TIME — ${t.toFixed(1)}s!` : `🛫 AIR TIME ${t.toFixed(1)}s · +${score} CHAOS`);
+          }
+        } else if (impact > 16 && car.type !== 'tank') {
+          car.health -= 10;
+          if (car.health <= 0 && (car.state === 'traffic' || car.state === 'parked')) this.vehicles.ignite(car);
+        }
+      }
+    }
   }
 
   // ------------------------------------------------------------------ weather
@@ -2652,6 +2945,13 @@ export class HyperionGame implements World {
         }
         return best !== null && best < 150 ? best : null;
       })(),
+      air: (() => {
+        const dc = this.drivingCar;
+        const st = dc ? this.airCars.get(dc) : undefined;
+        return st ? st.t : 0;
+      })(),
+      airBest: this.bestAir,
+      airPop: this.airPop,
     };
     this.cb.onState(state);
     this.drawMinimap();
@@ -2716,6 +3016,23 @@ export class HyperionGame implements World {
       const c = car.group.position;
       ctx.fillStyle = car.state === 'wrecked' ? '#555' : car.state === 'burning' ? '#ff5030' : '#e8c34a';
       ctx.fillRect((c.x - p.x) - 1.6, (c.z - p.z) - 1.6, 3.2, 3.2);
+    }
+    // Stunt ramps — pulsing amber chevrons
+    for (const r of this.stuntRamps) {
+      const pulse = 0.6 + 0.4 * (0.5 + 0.5 * Math.sin(performance.now() * 0.005));
+      ctx.save();
+      ctx.translate(r.pos.x - p.x, r.pos.z - p.z);
+      ctx.fillStyle = `rgba(242,183,19,${pulse})`;
+      ctx.beginPath();
+      ctx.moveTo(0, 3.4);
+      ctx.lineTo(-2.4, -2.4);
+      ctx.lineTo(2.4, -2.4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.65)';
+      ctx.lineWidth = 0.7;
+      ctx.stroke();
+      ctx.restore();
     }
     // Air support: blinking red ring around the chopper
     if (this.heli) {
@@ -3002,6 +3319,15 @@ export class HyperionGame implements World {
     }
     this.gasAssets.length = 0;
     this.gasSignMat = null;
+    for (const r of this.stuntRamps) this.scene.remove(r.group);
+    this.stuntRamps.length = 0;
+    this.airCars.clear();
+    for (const a of this.rampAssets) {
+      a.geo.dispose();
+      a.mat.dispose();
+    }
+    this.rampAssets.length = 0;
+    this.rampGeo = null;
     this.weather.dispose();
     this.city.dispose();
     this.vehicles.dispose();

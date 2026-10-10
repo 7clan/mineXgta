@@ -124,6 +124,7 @@ const CONTROLS: Array<[string, string]> = [
   ['M', 'Accept / quit contract'],
   ["🎨 Drive in", "Pay'n'Spray — clear heat + repair"],
   ['🛞 Spike strips', '4★ roadblocks shred tires — respray to fix'],
+  ['🛫 Stunt ramps', 'Hit them at speed — air time = CHAOS'],
   ['R', 'Car radio station'],
   ['F5', 'Third-person view'],
   ['F3', 'Debug overlay'],
@@ -169,7 +170,7 @@ function MissionChip({ mission }: { mission: NonNullable<HudState['mission']> })
       </div>
       <div className="mt-1 flex items-center justify-between text-[9px] font-bold uppercase tracking-widest text-white/45">
         <span>
-          {offer ? 'Reward' : `${mission.progress} / ${mission.target}`}
+          {offer ? 'Reward' : `${mission.target % 1 === 0 ? mission.progress : mission.progress.toFixed(1)} / ${mission.target}`}
           {mission.marker && (
             <span className="ml-2 text-amber-300/90">◆ {Math.round(mission.marker.dist)}m</span>
           )}
@@ -344,8 +345,42 @@ function RoadblockChip({ dist }: { dist: number }) {
   );
 }
 
+/** AIR TIME overlay — live counter while airborne + scored landing pop.
+ *  The pop unmounts when the engine clears it (airPop null) after 2.2 s. */
+function AirTimeOverlay({ air, best, pop }: { air: number; best: number; pop: HudState['airPop'] }) {
+  const live = air > 0.12;
+  if (!live && !pop) return null;
+  return (
+    <div className="pointer-events-none absolute bottom-[31%] left-1/2 z-10 -translate-x-1/2 text-center">
+      {live ? (
+        <div className="hyperion-airlive">
+          <div className="text-[10px] font-black uppercase tracking-[0.4em] text-amber-300 drop-shadow-[0_1px_0_rgba(0,0,0,0.8)]">
+            Air time
+          </div>
+          <div className="bg-gradient-to-b from-amber-100 via-amber-300 to-amber-500 bg-clip-text text-5xl font-black italic leading-none tabular-nums text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.65)]">
+            {air.toFixed(1)}
+            <span className="text-2xl">s</span>
+          </div>
+          {best > 0 && (
+            <div className="mt-0.5 text-[9px] font-bold uppercase tracking-[0.2em] text-white/55">best {best.toFixed(1)}s</div>
+          )}
+        </div>
+      ) : pop ? (
+        <div key={pop.key} className="hyperion-airpop">
+          <div className="bg-gradient-to-b from-emerald-100 via-emerald-300 to-emerald-500 bg-clip-text text-4xl font-black italic leading-none text-transparent drop-shadow-[0_3px_0_rgba(0,0,0,0.65)]">
+            +{pop.score} CHAOS
+          </div>
+          <div className="mt-1 text-[11px] font-black uppercase tracking-[0.22em] text-amber-300 drop-shadow-[0_1px_0_rgba(0,0,0,0.8)]">
+            🛫 {pop.sec.toFixed(1)}s air time{pop.record ? ' · 🏆 NEW RECORD!' : ''}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** Vehicle speedometer — SVG arc gauge + hull integrity + tank cannon reload. */
-function Speedo({ driving }: { driving: NonNullable<HudState['driving']> }) {
+function Speedo({ driving, air }: { driving: NonNullable<HudState['driving']>; air: number }) {
   const max = driving.tank ? 60 : 130;
   const pct = Math.max(0, Math.min(1, driving.speed / max));
   const angle = (-90 + pct * 180) * (Math.PI / 180);
@@ -403,20 +438,27 @@ function Speedo({ driving }: { driving: NonNullable<HudState['driving']> }) {
         <span className={`text-[9px] font-black uppercase tracking-[0.14em] ${driving.tank ? 'text-lime-300/90' : 'text-amber-300/90'}`}>
           {driving.name}
         </span>
-        {!driving.tires && (
-          <span className="hyperion-flame rounded bg-red-500/25 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest text-red-300">
-            🛞 Shredded
-          </span>
-        )}
-        {driving.tank && (
-          <span
-            className={`rounded px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest ${
-              driving.reload >= 1 ? 'bg-lime-400/20 text-lime-300' : 'bg-white/10 text-white/45'
-            }`}
-          >
-            {driving.reload >= 1 ? '● LMB · FIRE' : `RELOAD ${Math.round(driving.reload * 100)}%`}
-          </span>
-        )}
+        <span className="flex items-center gap-1">
+          {air > 0.12 && (
+            <span className="rounded bg-amber-400/20 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest text-amber-300">
+              🪂 Airborne
+            </span>
+          )}
+          {!driving.tires && (
+            <span className="hyperion-flame rounded bg-red-500/25 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest text-red-300">
+              🛞 Shredded
+            </span>
+          )}
+          {driving.tank && (
+            <span
+              className={`rounded px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest ${
+                driving.reload >= 1 ? 'bg-lime-400/20 text-lime-300' : 'bg-white/10 text-white/45'
+              }`}
+            >
+              {driving.reload >= 1 ? '● LMB · FIRE' : `RELOAD ${Math.round(driving.reload * 100)}%`}
+            </span>
+          )}
+        </span>
       </div>
       {driving.tank && driving.reload < 1 && (
         <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-white/10">
@@ -765,11 +807,14 @@ export function Hud(props: HudProps) {
           })()}
           {state.driving && !state.dead && (
             <div className="mt-1 flex justify-end">
-              <Speedo driving={state.driving} />
+              <Speedo driving={state.driving} air={state.air} />
             </div>
           )}
         </div>
       )}
+
+      {/* AIR TIME — live airborne counter + scored landing pop */}
+      {state.playing && !state.dead && <AirTimeOverlay air={state.air} best={state.airBest} pop={state.airPop} />}
 
       {/* Depth chip — underground mining readout */}
       {state.playing && !state.dead && state.depth > 0 && (
@@ -968,6 +1013,8 @@ export function Hud(props: HudProps) {
               joins the hunt, and only the tunnels can hide you. At four stars the cops set 🚧 roadblocks with
               spike strips that wreck your tires. Too hot? Drive into a 🎨 Pay&apos;n&apos;Spray bay to respray,
               get new rubber and lose the heat — or blow a 💧 hydrant and watch the main geyser douse the chaos.
+              Feel like showing off? Hit the 🛫 yellow stunt ramps at speed — air time stacks CHAOS, feeds the
+              STUNT MAN contract and chases your record.
             </p>
             {state.hasSave && (
               <button

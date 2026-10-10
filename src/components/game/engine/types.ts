@@ -111,6 +111,12 @@ export interface HudState {
   spray: number | null;
   /** Nearest police roadblock: distance in m, or null when none within 150 m. */
   roadblock: number | null;
+  /** Seconds of AIR TIME the player's car currently has (0 = grounded). */
+  air: number;
+  /** Session-best air time in seconds (persisted in the save). */
+  airBest: number;
+  /** Landing pop: fires once per landing (key increments) with the scored jump. */
+  airPop: { sec: number; score: number; record: boolean; key: number } | null;
 }
 
 export const HUD_INITIAL: HudState = {
@@ -148,6 +154,9 @@ export const HUD_INITIAL: HudState = {
   touch: false,
   spray: null,
   roadblock: null,
+  air: 0,
+  airBest: 0,
+  airPop: null,
 };
 
 /**

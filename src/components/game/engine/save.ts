@@ -27,6 +27,8 @@ export interface SaveData {
   radio?: number;
   /** Jetpack fuel 0..1 — optional for v1 saves made before this field. */
   jetFuel?: number;
+  /** Session-best stunt air time in seconds — optional for v1 saves made before this field. */
+  bestAir?: number;
 }
 
 export const SAVE_TYPES = ['dirt', 'cobblestone', 'planks', 'glass'] as const;
