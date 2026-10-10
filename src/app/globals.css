@@ -446,6 +446,27 @@ input[type='range'].hyperion-vol {
 }
 
 
+/* Creative inventory panel: thin MC-style scrollbar */
+.hyperion-mc-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #8b8b8b #3a3a3a;
+}
+
+.hyperion-mc-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+
+.hyperion-mc-scroll::-webkit-scrollbar-track {
+  background: #3a3a3a;
+  border-left: 2px solid #1c1c1c;
+}
+
+.hyperion-mc-scroll::-webkit-scrollbar-thumb {
+  background: #8b8b8b;
+  border: 2px solid;
+  border-color: #ffffff #555555 #555555 #ffffff; /* raised bevel thumb */
+}
+
 /* Roadblock chip: animated red/white hazard stripes (marching diagonals) */
 @keyframes hyperion-hazard-march {
   0% {

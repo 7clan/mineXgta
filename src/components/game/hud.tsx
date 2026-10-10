@@ -6,8 +6,15 @@ import { ICON_URLS, ITEMS, UI_ICONS } from './engine/items';
 import { HyperionAudio } from './engine/audio';
 import type { HyperionGame } from './engine/game';
 
-const SLOT_BASE =
-  'relative flex items-center justify-center bg-[#8b8b8b] border-2 border-t-[#373737] border-l-[#373737] border-b-[#c6c6c6] border-r-[#c6c6c6]';
+/** Hotbar slot — classic MC dark cell: translucent black fill, inset 2px borders
+ *  (dark top/left #2b2b2b, light bottom/right #5a5a5a) + 1px black outer ring. Sharp corners. */
+const HOTBAR_SLOT =
+  'relative flex items-center justify-center border-2 border-t-[#2b2b2b] border-l-[#2b2b2b] border-b-[#5a5a5a] border-r-[#5a5a5a] ring-1 ring-black/35 bg-[rgba(0,0,0,0.42)]';
+
+/** Inventory slot — classic MC creative gray cell: #8b8b8b fill, inset 2px borders
+ *  (dark top/left #373737, light bottom/right #ffffff). Sharp corners. */
+const INV_SLOT =
+  'group relative flex items-center justify-center border-2 border-t-[#373737] border-l-[#373737] border-b-[#ffffff] border-r-[#ffffff] bg-[#8b8b8b]';
 
 function ItemIcon({ id, size = 40 }: { id: ItemId; size?: number }) {
   const src = ICON_URLS[id];
@@ -30,24 +37,38 @@ function Slot({
   selected,
   onClick,
   size = 48,
+  variant = 'hotbar',
 }: {
   stack: ItemStack | null;
   selected?: boolean;
   onClick?: () => void;
   size?: number;
+  variant?: 'hotbar' | 'inventory';
 }) {
   return (
     <button
       onClick={onClick}
-      className={`${SLOT_BASE} ${selected ? 'outline outline-[3px] outline-white z-10 scale-110' : ''} transition-transform`}
+      className={`${variant === 'hotbar' ? HOTBAR_SLOT : INV_SLOT} ${selected ? 'z-10' : ''}`}
       style={{ width: size, height: size }}
       aria-label={stack ? ITEMS[stack.id].name : 'empty slot'}
     >
-      {stack && <ItemIcon id={stack.id} size={size - 14} />}
+      {stack && <ItemIcon id={stack.id} size={size - 12} />}
       {stack && stack.count > 1 && (
         <span className="absolute bottom-0 right-1 text-white text-[13px] font-bold leading-none [text-shadow:2px_2px_0_#000]">
           {stack.count}
         </span>
+      )}
+      {/* inventory hover highlight */}
+      {variant === 'inventory' && (
+        <span className="pointer-events-none absolute inset-0 z-10 hidden bg-white/40 group-hover:block" aria-hidden />
+      )}
+      {/* iconic MC white selection frame — 3px, extends ~3px past the slot bounds with a soft white glow */}
+      {selected && (
+        <span
+          className="pointer-events-none absolute -inset-[3px] z-20 border-[3px] border-[#f0f0f0]"
+          style={{ boxShadow: '0 0 8px rgba(255,255,255,0.45)' }}
+          aria-hidden
+        />
       )}
     </button>
   );
@@ -62,14 +83,104 @@ function Hearts({ health }: { health: number }) {
         key={i}
         src={full ? UI_ICONS.heartFull : UI_ICONS.heartEmpty}
         alt={full ? 'heart' : 'empty heart'}
-        width={22}
-        height={22}
-        style={{ imageRendering: 'pixelated' }}
+        width={18}
+        height={18}
+        style={{ imageRendering: 'pixelated', filter: 'drop-shadow(1px 1px 0 #000)' }}
         draggable={false}
       />
     );
   }
   return <div className="flex gap-[2px]">{hearts}</div>;
+}
+
+/** Pixel-art drumstick (9×9) for the decorative hunger bar — brown meat blob top-left,
+ *  lighter highlight, tan bone running to the bottom-right, dark outline. Built once, cached. */
+let DRUMSTICK_URL: string | null = null;
+function drumstickIconURL(): string {
+  if (DRUMSTICK_URL) return DRUMSTICK_URL;
+  if (typeof document === 'undefined') return '';
+  const rows = [
+    '..ooooo..',
+    '.ohmmmmo.',
+    '.ohmmmmo.',
+    '.ommmmmo.',
+    '..ommmo..',
+    '....obo..',
+    '.....obo.',
+    '.....obbo',
+    '.....oooo',
+  ];
+  const palette: Record<string, string> = {
+    o: '#3b2a1e', // dark outline
+    m: '#b5654a', // brown meat
+    h: '#d8936e', // meat highlight
+    b: '#e8dcc0', // tan bone
+  };
+  const cv = document.createElement('canvas');
+  cv.width = 9;
+  cv.height = 9;
+  const ctx = cv.getContext('2d')!;
+  for (let y = 0; y < rows.length; y++) {
+    for (let x = 0; x < rows[y].length; x++) {
+      const color = palette[rows[y][x]];
+      if (!color) continue;
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+  DRUMSTICK_URL = cv.toDataURL();
+  return DRUMSTICK_URL;
+}
+
+/** Hunger bar — decorative & always full: 10 drumsticks on the right side of the survival
+ *  row, each flipped so the bone points bottom-left (mirroring the hearts side, like MC). */
+function HungerBar() {
+  const url = drumstickIconURL();
+  if (!url) return null;
+  const drumsticks: ReactNode[] = [];
+  for (let i = 0; i < 10; i++) {
+    drumsticks.push(
+      <img
+        key={i}
+        src={url}
+        alt=""
+        width={18}
+        height={18}
+        style={{ imageRendering: 'pixelated', filter: 'drop-shadow(1px 1px 0 #000)', transform: 'scaleX(-1)' }}
+        draggable={false}
+      />
+    );
+  }
+  return (
+    <div className="flex gap-[2px]" aria-hidden>
+      {drumsticks}
+    </div>
+  );
+}
+
+/** XP bar — 6px MC-style bar spanning exactly the hotbar width. Driven by the chaos score:
+ *  level = floor(score / 100), progress = (score % 100) / 100. */
+function XpBar({ score }: { score: number }) {
+  const level = Math.floor(score / 100);
+  const progress = (score % 100) / 100;
+  return (
+    <div className="relative mb-[3px] h-[6px] w-full border border-black bg-[#1c1c1c]">
+      <div
+        className="h-full"
+        style={{ width: `${progress * 100}%`, background: '#7efc20', boxShadow: 'inset 0 1px 0 rgba(216,255,150,0.85)' }}
+      />
+      {/* level number centered on the bar — bright green with a heavy black outline (MC style) */}
+      <span
+        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-[11px] font-bold leading-none tabular-nums text-[#7efc20]"
+        style={{
+          textShadow:
+            '1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000, 1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000',
+        }}
+      >
+        {level}
+      </span>
+    </div>
+  );
 }
 
 function Stars({ count }: { count: number }) {
@@ -728,6 +839,102 @@ function SettingsPanel({ game, state }: { game: HyperionGame; state: HudState })
   );
 }
 
+/** Creative tabs — trapezoid-ish MC tabs; `kinds` filters the inventory grid by item kind. */
+const CREATIVE_TABS: Array<{ id: string; label: string; kinds: string[] }> = [
+  { id: 'blocks', label: '🧱 Blocks', kinds: ['placeable', 'tnt'] },
+  { id: 'tools', label: '⚔️ Tools', kinds: ['tool', 'weapon', 'igniter'] },
+  { id: 'misc', label: '🍎 Misc', kinds: ['food', 'throwable', 'jetpack'] },
+];
+
+/** Minecraft creative inventory — raised-bevel gray panel, attached filter tabs, MC inset
+ *  slots, hotbar mirror row with the white selection frame. All swap/close behavior unchanged. */
+function InventoryOverlay({
+  state,
+  onInventorySwap,
+  onSlotClick,
+  onCloseInventory,
+}: {
+  state: HudState;
+  onInventorySwap: (i: number) => void;
+  onSlotClick: (i: number) => void;
+  onCloseInventory: () => void;
+}) {
+  const [tabId, setTabId] = useState('blocks');
+  const filtered = useMemo(() => {
+    const tab = CREATIVE_TABS.find((t) => t.id === tabId) ?? CREATIVE_TABS[0];
+    const kinds = new Set<string>(tab.kinds);
+    return state.inventory
+      .map((stack, index) => ({ stack, index }))
+      .filter(({ stack }) => stack !== null && kinds.has(ITEMS[stack.id].kind));
+  }, [state.inventory, tabId]);
+
+  return (
+    <div className="pointer-events-auto absolute inset-0 flex items-center justify-center bg-black/55 backdrop-blur-[2px]">
+      <div className="flex w-[470px] min-w-[340px] max-w-[92vw] flex-col">
+        {/* creative tabs — attached to the panel top (active tab merges with the panel face) */}
+        <div className="relative z-10 -mb-[2px] flex items-end gap-[2px] pl-3">
+          {CREATIVE_TABS.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTabId(t.id)}
+              className={`rounded-t-[6px] border-2 border-b-0 border-black px-3 pb-2 pt-1 text-[12px] font-bold text-black transition-colors ${
+                t.id === tabId ? 'bg-[#c6c6c6]' : 'bg-[#8b8b8b] hover:bg-[#9c9c9c]'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        {/* panel — 2px black outer border + raised bevel (light top/left, dark bottom/right) */}
+        <div className="border-2 border-black bg-[#c6c6c6] shadow-2xl shadow-black/60">
+          <div className="hyperion-mc-scroll max-h-[calc(80vh-52px)] overflow-y-auto border-[3px] border-t-[#ffffff] border-l-[#ffffff] border-b-[#555555] border-r-[#555555] p-4 md:p-5">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-lg font-black tracking-wide text-[#3f3f3f]">Creative Inventory</div>
+              {/* MC beveled close button */}
+              <button
+                onClick={onCloseInventory}
+                aria-label="Close inventory"
+                className="flex h-7 w-7 items-center justify-center border-2 border-t-[#ffffff] border-l-[#ffffff] border-b-[#4a4a4a] border-r-[#4a4a4a] bg-[#8b8b8b] text-[13px] font-black leading-none text-[#1c1c1c] transition-colors hover:bg-[#a3a3a3] active:translate-y-[1px] active:border-b-[#ffffff] active:border-l-[#4a4a4a] active:border-r-[#ffffff] active:border-t-[#4a4a4a]"
+              >
+                ✕
+              </button>
+            </div>
+            {/* filtered item grid — fixed original indices passed to onInventorySwap */}
+            {filtered.length > 0 ? (
+              <div className="flex flex-wrap content-start gap-[3px]">
+                {filtered.map(({ stack, index }) => (
+                  <Slot key={index} stack={stack} onClick={() => onInventorySwap(index)} size={44} variant="inventory" />
+                ))}
+              </div>
+            ) : (
+              <div className="flex h-[124px] items-center justify-center border-2 border-t-[#373737] border-l-[#373737] border-b-[#ffffff] border-r-[#ffffff] bg-[#8b8b8b] text-[12px] font-bold text-[#2c2c2c]">
+                Nothing in this tab yet
+              </div>
+            )}
+            <div className="my-3 h-[2px] bg-[#8b8b8b]" />
+            {/* hotbar mirror row — same MC inset slots + white selection frame on the active slot */}
+            <div className="flex flex-wrap gap-[3px]">
+              {state.hotbar.map((s, i) => (
+                <Slot
+                  key={i}
+                  stack={s}
+                  selected={i === state.slot}
+                  onClick={() => onSlotClick(i)}
+                  size={44}
+                  variant="inventory"
+                />
+              ))}
+            </div>
+            <div className="mt-3 text-center text-[11px] font-bold text-[#555555]">
+              Click an item to swap it into the selected hotbar slot
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function Hud(props: HudProps) {
   const { state, toast } = props;
 
@@ -932,16 +1139,22 @@ export function Hud(props: HudProps) {
         )}
       </div>
 
-      {/* Bottom center: hearts + hotbar */}
+      {/* Bottom center: MC survival stack — actionbar line / XP bar / hearts+hunger / hotbar */}
       {state.playing && !state.dead && (
-        <div className="pointer-events-auto absolute bottom-4 left-1/2 -translate-x-1/2">
-          <div className="mb-1 flex items-end justify-between px-1">
-            <Hearts health={state.health} />
-            <div className="text-[11px] font-bold text-white/85 [text-shadow:1px_1px_0_#000]">
-              {state.flying ? '✦ CREATIVE FLIGHT' : itemName ? itemName : ''}
-            </div>
+        <div className="pointer-events-auto absolute bottom-4 left-1/2 flex -translate-x-1/2 flex-col items-stretch">
+          {/* actionbar line — creative flight tag / selected item name (MC shows it above the status rows) */}
+          <div className="mb-1.5 min-h-[16px] text-center text-[11px] font-bold text-white/85 [text-shadow:1px_1px_0_#000]">
+            {state.flying ? '✦ CREATIVE FLIGHT' : itemName ? itemName : ''}
           </div>
-          <div className="flex gap-[3px] rounded border-2 border-black/60 bg-black/40 p-[3px]">
+          {/* XP bar — spans exactly the hotbar width, directly above the hearts/hunger row */}
+          <XpBar score={state.score} />
+          {/* mirrored survival row: hearts left of the center line, hunger right */}
+          <div className="mb-[3px] flex items-end justify-between px-[2px]">
+            <Hearts health={state.health} />
+            <HungerBar />
+          </div>
+          {/* hotbar — 9 sharp MC slots, no outer frame */}
+          <div className="flex gap-[2px]">
             {state.hotbar.map((s, i) => (
               <Slot key={i} stack={s} selected={i === state.slot} onClick={() => props.onSlotClick(i)} />
             ))}
@@ -949,35 +1162,14 @@ export function Hud(props: HudProps) {
         </div>
       )}
 
-      {/* Inventory overlay */}
+      {/* Inventory overlay — Minecraft creative panel */}
       {props.inventoryOpen && (
-        <div className="pointer-events-auto absolute inset-0 flex items-center justify-center bg-black/55 backdrop-blur-[2px]">
-          <div className="w-[430px] max-w-[92vw] rounded-lg border-4 border-[#1d1d1f] bg-[#c6c6c6] p-4 shadow-2xl">
-            <div className="mb-3 flex items-center justify-between">
-              <div className="text-lg font-black tracking-wide text-[#3a3a3a]">Inventory</div>
-              <button
-                onClick={props.onCloseInventory}
-                className="rounded bg-[#8b8b8b] px-3 py-1 text-sm font-bold text-white hover:bg-[#9c9c9c]"
-              >
-                Close (E)
-              </button>
-            </div>
-            <div className="grid grid-cols-9 gap-[3px]">
-              {state.inventory.map((s, i) => (
-                <Slot key={i} stack={s} onClick={() => props.onInventorySwap(i)} size={44} />
-              ))}
-            </div>
-            <div className="my-3 h-[2px] bg-[#8b8b8b]" />
-            <div className="grid grid-cols-9 gap-[3px]">
-              {state.hotbar.map((s, i) => (
-                <Slot key={i} stack={s} selected={i === state.slot} onClick={() => props.onSlotClick(i)} size={44} />
-              ))}
-            </div>
-            <div className="mt-3 text-center text-[11px] font-bold text-[#555]">
-              Click an item to swap it into the selected hotbar slot
-            </div>
-          </div>
-        </div>
+        <InventoryOverlay
+          state={state}
+          onInventorySwap={props.onInventorySwap}
+          onSlotClick={props.onSlotClick}
+          onCloseInventory={props.onCloseInventory}
+        />
       )}
 
       {/* Pause menu */}

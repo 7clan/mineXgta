@@ -31,7 +31,9 @@ export interface SaveData {
   bestAir?: number;
 }
 
-export const SAVE_TYPES = ['dirt', 'cobblestone', 'planks', 'glass'] as const;
+/** Append-only block-type list — indexes are persisted in saves, so new block
+ *  kinds MUST be added at the end (existing save indexes stay valid). */
+export const SAVE_TYPES = ['dirt', 'cobblestone', 'planks', 'glass', 'grass', 'stone', 'log', 'leaves', 'sand', 'bricks'] as const;
 
 export function hasSave(): boolean {
   try {

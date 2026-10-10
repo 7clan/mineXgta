@@ -4,13 +4,26 @@ import * as THREE from 'three';
 
 export type AimKind = 'layer' | 'building' | 'block' | 'car' | 'npc' | 'tnt' | 'shaft';
 
+/** Every block type that can be placed as a world block (ITEMS kind === 'placeable'). */
+export type PlaceableId =
+  | 'dirt'
+  | 'cobblestone'
+  | 'planks'
+  | 'glass'
+  | 'grass'
+  | 'stone'
+  | 'log'
+  | 'leaves'
+  | 'sand'
+  | 'bricks';
+
 export interface AimHit {
   point: THREE.Vector3;
   normal: THREE.Vector3;
   distance: number;
   kind: AimKind;
   /** What digging this grants (undefined for cars/npcs/tnt). */
-  grant?: 'dirt' | 'cobblestone' | 'planks' | 'glass';
+  grant?: PlaceableId;
   object?: THREE.Object3D;
   /** For placed blocks: the grid key so it can be broken. */
   blockKey?: string;
@@ -27,6 +40,12 @@ export type ItemId =
   | 'cobblestone'
   | 'planks'
   | 'glass'
+  | 'grass'
+  | 'stone'
+  | 'log'
+  | 'leaves'
+  | 'sand'
+  | 'bricks'
   | 'flint'
   | 'pearl'
   | 'apple'

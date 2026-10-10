@@ -155,6 +155,22 @@ export default function HyperionClient() {
     return () => document.removeEventListener('pointerlockchange', onLockChange);
   }, [showStart, inventoryOpen, state.dead]);
 
+  // Minecraft-style: while the creative inventory is open, E or Esc closes it
+  // (the engine's update loop is gated by uiOpen, so the in-loop KeyE check
+  // can no longer fire — capture the key at the document level instead).
+  useEffect(() => {
+    if (!inventoryOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === 'KeyE' || e.code === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        handleCloseInventory();
+      }
+    };
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
+  }, [inventoryOpen, handleCloseInventory]);
+
   return (
     <div className="fixed inset-0 bg-black">
       <canvas ref={canvasRef} className="block h-full w-full" />

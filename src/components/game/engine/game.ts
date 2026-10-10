@@ -45,7 +45,7 @@ import {
   type SkyUniforms,
 } from './game-utils';
 import { ITEMS, makeBlockMaterial, makeTNTMaterials } from './items';
-import { AimHit, HudState, ItemId, ItemStack, World } from './types';
+import { AimHit, HudState, ItemId, ItemStack, PlaceableId, World } from './types';
 import { makeCloudTexture, makeSunSprite } from './textures';
 import { buildCityProps, type CityProps } from './props';
 
@@ -93,6 +93,19 @@ const HEMI_DUSK_GND = new THREE.Color(0x6e5648);
 const HEMI_NIGHT_SKY = new THREE.Color(0x2a3358);
 const HEMI_NIGHT_GND = new THREE.Color(0x241d26);
 
+/** Debris tint per granted block type when carving the world (fallback 0x55555a). */
+const DEBRIS_COLORS: Record<string, number> = {
+  dirt: 0x6b4a2f,
+  grass: 0x6b4a2f,
+  stone: 0x8a8a8a,
+  cobblestone: 0x777777,
+  sand: 0xd8cf9e,
+  bricks: 0x96513d,
+  log: 0x6b5233,
+  leaves: 0x3f7d2c,
+  planks: 0xa9844f,
+};
+
 /** Cinematic color grade: GTA-style S-curve + saturation + warm highlights + vignette. */
 const GradeShader = {
   uniforms: {
@@ -135,7 +148,8 @@ const GradeShader = {
 interface PlacedBlock {
   mesh: THREE.Mesh;
   aabb: THREE.Box3;
-  type: ItemId;
+  /** Placeable block type (placeBlock only stores kind === 'placeable' items). */
+  type: PlaceableId;
 }
 interface TntEntity {
   mesh: THREE.Mesh;
@@ -500,6 +514,12 @@ export class HyperionGame implements World {
     give('cobblestone', 64);
     give('planks', 64);
     give('glass', 32);
+    give('grass', 64);
+    give('stone', 64);
+    give('log', 32);
+    give('leaves', 32);
+    give('sand', 64);
+    give('bricks', 64);
     give('flint', 1);
     give('pearl', 16);
     give('apple', 8);
@@ -690,7 +710,7 @@ export class HyperionGame implements World {
     for (const [key, b] of this.placed) {
       const rb = rayBox(origin, dir, b.aabb, REACH);
       if (rb !== null) {
-        consider({ point: rb.point, normal: rb.normal, distance: rb.t, kind: 'block', blockKey: key, grant: b.type === 'dirt' ? 'dirt' : b.type === 'glass' ? 'glass' : b.type === 'planks' ? 'planks' : 'cobblestone' });
+        consider({ point: rb.point, normal: rb.normal, distance: rb.t, kind: 'block', blockKey: key, grant: b.type });
       }
     }
 
@@ -893,7 +913,7 @@ export class HyperionGame implements World {
     if (hit.kind === 'tnt') return;
 
     // World carving (micro-voxels)
-    const color = hit.grant === 'dirt' ? new THREE.Color(0x6b4a2f) : new THREE.Color(0x55555a);
+    const color = new THREE.Color((hit.grant && DEBRIS_COLORS[hit.grant]) || 0x55555a);
     const removed = this.carveSphere(hit.point, Math.max(radius, 0.42), color);
     if (removed > 0) {
       this.audio.dig();
@@ -972,8 +992,11 @@ export class HyperionGame implements World {
       break;
     }
     if (!placedAt) return;
+    // useItem routes only ITEMS with kind === 'placeable' here, but ItemId is wider
+    // (tools/tnt/food) — narrow once to the placeable texture-kind set.
+    const kind = type as PlaceableId;
     const geo = new RoundedBoxGeometry(0.97, 0.97, 0.97, 2, 0.07);
-    const mesh = new THREE.Mesh(geo, makeBlockMaterial(type === 'dirt' ? 'dirt' : type === 'cobblestone' ? 'cobblestone' : type === 'planks' ? 'planks' : 'glass'));
+    const mesh = new THREE.Mesh(geo, makeBlockMaterial(kind));
     mesh.position.copy(placedAt);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
@@ -981,7 +1004,7 @@ export class HyperionGame implements World {
     this.placed.set(key, {
       mesh,
       aabb: new THREE.Box3().setFromCenterAndSize(placedAt.clone(), new THREE.Vector3(1, 1, 1)),
-      type,
+      type: kind,
     });
     this.placedOrder.push(key);
     if (this.placedOrder.length > 900) {

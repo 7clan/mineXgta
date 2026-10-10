@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ItemId } from './types';
+import { ItemId, PlaceableId } from './types';
 import { makeBlockTexture, makeTNTTextures } from './textures';
 
 /**
@@ -222,6 +222,174 @@ export const ITEMS: Record<ItemId, ItemDef> = {
     ]),
     palette: { c: '#dceff2', d: '#eef8fa', e: '#f8feff', g: '#b8dfe6', b: '#a8d4dc' },
   },
+  grass: {
+    id: 'grass',
+    name: 'Grass Block',
+    kind: 'placeable',
+    maxStack: 64,
+    digRadius: 0,
+    cooldown: 0.2,
+    heldColor: 0x5d9c3f,
+    icon: P([
+      '................',
+      '.gggggggggggggg.',
+      '.gihgggggghiggg.',
+      '.gaggggaaggggag.',
+      '.aaggaabbaaagaa.',
+      '.aaaaccccaaaaaa.',
+      '.abaaaccaaaaaab.',
+      '.aaccaacccaaaaa.',
+      '.aaaaaaaaaaaaaa.',
+      '.aabbaaaaccaaaa.',
+      '.aaaaaabbaaaaaa.',
+      '.aacaaabbaaaaaa.',
+      '.aaaaaaaaaaaaaa.',
+      '................',
+      '................',
+      '................',
+    ]),
+    palette: { a: '#79553a', b: '#5d3f2a', c: '#8a6a48', g: '#5d9c3f', h: '#4c8531', i: '#67a847' },
+  },
+  stone: {
+    id: 'stone',
+    name: 'Stone',
+    kind: 'placeable',
+    maxStack: 64,
+    digRadius: 0,
+    cooldown: 0.2,
+    heldColor: 0x8a8a8a,
+    icon: P([
+      '................',
+      '.aaaaaaaaaaaaaa.',
+      '.aabbaaaaaacbaa.',
+      '.aaaaacbaaaaaaa.',
+      '.aacaaaaaaaaaaa.',
+      '.aaaacaaaacbaaa.',
+      '.abaaaaaaaaaaaa.',
+      '.aaaaaaacaaaaaa.',
+      '.aacaaabaacaaaa.',
+      '.aaaacaaaaaacaa.',
+      '.aabbaaacaaaaaa.',
+      '.aaaaaaaaacaaaa.',
+      '.acaaabcaaaaaaa.',
+      '................',
+      '................',
+      '................',
+    ]),
+    palette: { a: '#828282', b: '#6e6e6e', c: '#8f8f8f' },
+  },
+  log: {
+    id: 'log',
+    name: 'Oak Log',
+    kind: 'placeable',
+    maxStack: 64,
+    digRadius: 0,
+    cooldown: 0.2,
+    heldColor: 0x6b5233,
+    icon: P([
+      '................',
+      '.baabacaabaabac.',
+      '.baabacaabaabac.',
+      '.baabacaabaabac.',
+      '.baadacaabaabac.',
+      '.baaddcaabaabac.',
+      '.baaddcaabaabac.',
+      '.baadacaabaabac.',
+      '.baabacaabaabac.',
+      '.baabacaabaddac.',
+      '.baabacaabaddac.',
+      '.baabacaabaabac.',
+      '.baabacaabaabac.',
+      '................',
+      '................',
+      '................',
+    ]),
+    palette: { a: '#6b5233', b: '#5a4429', c: '#74593a', d: '#4e3a20' },
+  },
+  leaves: {
+    id: 'leaves',
+    name: 'Oak Leaves',
+    kind: 'placeable',
+    maxStack: 64,
+    digRadius: 0,
+    cooldown: 0.2,
+    heldColor: 0x3f7d2c,
+    icon: P([
+      '................',
+      '.aabadaabcaabda.',
+      '.abdaacaabdacaa.',
+      '.acaabdcabaadaa.',
+      '.abacabadacabab.',
+      '.cabadacabadeaa.',
+      '.abdacabadacaba.',
+      '.acabadacabadab.',
+      '.badacabadaceba.',
+      '.dacabadacabadc.',
+      '.abadacabadacab.',
+      '.bdacabadacabea.',
+      '.adacabadacabda.',
+      '................',
+      '................',
+      '................',
+    ]),
+    palette: { a: '#3f7d2c', b: '#2e6b1e', c: '#4c9138', d: '#356e26', e: '#2a5e1c' },
+  },
+  sand: {
+    id: 'sand',
+    name: 'Sand',
+    kind: 'placeable',
+    maxStack: 64,
+    digRadius: 0,
+    cooldown: 0.2,
+    heldColor: 0xd8cf9e,
+    icon: P([
+      '................',
+      '.aaaaaaaaaaaaaa.',
+      '.aacaaacaaacaaa.',
+      '.adaaabcaadaaba.',
+      '.acaaadaaacbaaa.',
+      '.aaacaaabaaacaa.',
+      '.abaaacaaadaaba.',
+      '.acaadaaacaaaad.',
+      '.aaacaaabaaacaa.',
+      '.adaaacbaadaaaa.',
+      '.acaaadaaacbaaa.',
+      '.aabaaacaaadaba.',
+      '.aaaaaaaaaaaaaa.',
+      '................',
+      '................',
+      '................',
+    ]),
+    palette: { a: '#dbd3a0', b: '#d1c78f', c: '#e6dfae', d: '#e0d8a6' },
+  },
+  bricks: {
+    id: 'bricks',
+    name: 'Bricks',
+    kind: 'placeable',
+    maxStack: 64,
+    digRadius: 0,
+    cooldown: 0.2,
+    heldColor: 0x96513d,
+    icon: P([
+      '................',
+      '.mmmmmmmmmmmmmm.',
+      '.aaamaaamaaamaa.',
+      '.abcmbacmcabmab.',
+      '.aaamaaamaaamaa.',
+      '.mmmmmmmmmmmmmm.',
+      '.maaamaaamaaama.',
+      '.caabmabambaama.',
+      '.maaamaaamaaama.',
+      '.mmmmmmmmmmmmmm.',
+      '.aaamaaamaaamaa.',
+      '.cbmacamabcmaba.',
+      '.aaamaaamaaamaa.',
+      '................',
+      '................',
+      '................',
+    ]),
+    palette: { a: '#96513d', b: '#8e4a37', c: '#a05a44', m: '#a8a8a8' },
+  },
   flint: {
     id: 'flint',
     name: 'Flint & Steel',
@@ -438,20 +606,35 @@ export function initUIIcons(): void {
   UI_ICONS.starEmpty = star(false);
 }
 
-/** Materials for placeable "smooth voxel" blocks (rounded bevel cubes). */
-export function makeBlockMaterial(kind: 'dirt' | 'cobblestone' | 'planks' | 'glass'): THREE.MeshStandardMaterial {
+/**
+ * Materials for placeable "smooth voxel" blocks (rounded bevel cubes).
+ * Materials are cached per kind and SHARED across every placed block of that
+ * kind (blocks never dispose their material on break — geometry only), so
+ * repeated place/load calls reuse one GPU texture + program per block type.
+ */
+const blockMatCache = new Map<PlaceableId, THREE.MeshStandardMaterial>();
+
+export function makeBlockMaterial(kind: PlaceableId): THREE.MeshStandardMaterial {
+  const hit = blockMatCache.get(kind);
+  if (hit) return hit;
+  let mat: THREE.MeshStandardMaterial;
   if (kind === 'glass') {
-    return new THREE.MeshStandardMaterial({
+    mat = new THREE.MeshStandardMaterial({
       color: 0xcfe8ec,
       transparent: true,
       opacity: 0.34,
       roughness: 0.05,
       metalness: 0.1,
     });
+  } else {
+    // grass uses the side texture (dirt + green fringe), log uses bark; the rest map 1:1.
+    const texKind = kind === 'grass' ? 'grass-side' : kind === 'log' ? 'log-side' : kind;
+    const tex = makeBlockTexture(texKind);
+    const roughness = kind === 'planks' ? 0.7 : kind === 'sand' ? 0.9 : kind === 'leaves' ? 0.85 : 0.95;
+    mat = new THREE.MeshStandardMaterial({ map: tex, roughness });
   }
-  const texKind = kind === 'cobblestone' ? 'cobblestone' : kind === 'planks' ? 'planks' : 'dirt';
-  const tex = makeBlockTexture(texKind);
-  return new THREE.MeshStandardMaterial({ map: tex, roughness: kind === 'planks' ? 0.7 : 0.95 });
+  blockMatCache.set(kind, mat);
+  return mat;
 }
 
 let tntMats: { side: THREE.Material; top: THREE.Material; bottom: THREE.Material } | null = null;

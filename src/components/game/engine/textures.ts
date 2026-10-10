@@ -290,9 +290,37 @@ export function makeLayerTexture(kind: 'dirt' | 'stone' | 'deepslate' | 'bedrock
 }
 
 /** 32px Minecraft-inspired pixel block tile, Nearest-filtered for crispness. */
-export function makeBlockTexture(kind: 'dirt' | 'cobblestone' | 'planks' | 'grass-top'): THREE.CanvasTexture {
+export type BlockTextureKind =
+  | 'dirt'
+  | 'cobblestone'
+  | 'planks'
+  | 'grass-top'
+  | 'grass-side'
+  | 'stone'
+  | 'log-side'
+  | 'log-top'
+  | 'leaves'
+  | 'sand'
+  | 'bricks';
+
+/** Distinct seed per block kind (legacy kinds keep their original `0xb10c + len` seeds). */
+const BLOCK_SEEDS: Record<BlockTextureKind, number> = {
+  dirt: 0xb10c + 4,
+  cobblestone: 0xb10c + 11,
+  planks: 0xb10c + 6,
+  'grass-top': 0xb10c + 10,
+  'grass-side': 0x6ea5,
+  stone: 0x57e5,
+  'log-side': 0x1063,
+  'log-top': 0x7a12,
+  leaves: 0x1eaf,
+  sand: 0x5abd,
+  bricks: 0x8b21,
+};
+
+export function makeBlockTexture(kind: BlockTextureKind): THREE.CanvasTexture {
   const S = 32;
-  const rnd = mulberry32(0xb10c + kind.length);
+  const rnd = mulberry32(BLOCK_SEEDS[kind]);
   const c = makeCanvas(S, S), g = ctx2d(c);
   const pixelNoise = (colors: string[]): void => {
     for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) px(g, x, y, 1, 1, colors[(rnd() * colors.length) | 0]);
@@ -321,8 +349,47 @@ export function makeBlockTexture(kind: 'dirt' | 'cobblestone' | 'planks' | 'gras
       px(g, joint - 2, j * 8 + 2, 1, 1, '#4a3316'); px(g, joint + 2, j * 8 + 4, 1, 1, '#4a3316'); // nails
       px(g, 0, j * 8 + 7, S, 1, '#5c4526'); // horizontal seam
     }
-  } else { // grass-top
+  } else if (kind === 'grass-top') {
     pixelNoise(['#5d9c3f', '#548f38', '#67a847', '#4c8531', '#5f9c41', '#4a7f30']);
+  } else if (kind === 'grass-side') {
+    pixelNoise(['#79553a', '#6b4a32', '#8a6244', '#5f4128', '#7d5b3e', '#734f35']); // dirt base
+    const greens = ['#5d9c3f', '#548f38', '#67a847', '#4c8531', '#5f9c41', '#4a7f30'];
+    for (let x = 0; x < S; x++) { // grass strip, jagged bottom edge dipping 2-4px
+      const depth = 8 + ((rnd() * 4) | 0);
+      for (let y = 0; y < depth; y++) px(g, x, y, 1, 1, greens[(rnd() * greens.length) | 0]);
+      px(g, x, depth, 1, 1, '#3f6e28'); // dark fringe under the strip
+    }
+  } else if (kind === 'stone') {
+    pixelNoise(['#7e7e7e', '#828282', '#747474', '#8a8a8a', '#767676']);
+  } else if (kind === 'log-side') {
+    const bark = ['#6b5233', '#5a4429', '#74593a', '#4e3a20'];
+    for (let x = 0; x < S; x++) { // per-column bark base with vertical streak breaks
+      const col = bark[(rnd() * bark.length) | 0];
+      for (let y = 0; y < S; y++) px(g, x, y, 1, 1, rnd() < 0.82 ? col : bark[(rnd() * bark.length) | 0]);
+    }
+  } else if (kind === 'log-top') {
+    px(g, 0, 0, S, S, '#6b5233'); // outer bark ring
+    speckle(g, rnd, S, S, 90, ['#5a4429', '#74593a', '#4e3a20']); // bark grain
+    disc(g, 16, 16, 13, '#a8834f'); // inner wood with darker concentric rings
+    disc(g, 16, 16, 10, '#8a6a3c');
+    disc(g, 16, 16, 8, '#a8834f');
+    disc(g, 16, 16, 5, '#8a6a3c');
+    disc(g, 16, 16, 3, '#a8834f');
+    disc(g, 16, 16, 1, '#6b5233'); // center knot
+  } else if (kind === 'leaves') {
+    pixelNoise(['#2e6b1e', '#3f7d2c', '#356e26', '#4c9138', '#2a5e1c']);
+    for (let i = 0; i < 14; i++) px(g, (rnd() * S) | 0, (rnd() * S) | 0, 1, 1, '#1e4a12'); // deep shadow holes
+  } else if (kind === 'sand') {
+    pixelNoise(['#dbd3a0', '#e6dfae', '#d1c78f', '#e0d8a6']);
+  } else { // bricks — 4 rows of 8px, mortar lines, half-brick (8px) row offset
+    px(g, 0, 0, S, S, '#a8a8a8'); // mortar
+    const brick = ['#96513d', '#8e4a37', '#a05a44'];
+    for (let row = 0; row < 4; row++) {
+      const y = row * 8, off = (row % 2) * 8;
+      for (let x = -16 + off; x < S; x += 16)
+        px(g, x, y, 15, 7, brick[(rnd() * brick.length) | 0]);
+    }
+    speckle(g, rnd, S, S, 110, ['#8e4a37', '#a05a44', '#7e4231']);
   }
   return pixelTexture(c);
 }
