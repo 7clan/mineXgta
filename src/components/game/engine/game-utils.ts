@@ -3,10 +3,13 @@ import * as THREE from 'three';
 /** Shared helpers for the game orchestrator. */
 
 export interface SkyUniforms {
-  [uniform: string]: { value: THREE.Color };
+  [uniform: string]: { value: THREE.Color | THREE.Vector3 | number };
   top: { value: THREE.Color };
   mid: { value: THREE.Color };
   bottom: { value: THREE.Color };
+  horizon: { value: THREE.Color };
+  sunDir: { value: THREE.Vector3 };
+  glow: { value: number };
 }
 
 export const HUD_EMIT_INTERVAL = 0.125;
@@ -60,18 +63,61 @@ export function rayBox(
   return { point, t: tmin, normal };
 }
 
-/** Golden-hour sky dome, sun sprite, drifting clouds and night stars. */
+/** Procedural moon: pale disc, subtle craters, soft halo (canvas). */
+function makeMoonTexture(): THREE.Texture {
+  const cv = document.createElement('canvas');
+  cv.width = 128;
+  cv.height = 128;
+  const g = cv.getContext('2d')!;
+  // Halo
+  const halo = g.createRadialGradient(64, 64, 20, 64, 64, 62);
+  halo.addColorStop(0, 'rgba(214,222,244,0.55)');
+  halo.addColorStop(1, 'rgba(214,222,244,0)');
+  g.fillStyle = halo;
+  g.fillRect(0, 0, 128, 128);
+  // Disc
+  const disc = g.createRadialGradient(58, 56, 6, 64, 64, 34);
+  disc.addColorStop(0, '#f4f6fb');
+  disc.addColorStop(0.85, '#d8deee');
+  disc.addColorStop(1, '#c3cbe2');
+  g.fillStyle = disc;
+  g.beginPath();
+  g.arc(64, 64, 34, 0, Math.PI * 2);
+  g.fill();
+  // Craters
+  const rng = (n: number) => ((Math.sin(n * 127.1) * 43758.5453) % 1 + 1) % 1;
+  for (let i = 0; i < 9; i++) {
+    const a = rng(i + 1) * Math.PI * 2;
+    const rr = rng(i + 7) * 24;
+    const x = 64 + Math.cos(a) * rr;
+    const y = 64 + Math.sin(a) * rr;
+    const r = 2 + rng(i + 13) * 5;
+    g.fillStyle = 'rgba(150,160,190,0.5)';
+    g.beginPath();
+    g.arc(x, y, r, 0, Math.PI * 2);
+    g.fill();
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/** GTA-dusk sky dome (indigo→violet→pink→amber with a sun-side glow band),
+ *  sun sprite, drifting clouds, night stars and a moon. */
 export function buildSky(
   scene: THREE.Scene,
   sunTex: THREE.Texture,
   cloudTex: THREE.Texture
-): { skyUniforms: SkyUniforms; starsMat: THREE.PointsMaterial } {
+): { skyUniforms: SkyUniforms; starsMat: THREE.PointsMaterial; moonMat: THREE.SpriteMaterial; sunSprite: THREE.Sprite } {
   const skyUniforms: SkyUniforms = {
     top: { value: new THREE.Color(0x54779e) },
     mid: { value: new THREE.Color(0xc4a878) },
     bottom: { value: new THREE.Color(0xf0c58c) },
+    horizon: { value: new THREE.Color(0xffd9a0) },
+    sunDir: { value: new THREE.Vector3(-0.55, 0.12, -0.83).normalize() },
+    glow: { value: 0.55 },
   };
-  const skyGeo = new THREE.SphereGeometry(1100, 24, 14);
+  const skyGeo = new THREE.SphereGeometry(1100, 32, 18);
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
@@ -85,12 +131,23 @@ export function buildSky(
       }
     `,
     fragmentShader: /* glsl */ `
-      uniform vec3 top; uniform vec3 mid; uniform vec3 bottom;
+      uniform vec3 top; uniform vec3 mid; uniform vec3 bottom; uniform vec3 horizon;
+      uniform vec3 sunDir; uniform float glow;
       varying vec3 vPos;
       void main() {
-        float h = normalize(vPos).y;
-        vec3 col = mix(bottom, mid, smoothstep(-0.02, 0.18, h));
-        col = mix(col, top, smoothstep(0.12, 0.6, h));
+        vec3 n = normalize(vPos);
+        float h = n.y;
+        vec3 col = mix(horizon, bottom, smoothstep(-0.06, 0.045, h));
+        col = mix(col, mid, smoothstep(0.03, 0.22, h));
+        col = mix(col, top, smoothstep(0.18, 0.62, h));
+        // Sun-side glow band hugging the horizon (dusk magenta/amber burn).
+        float sunAmt = pow(max(dot(n, normalize(sunDir)), 0.0), 5.0);
+        float band = 1.0 - smoothstep(0.0, 0.42, abs(h - sunDir.y * 0.55));
+        col += vec3(1.0, 0.45, 0.22) * sunAmt * band * glow * 0.85;
+        col += vec3(1.0, 0.28, 0.5) * pow(sunAmt, 2.5) * glow * 0.35 * (1.0 - smoothstep(0.0, 0.5, h));
+        // Subtle dithering to avoid banding on smooth gradients.
+        float d = fract(sin(dot(n.xy, vec2(12.9898, 78.233))) * 43758.5453);
+        col += (d - 0.5) * 0.012;
         gl_FragColor = vec4(col, 1.0);
       }
     `,
@@ -100,7 +157,7 @@ export function buildSky(
   scene.add(sky);
 
   // Night stars: a sparse sphere of tiny points (opacity animated by the cycle).
-  const starCount = 420;
+  const starCount = 620;
   const starPos = new Float32Array(starCount * 3);
   const rng = (seed: number) => {
     let a = seed;
@@ -134,15 +191,25 @@ export function buildSky(
   stars.frustumCulled = false;
   scene.add(stars);
 
-  // Sun sprite near the horizon
+  // Sun sprite near the horizon — position/opacity driven by the day/night cycle.
   const sunMat = new THREE.SpriteMaterial({ map: sunTex, transparent: true, depthWrite: false, fog: false });
   const sun = new THREE.Sprite(sunMat);
   sun.scale.setScalar(160);
   sun.position.set(-460, 240, -640);
   scene.add(sun);
 
-  // Clouds
+  // Moon — high opposite the sun; opacity driven by the day/night cycle.
+  const moonMat = new THREE.SpriteMaterial({
+    map: makeMoonTexture(), transparent: true, opacity: 0, depthWrite: false, fog: false,
+  });
+  const moon = new THREE.Sprite(moonMat);
+  moon.scale.setScalar(64);
+  moon.position.set(520, 620, 430);
+  scene.add(moon);
+
+  // Clouds (shared material so the cycle can tint them pink at dusk)
   const cloudMat = new THREE.SpriteMaterial({ map: cloudTex, transparent: true, opacity: 0.5, depthWrite: false, fog: false });
+  scene.userData.cloudMat = cloudMat;
   for (let i = 0; i < 14; i++) {
     const c = new THREE.Sprite(cloudMat);
     c.scale.set(120 + r() * 160, 40 + r() * 50, 1);
@@ -152,7 +219,7 @@ export function buildSky(
     if (!scene.userData.clouds) scene.userData.clouds = [] as THREE.Sprite[];
     (scene.userData.clouds as THREE.Sprite[]).push(c);
   }
-  return { skyUniforms, starsMat };
+  return { skyUniforms, starsMat, moonMat, sunSprite: sun };
 }
 
 /** Drift clouds; call once per frame. */

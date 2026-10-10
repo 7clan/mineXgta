@@ -1,6 +1,11 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import {
   BEDROCK_Y,
   CAR_EXPLODE_RADIUS,
@@ -42,6 +47,7 @@ import {
 import { ITEMS, makeBlockMaterial, makeTNTMaterials } from './items';
 import { AimHit, HudState, ItemId, ItemStack, World } from './types';
 import { makeCloudTexture, makeSunSprite } from './textures';
+import { buildCityProps, type CityProps } from './props';
 
 export interface GameCallbacks {
   onState: (s: HudState) => void;
@@ -52,19 +58,79 @@ export interface GameCallbacks {
 }
 
 const DAY_CYCLE = 300; // seconds of game-time for a full 24h cycle
-// Palette anchors for the day/night cycle.
-const DUSK_SUN = new THREE.Color(0xff8a3c);
-const NIGHT_TOP = new THREE.Color(0x060912);
-const NIGHT_MID = new THREE.Color(0x0d1424);
-const NIGHT_BOTTOM = new THREE.Color(0x141d33);
-const DUSK_ORANGE = new THREE.Color(0xff9a4a);
-const NIGHT_FOG = new THREE.Color(0x0a0f1a);
+// Palette anchors for the day/night cycle (GTA V dusk: indigo→violet→hot pink→amber).
+const DUSK_SUN = new THREE.Color(0xff7a2e);
+const DUSK_TOP = new THREE.Color(0x40307a);
+const DUSK_MID = new THREE.Color(0xc45496);
+const DUSK_ORANGE = new THREE.Color(0xff8a50);
+const DUSK_HORIZON = new THREE.Color(0xff7e4d);
+const DUSK_FOG = new THREE.Color(0xd9917e);
+const NIGHT_TOP = new THREE.Color(0x070a16);
+const NIGHT_MID = new THREE.Color(0x12172e);
+const NIGHT_BOTTOM = new THREE.Color(0x1a2140);
+const NIGHT_HORIZON = new THREE.Color(0x2c2a52);
+const NIGHT_FOG = new THREE.Color(0x100d1f);
+const DAY_TOP = new THREE.Color(0x54779e);
+const DAY_MID = new THREE.Color(0xc4a878);
+const DAY_BOTTOM = new THREE.Color(0xf0c58c);
+const DAY_HORIZON = new THREE.Color(0xffd9a0);
+const DAY_FOG = new THREE.Color(0xe4c39a);
 // Overcast/rain palette.
 const GRAY_TOP = new THREE.Color(0x4a5258);
 const GRAY_MID = new THREE.Color(0x6a7076);
 const GRAY_BOT = new THREE.Color(0x838a8e);
 const GRAY_FOG = new THREE.Color(0x7d858a);
 const WHITE = new THREE.Color(0xffffff);
+// Cloud tints across the cycle.
+const CLOUD_DAY = new THREE.Color(0xffffff);
+const CLOUD_DUSK = new THREE.Color(0xffa8c0);
+const CLOUD_NIGHT = new THREE.Color(0x2c3352);
+// Hemisphere sky/ground tints.
+const HEMI_DAY_SKY = new THREE.Color(0xcfe0f2);
+const HEMI_DAY_GND = new THREE.Color(0x8a7a5a);
+const HEMI_DUSK_SKY = new THREE.Color(0xa678c8);
+const HEMI_DUSK_GND = new THREE.Color(0x6e5648);
+const HEMI_NIGHT_SKY = new THREE.Color(0x2a3358);
+const HEMI_NIGHT_GND = new THREE.Color(0x241d26);
+
+/** Cinematic color grade: GTA-style S-curve + saturation + warm highlights + vignette. */
+const GradeShader = {
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    contrast: { value: 1.07 },
+    saturation: { value: 1.13 },
+    vignette: { value: 0.24 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float contrast;
+    uniform float saturation;
+    uniform float vignette;
+    varying vec2 vUv;
+    void main() {
+      vec3 c = texture2D(tDiffuse, vUv).rgb;
+      // S-curve contrast around midtones.
+      c = clamp((c - 0.5) * contrast + 0.5, 0.0, 1.0);
+      float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      c = mix(vec3(l), c, saturation);
+      // Warm highlights / cool shadows (teal-orange grade).
+      c = mix(c, c * vec3(1.045, 1.005, 0.955), l);
+      c = mix(c, c * vec3(0.97, 1.0, 1.05), (1.0 - l) * 0.5);
+      // Vignette.
+      vec2 d = vUv - 0.5;
+      float v = 1.0 - dot(d, d) * vignette * 2.1;
+      c *= clamp(v, 0.0, 1.0);
+      gl_FragColor = vec4(c, 1.0);
+    }
+  `,
+};
 
 interface PlacedBlock {
   mesh: THREE.Mesh;
@@ -155,9 +221,18 @@ export class HyperionGame implements World {
   private frameN = 0;
   private fpsT = 0;
   private qualityTier = 0;
+  private graceT = 0;
+  private lowFpsStreak = 0;
   private skyUniforms: SkyUniforms | null = null;
   private starsMat: THREE.PointsMaterial | null = null;
-  private timeT = 0.72; // 0 = midnight, 0.25 sunrise, 0.5 noon, 0.75 sunset
+  private moonMat: THREE.SpriteMaterial | null = null;
+  private sunSprite: THREE.Sprite | null = null;
+  private timeT = 0.74; // 0 = midnight, 0.25 sunrise, 0.5 noon, 0.75 sunset — boot at GTA dusk
+  private nightF = 0; // cached night factor (drives props/glow between cycle updates)
+  private props: CityProps | null = null;
+  private composer: EffectComposer | null = null;
+  private bloomPass: UnrealBloomPass | null = null;
+  private bloomOn = true;
   private policeTimer = 0;
   private sirenOn = false;
   private policeWarned = false;
@@ -301,11 +376,22 @@ export class HyperionGame implements World {
     this.scene.environmentIntensity = 0.35;
     pmrem.dispose();
 
+    // Settings: apply persisted volume/touch BEFORE any audio can start.
+    this.settings = loadSettings();
+    this.audio.setMasterVolume(this.settings.volume);
+
+    // Post-processing: bloom (neon glow) + cinematic grade + ACES output.
+    this.bloomOn = this.settings.bloom !== false;
+    this.buildComposer();
+
     const built = buildSky(this.scene, makeSunSprite(), makeCloudTexture());
     this.skyUniforms = built.skyUniforms;
     this.starsMat = built.starsMat;
+    this.moonMat = built.moonMat;
+    this.sunSprite = built.sunSprite;
 
     this.city = new City(this.scene, this.destruction);
+    this.props = buildCityProps(this.scene, this.city);
     this.city.onCollapseStart = (b) => {
       this.audio.collapse(this.far(b.group.position));
       this.addScore(40);
@@ -330,9 +416,6 @@ export class HyperionGame implements World {
     this.vehicles.onRagdollNPCs = (p, r) => {
       if (this.npcs.ragdollNear(p, r)) this.addScore(14);
     };
-    // Settings: apply persisted volume/touch BEFORE any audio can start.
-    this.settings = loadSettings();
-    this.audio.setMasterVolume(this.settings.volume);
     this.buildSprayGarages();
     this.buildHydrants();
     this.buildGasStations();
@@ -364,12 +447,44 @@ export class HyperionGame implements World {
     this.input.setLocked(!!document.pointerLockElement);
   };
 
+  /** Build (or rebuild) the post-processing chain: render → bloom → grade → output. */
+  private buildComposer(): void {
+    if (!this.bloomOn || this.composer) return;
+    const composer = new EffectComposer(this.renderer);
+    composer.addPass(new RenderPass(this.scene, this.camera));
+    const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.42, 0.5, 0.85);
+    composer.addPass(bloom);
+    this.bloomPass = bloom;
+    composer.addPass(new ShaderPass(GradeShader));
+    composer.addPass(new OutputPass());
+    composer.setSize(this.canvas.clientWidth || window.innerWidth, this.canvas.clientHeight || window.innerHeight);
+    this.composer = composer;
+  }
+
+  /** Bloom glow on/off (persisted; falls back to the direct renderer path). */
+  setBloom(v: boolean): void {
+    this.bloomOn = v;
+    this.settings.bloom = v;
+    writeSettings(this.settings);
+    if (v) this.buildComposer();
+    else {
+      this.composer?.dispose();
+      this.composer = null;
+      this.bloomPass = null;
+    }
+  }
+
+  get bloom(): boolean {
+    return this.bloomOn;
+  }
+
   private onResize = (): void => {
     const w = this.canvas.clientWidth || window.innerWidth;
     const h = this.canvas.clientHeight || window.innerHeight;
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    this.composer?.setSize(w, h);
   };
 
   setMinimap(c: HTMLCanvasElement | null): void {
@@ -1116,7 +1231,9 @@ export class HyperionGame implements World {
     updateClouds(this.scene, dt);
     this.updateCamera(dt);
     this.updateHudEmit(dt);
-    this.renderer.render(this.scene, this.camera);
+    this.props?.update(this.clock.elapsedTime, this.nightF);
+    if (this.composer) this.composer.render();
+    else this.renderer.render(this.scene, this.camera);
     this.input.endFrame();
   }
 
@@ -2735,6 +2852,7 @@ export class HyperionGame implements World {
     const day = Math.max(0, Math.sin(ang));
     const night = 1 - Math.min(1, day / 0.22);
     const dusk = Math.max(0, 1 - Math.abs(day - 0.1) / 0.12);
+    this.nightF = night;
     const p = this.playerPos();
     const sx = Math.cos(ang) * 150;
     const sy = Math.sin(ang) * 115;
@@ -2745,18 +2863,39 @@ export class HyperionGame implements World {
     this.sun.intensity = 0.08 + day * 2.7;
     this.sun.color.setHex(0xffd9ae).lerp(DUSK_SUN, Math.min(1, dusk * 1.3));
     this.hemi.intensity = 0.14 + day * 0.62;
+    // Hemisphere tint drifts violet at dusk, deep blue at night.
+    this.hemi.color.copy(HEMI_DAY_SKY).lerp(HEMI_DUSK_SKY, Math.min(1, dusk * 1.15)).lerp(HEMI_NIGHT_SKY, night);
+    this.hemi.groundColor.copy(HEMI_DAY_GND).lerp(HEMI_DUSK_GND, Math.min(1, dusk * 1.15)).lerp(HEMI_NIGHT_GND, night);
+    this.scene.environmentIntensity = 0.35 - night * 0.16;
 
     if (this.skyUniforms) {
-      this.skyUniforms.top.value.setHex(0x54779e).lerp(NIGHT_TOP, night);
-      this.skyUniforms.mid.value.setHex(0xc4a878).lerp(NIGHT_MID, night);
-      this.skyUniforms.bottom.value.setHex(0xf0c58c).lerp(NIGHT_BOTTOM, night).lerp(DUSK_ORANGE, Math.min(1, dusk * 0.55));
+      const u = this.skyUniforms;
+      (u.top.value as THREE.Color).copy(DAY_TOP).lerp(DUSK_TOP, Math.min(1, dusk * 1.1)).lerp(NIGHT_TOP, night);
+      (u.mid.value as THREE.Color).copy(DAY_MID).lerp(DUSK_MID, Math.min(1, dusk * 0.9)).lerp(NIGHT_MID, night);
+      (u.bottom.value as THREE.Color).copy(DAY_BOTTOM).lerp(DUSK_ORANGE, Math.min(1, dusk * 0.8)).lerp(NIGHT_BOTTOM, night);
+      (u.horizon.value as THREE.Color).copy(DAY_HORIZON).lerp(DUSK_HORIZON, Math.min(1, dusk * 1.25)).lerp(NIGHT_HORIZON, night);
+      u.sunDir.value.set(sx, Math.max(sy, 4), -60).normalize();
+      u.glow.value = 0.22 + dusk * 0.95 + night * 0.1;
     }
     if (this.starsMat) this.starsMat.opacity = night * 0.95;
+    if (this.moonMat) this.moonMat.opacity = night * 0.95;
+    // Sun sprite rides the actual cycle direction and fades out at night.
+    if (this.sunSprite) {
+      const dir = this.sunSprite.position.set(sx, Math.max(sy, 6) + 40, -60).normalize();
+      this.sunSprite.position.copy(dir).multiplyScalar(960);
+      (this.sunSprite.material as THREE.SpriteMaterial).opacity = Math.max(0, Math.min(1, day * 3.2 + dusk * 0.45));
+    }
+    // Clouds: white by day, pink at dusk, dark blue-grey at night.
+    const cloudMat = this.scene.userData.cloudMat as THREE.SpriteMaterial | undefined;
+    if (cloudMat) {
+      cloudMat.color.copy(CLOUD_DAY).lerp(CLOUD_DUSK, Math.min(1, dusk * 1.2)).lerp(CLOUD_NIGHT, night);
+      cloudMat.opacity = 0.5 - night * 0.12;
+    }
 
     // Base fog from the day/night cycle.
     const fog = this.scene.fog as THREE.Fog | null;
     if (fog) {
-      fog.color.setHex(0xe4c39a).lerp(NIGHT_FOG, night);
+      fog.color.copy(DAY_FOG).lerp(DUSK_FOG, Math.min(1, dusk * 0.7)).lerp(NIGHT_FOG, night);
       fog.near = 130 - night * 45;
       fog.far = 620 - night * 190;
     }
@@ -2772,6 +2911,7 @@ export class HyperionGame implements World {
         this.skyUniforms.top.value.lerp(GRAY_TOP, w);
         this.skyUniforms.mid.value.lerp(GRAY_MID, w);
         this.skyUniforms.bottom.value.lerp(GRAY_BOT, w);
+        (this.skyUniforms.horizon.value as THREE.Color).lerp(GRAY_BOT, w);
       }
       if (this.starsMat) this.starsMat.opacity *= 1 - rainI;
       if (fog) {
@@ -2871,15 +3011,27 @@ export class HyperionGame implements World {
       this.frameAcc = 0;
       this.frameN = 0;
       this.fpsT = 0;
-      // auto quality
-      if (this.fps < 36 && this.qualityTier < 2) {
+      // auto quality — after a 6 s warm-up grace (shader compile, texture upload
+      // and GC routinely dip early fps) and only on 2 consecutive low samples.
+      this.graceT += 0.5; // one fps sample = 0.5 s
+      const lowFps = this.fps < 36;
+      this.lowFpsStreak = lowFps ? this.lowFpsStreak + 1 : 0;
+      if (lowFps && this.graceT > 6 && this.lowFpsStreak >= 2 && this.qualityTier < 2) {
+        this.lowFpsStreak = 0;
         this.qualityTier++;
         this.renderer.setPixelRatio(this.qualityTier === 1 ? 1.1 : 0.8);
+        this.composer?.setPixelRatio(this.qualityTier === 1 ? 1.1 : 0.8);
         if (this.qualityTier === 2) {
           this.sun.shadow.mapSize.set(1024, 1024);
           if (this.sun.shadow.map) {
             this.sun.shadow.map.dispose();
             this.sun.shadow.map = null as unknown as THREE.WebGLRenderTarget;
+          }
+          // Last-resort tier: drop bloom (the biggest post cost) too.
+          if (this.composer) {
+            this.composer.dispose();
+            this.composer = null;
+            this.bloomPass = null;
           }
         }
       }
@@ -3256,6 +3408,11 @@ export class HyperionGame implements World {
     this.detachInput();
     document.removeEventListener('pointerlockchange', this.onLockChange);
     window.removeEventListener('resize', this.onResize);
+    this.props?.dispose();
+    this.props = null;
+    this.composer?.dispose();
+    this.composer = null;
+    this.bloomPass = null;
     if (this.heli) {
       this.heli.dispose(this.scene);
       this.heli = null;

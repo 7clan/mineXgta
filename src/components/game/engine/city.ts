@@ -92,7 +92,7 @@ export class City {
     const segs = Math.floor(GROUND_CORE / 1.05);
     const geo = new THREE.PlaneGeometry(GROUND_SPAN, GROUND_SPAN, segs, segs);
     geo.rotateX(-Math.PI / 2);
-    const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.94, metalness: 0.02 });
+    const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.78, metalness: 0.06, envMapIntensity: 0.55 });
     this.disposables.push(geo, mat);
     this.groundMat = mat;
     const mesh = new THREE.Mesh(geo, mat);
@@ -600,8 +600,8 @@ export class City {
     const m = this.groundMat;
     if (!m) return;
     const k = w < 0 ? 0 : w > 1 ? 1 : w;
-    m.roughness = 0.94 - k * 0.62;
-    m.envMapIntensity = 1 + k * 2.4;
+    m.roughness = 0.78 - k * 0.55;
+    m.envMapIntensity = 0.55 + k * 2.6;
     m.color.setRGB(1 - k * 0.22, 1 - k * 0.22, 1 - k * 0.19);
   }
 

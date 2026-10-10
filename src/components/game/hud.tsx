@@ -701,7 +701,7 @@ function SettingsPanel({ game, state }: { game: HyperionGame; state: HudState })
         </div>
       </div>
       {/* Touch controls */}
-      <div className="flex items-center justify-between">
+      <div className="mb-2.5 flex items-center justify-between">
         <span className="text-[11px] font-bold text-amber-300/90">Touch controls</span>
         <button
           onClick={() => game.setTouch(!state.touch)}
@@ -710,6 +710,18 @@ function SettingsPanel({ game, state }: { game: HyperionGame; state: HudState })
           }`}
         >
           {state.touch ? 'ON' : 'OFF'}
+        </button>
+      </div>
+      {/* Bloom glow (cinematic post-processing) */}
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-bold text-amber-300/90">✨ Bloom glow</span>
+        <button
+          onClick={() => game.setBloom(!game.bloom)}
+          className={`rounded px-3 py-1 text-[10px] font-black uppercase tracking-widest transition ${
+            game.bloom ? 'bg-fuchsia-500/25 text-fuchsia-200 outline outline-1 outline-fuchsia-400/50' : 'bg-white/10 text-white/50 hover:bg-white/20'
+          }`}
+        >
+          {game.bloom ? 'ON' : 'OFF'}
         </button>
       </div>
     </div>
@@ -782,8 +794,14 @@ export function Hud(props: HudProps) {
       {state.playing && (
         <div className="absolute right-4 top-4 flex flex-col items-end gap-1">
           <Stars count={state.stars} />
-          <div className="rounded bg-black/55 px-2 py-0.5 text-right text-[11px] font-bold tracking-widest text-white/90">
-            CHAOS {state.score}
+          <div className="rounded-sm bg-black/55 px-2.5 py-0.5 text-right">
+            <span className="mr-1.5 align-middle text-[9px] font-black tracking-[0.22em] text-white/45">CHAOS</span>
+            <span
+              className="text-[17px] font-black italic tabular-nums text-[#7bde7b]"
+              style={{ fontFamily: '"Arial Black", Arial, sans-serif', textShadow: '1px 2px 0 #0b3d0b, 2px 3px 3px rgba(0,0,0,0.65)' }}
+            >
+              ${state.score.toLocaleString()}
+            </span>
           </div>
           <div className="h-1 w-24 overflow-hidden rounded-full bg-black/50">
             <div
@@ -849,11 +867,35 @@ export function Hud(props: HudProps) {
       {/* Weather chip — above the minimap */}
       {state.playing && !state.dead && <div className="absolute bottom-[172px] left-4"><WeatherChip weather={state.weather} /></div>}
 
-      {/* Minimap — GTA style bottom-left */}
+      {/* Minimap — GTA style bottom-left: thick frame, clock strip, health bar */}
       {state.playing && (
-        <div className="absolute bottom-4 left-4 overflow-hidden rounded-lg border-2 border-black/70 shadow-lg shadow-black/50">
-          <canvas id="hyperion-minimap" width={208} height={140} className="block bg-black" />
-          <div className="absolute inset-0 rounded-lg ring-1 ring-inset ring-white/10" />
+        <div className="absolute bottom-4 left-4">
+          <div className="overflow-hidden rounded-md border-[3px] border-black/85 shadow-xl shadow-black/60">
+            <div className="relative">
+              <canvas id="hyperion-minimap" width={208} height={140} className="block bg-black" />
+              {/* Clock + city strip over the map top */}
+              <div className="absolute inset-x-0 top-0 flex items-center justify-between bg-gradient-to-b from-black/80 to-transparent px-1.5 pb-2 pt-0.5">
+                <span className="text-[9px] font-black tabular-nums tracking-[0.18em] text-white/85">{state.clock}</span>
+                <span className="text-[8px] font-black tracking-[0.24em] text-white/45">LOS SANTOS</span>
+              </div>
+              <div className="pointer-events-none absolute inset-0 ring-1 ring-inset ring-white/10" />
+            </div>
+            {/* GTA5-style health strip under the map */}
+            <div className="w-full bg-black/85 px-[3px] py-[2px]">
+              <div className="h-[4px] w-full overflow-hidden rounded-full bg-white/10">
+                <div
+                  className="h-full rounded-full transition-[width] duration-200"
+                  style={{
+                    width: `${Math.max(0, Math.min(1, state.health / 20)) * 100}%`,
+                    background:
+                      state.health <= 6
+                        ? 'linear-gradient(90deg,#dc2626,#f87171)'
+                        : 'linear-gradient(90deg,#16a34a,#4ade80)',
+                  }}
+                />
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

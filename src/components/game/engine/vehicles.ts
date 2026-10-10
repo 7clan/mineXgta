@@ -83,13 +83,19 @@ export class Vehicles {
   private buildMesh(type: CarType, color: number): { group: THREE.Group; wheels: THREE.Mesh[]; lightbar: THREE.Mesh[]; turret?: THREE.Group; barrel?: THREE.Group; muzzle?: THREE.Object3D } {
     if (type === 'tank') return this.buildTank();
     const group = new THREE.Group();
-    const paint = new THREE.MeshStandardMaterial({ color, roughness: 0.28, metalness: 0.65 });
+    const paint = new THREE.MeshPhysicalMaterial({
+      color, roughness: 0.3, metalness: 0.72,
+      clearcoat: 1, clearcoatRoughness: 0.06, envMapIntensity: 1.35,
+    });
     const dark = new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.55, metalness: 0.3 });
-    const glass = new THREE.MeshStandardMaterial({ color: 0x0e1418, roughness: 0.08, metalness: 0.9 });
+    const glass = new THREE.MeshPhysicalMaterial({
+      color: 0x10161c, roughness: 0.06, metalness: 0.9,
+      clearcoat: 0.6, clearcoatRoughness: 0.04, envMapIntensity: 1.5,
+    });
     const tireMat = new THREE.MeshStandardMaterial({ color: 0x101012, roughness: 0.95 });
     const hubMat = new THREE.MeshStandardMaterial({ color: 0xb8bcc2, roughness: 0.3, metalness: 0.85 });
     const headMat = new THREE.MeshStandardMaterial({ color: 0xfff6d8, emissive: 0xfff0c0, emissiveIntensity: 1.4 });
-    const tailMat = new THREE.MeshStandardMaterial({ color: 0x550000, emissive: 0xff2a1a, emissiveIntensity: 1.1 });
+    const tailMat = new THREE.MeshStandardMaterial({ color: 0x550000, emissive: 0xff2a1a, emissiveIntensity: 1.25 });
 
     const dims =
       type === 'sports'
@@ -302,7 +308,21 @@ export class Vehicles {
   }
 
   private makeCar(type: CarType, state: CarState): Car {
-    const palette = [0xc23b22, 0x22262b, 0xd8d8dc, 0x8f9aa4, 0xb7791f, 0x37545c, 0x6b2f26, 0xe0dcd2, 0x4a5d23];
+    // GTA-flavored paint palette: candy metallics + pearls + deep black.
+    const palette = [
+      0xb0192a, // crimson
+      0x0c0d10, // deep black
+      0xf2f0e9, // pearl white
+      0x1f8a7d, // teal
+      0xe0653a, // sunset orange
+      0x9dc209, // lime
+      0xb4296e, // magenta
+      0x5b2a86, // royal purple
+      0x9aa0a6, // silver
+      0xd9b23a, // champagne gold
+      0x3d6b35, // british racing green
+      0x7a2f26, // burnt sienna
+    ];
     const taxiColor = 0xf7c531;
     const policeColor = 0xe8e8ec;
     const color = type === 'taxi' ? taxiColor : type === 'police' ? policeColor : type === 'tank' ? 0x4d5a33 : palette[Math.floor(this.rng() * palette.length)];

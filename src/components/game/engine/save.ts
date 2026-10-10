@@ -84,6 +84,8 @@ export interface Settings {
   volume: number;
   /** Touch controls enabled (defaults to device capability). */
   touch: boolean;
+  /** Bloom post-processing glow (defaults on). */
+  bloom?: boolean;
 }
 
 /** Is this device touch-capable? Used as the default for the touch toggle. */
@@ -106,6 +108,7 @@ export function loadSettings(): Settings {
     return {
       volume: typeof d.volume === 'number' ? Math.min(1, Math.max(0, d.volume)) : def.volume,
       touch: typeof d.touch === 'boolean' ? d.touch : def.touch,
+      bloom: typeof d.bloom === 'boolean' ? d.bloom : def.bloom,
     };
   } catch {
     return def;
