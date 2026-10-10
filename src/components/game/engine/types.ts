@@ -42,7 +42,16 @@ export interface HudState {
   health: number;
   flying: boolean;
   thirdPerson: boolean;
-  driving: null | { name: string; speed: number };
+  driving: null | {
+    name: string;
+    speed: number;
+    /** Vehicle hull integrity 0..100+ (tank has 400). */
+    health: number;
+    /** True while driving the Rhino Tank (shows cannon reload + military styling). */
+    tank: boolean;
+    /** Cannon reload progress 0..1 (1 = ready to fire). */
+    reload: number;
+  };
   slot: number;
   hotbar: (ItemStack | null)[];
   inventory: (ItemStack | null)[];
@@ -71,10 +80,12 @@ export interface HudState {
     offered: boolean;
     /** World-space marker (contract target) + live distance from the player. */
     marker: null | { x: number; z: number; dist: number };
-    /** Contracts completed toward the chain bonus (0..CHAIN_GOAL). */
+    /** Contracts completed toward the CURRENT chain tier (0..CHAIN_GOAL). */
     chain: number;
-    /** True once the chain bonus (jetpack) has been claimed. */
+    /** True once the tier-1 chain bonus (jetpack) has been claimed. */
     chainDone: boolean;
+    /** Completed chain tiers (1 = jetpack, 2 = tank, 3+ = mega packs). */
+    chainTier: number;
   };
   /** Current car-radio station name (null = radio off / not driving). */
   radio: string | null;
@@ -88,6 +99,8 @@ export interface HudState {
   jetFuel: number;
   /** True while jetpack thrust is active (hold RMB with jetpack selected). */
   jetThrusting: boolean;
+  /** Police helicopter (air support) deployed at 5 stars. */
+  heli: boolean;
 }
 
 export const HUD_INITIAL: HudState = {
@@ -120,6 +133,7 @@ export const HUD_INITIAL: HudState = {
   evading: 0,
   jetFuel: 1,
   jetThrusting: false,
+  heli: false,
 };
 
 /**

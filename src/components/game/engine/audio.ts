@@ -28,6 +28,11 @@ export class HyperionAudio {
   private jetOsc: OscillatorNode | null = null;
   private jetSrc: AudioBufferSourceNode | null = null;
   private jetGain: GainNode | null = null;
+  // Persistent police-helicopter rotor loop (chopped noise + rumble).
+  private heliSrc: AudioBufferSourceNode | null = null;
+  private heliLfo: OscillatorNode | null = null;
+  private heliRumble: OscillatorNode | null = null;
+  private heliGain: GainNode | null = null;
   // Car radio: lookahead scheduler state.
   private radioTimer: ReturnType<typeof setInterval> | null = null;
   private radioStep = 0;
@@ -408,6 +413,94 @@ export class HyperionAudio {
     } catch { /* noop */ }
   }
 
+  // ------------------------------------------------------------------ helicopter
+
+  /** Police chopper rotor loop: 12.5 Hz square-LFO chopped noise (blade slap)
+   *  through a low bandpass + a 34 Hz saw rumble. Distance attenuates both. */
+  heliLoop(): void {
+    try {
+      if (!this.ctx || !this.master || !this.noiseBuf || this.heliGain) return;
+      const t0 = this.ctx.currentTime;
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.noiseBuf;
+      src.loop = true;
+      const bp = this.filter('bandpass', 95, 1.1);
+      const chop = this.ctx.createGain();
+      chop.gain.value = 0.5;
+      const lfo = this.osc('square', 12.5);
+      const depth = this.ctx.createGain();
+      depth.gain.value = 0.5;
+      const g = this.ctx.createGain();
+      if (!bp || !lfo) return;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.setTargetAtTime(0.16, t0, 0.6);
+      lfo.connect(depth);
+      depth.connect(chop.gain);
+      this.chain([src, bp, chop, g]);
+      const r = this.osc('sawtooth', 34);
+      const rlp = this.filter('lowpass', 120);
+      const rg = this.ctx.createGain();
+      rg.gain.value = 0.4;
+      if (r && rlp) {
+        this.chain([r, rlp, rg, g]);
+        r.start(t0);
+      }
+      src.start(t0, Math.random() * 0.9);
+      lfo.start(t0);
+      this.heliSrc = src;
+      this.heliLfo = lfo;
+      this.heliRumble = r ?? null;
+      this.heliGain = g;
+    } catch { /* noop */ }
+  }
+
+  /** Attenuate the rotor loop by distance (far01: 0 = overhead, 1 = 130 m+). */
+  setHeliDist(far01: number): void {
+    try {
+      if (!this.ctx || !this.heliGain) return;
+      const v = far01 < 0 ? 0 : far01 > 1 ? 1 : far01;
+      this.heliGain.gain.setTargetAtTime(0.16 * (1 - v * 0.93), this.ctx.currentTime, 0.25);
+    } catch { /* noop */ }
+  }
+
+  /** Fade out and tear down the rotor loop. */
+  stopHeli(): void {
+    try {
+      const src = this.heliSrc, lfo = this.heliLfo, r = this.heliRumble, g = this.heliGain;
+      this.heliSrc = null;
+      this.heliLfo = null;
+      this.heliRumble = null;
+      this.heliGain = null;
+      if (!this.ctx || !g) return;
+      g.gain.setTargetAtTime(0.0001, this.ctx.currentTime, 0.2);
+      window.setTimeout(() => {
+        try { src?.stop(); lfo?.stop(); r?.stop(); } catch { /* noop */ }
+      }, 800);
+    } catch { /* noop */ }
+  }
+
+  // ------------------------------------------------------------------ weapons
+
+  /** Tank cannon: deep distorted boom + sub thump + sharp muzzle crack. */
+  cannon(): void {
+    try {
+      if (!this.ctx || !this.master) return;
+      this.burst({ dur: 0.9, type: 'lowpass', f0: 520, f1: 55, sweep: 0.55, q: 0.6, a: 0.006, d: 0.85, peak: 0.95, distort: true });
+      this.tone({ type: 'sine', f0: 44, f1: 34, sweep: 0.3, a: 0.01, d: 0.7, peak: 0.85 });
+      this.burst({ dur: 0.06, type: 'highpass', f0: 2200, a: 0.001, d: 0.05, peak: 0.35 });
+    } catch { /* noop */ }
+  }
+
+  /** Door-gun crack from the chopper (distance attenuated). */
+  gunCrack(far: number): void {
+    try {
+      if (!this.ctx || !this.master) return;
+      const v = this.farGain(far);
+      this.burst({ dur: 0.05, type: 'highpass', f0: 800, a: 0.001, d: 0.045, peak: 0.5 * v });
+      this.tone({ type: 'square', f0: 220, f1: 90, sweep: 0.04, a: 0.002, d: 0.05, peak: 0.14 * v, lp: 900 });
+    } catch { /* noop */ }
+  }
+
   // ------------------------------------------------------------------ rain
 
   /** Start (or re-target) the looping rain bed: broadband noise through a soft bandpass.
@@ -649,6 +742,7 @@ export class HyperionAudio {
     try { this.stopRain(); } catch { /* noop */ }
     try { this.stopRadio(); } catch { /* noop */ }
     try { this.jetThrust(false); } catch { /* noop */ }
+    try { this.stopHeli(); } catch { /* noop */ }
     try { if (this.ctx) void this.ctx.close(); } catch { /* noop */ }
     this.ctx = null; this.master = null; this.noiseBuf = null;
   }

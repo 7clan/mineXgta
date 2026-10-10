@@ -110,6 +110,7 @@ const CONTROLS: Array<[string, string]> = [
   ['Mouse', 'Look'],
   ['LMB (hold)', 'Dig / carve micro-voxels'],
   ['RMB', 'Place block / use item'],
+  ['LMB (tank)', 'Fire the cannon'],
   ['RMB (hold) 🚀', 'Jetpack thrust (selected)'],
   ['Space ×2', 'Toggle creative flight'],
   ['Space / C', 'Fly up / down'],
@@ -124,10 +125,19 @@ const CONTROLS: Array<[string, string]> = [
   ['Esc', 'Pause'],
 ];
 
+/** Contract chain tier labels (3 contracts per tier). */
+const CHAIN_TIERS: Array<{ label: string; icon: string }> = [
+  { label: '→ Jetpack', icon: '🔥' },
+  { label: '→ Tank', icon: '🪖' },
+  { label: '→ TNT Mega', icon: '💥' },
+];
+
 /** Contract tracker — GTA-style offer/active chip with progress + countdown. */
 function MissionChip({ mission }: { mission: NonNullable<HudState['mission']> }) {
   const pct = mission.target > 0 ? Math.min(100, (mission.progress / mission.target) * 100) : 0;
   const offer = mission.offered;
+  const tierIdx = Math.min(mission.chainTier, CHAIN_TIERS.length - 1);
+  const tier = CHAIN_TIERS[tierIdx];
   return (
     <div
       className={`hyperion-missionchip absolute left-1/2 top-4 w-[300px] max-w-[80vw] -translate-x-1/2 rounded-lg border bg-black/70 px-3 py-2 backdrop-blur-[2px] ${
@@ -161,24 +171,23 @@ function MissionChip({ mission }: { mission: NonNullable<HudState['mission']> })
         </span>
         <span>{mission.reward}</span>
       </div>
-      {/* Contract chain — 3 completions unlock the Chaos Jetpack */}
+      {/* Contract chain — each 3 completions unlock the next tier reward */}
       <div className="mt-1 flex items-center justify-between border-t border-white/10 pt-1">
         <span className="text-[8px] font-black uppercase tracking-[0.22em] text-white/40">Chain bonus</span>
-        {mission.chainDone ? (
-          <span className="text-[9px] font-black uppercase tracking-widest text-emerald-300">🔥 Jetpack claimed ✓</span>
-        ) : (
-          <span className="flex items-center gap-1">
-            {[0, 1, 2].map((i) => (
-              <span
-                key={i}
-                className={`inline-block h-[7px] w-[7px] rotate-45 rounded-[1px] ${
-                  i < mission.chain ? 'bg-amber-400 shadow-[0_0_5px_rgba(251,191,36,0.8)]' : 'bg-white/15'
-                }`}
-              />
-            ))}
-            <span className="ml-1 text-[9px] font-black uppercase tracking-widest text-white/55">→ Jetpack</span>
-          </span>
-        )}
+        <span className="flex items-center gap-1">
+          {CHAIN_TIERS.slice(0, mission.chainTier).map((t, i) => (
+            <span key={i} className="text-[10px] leading-none">{t.icon}</span>
+          ))}
+          {[0, 1, 2].map((i) => (
+            <span
+              key={i}
+              className={`inline-block h-[7px] w-[7px] rotate-45 rounded-[1px] ${
+                i < mission.chain ? 'bg-amber-400 shadow-[0_0_5px_rgba(251,191,36,0.8)]' : 'bg-white/15'
+              }`}
+            />
+          ))}
+          <span className="ml-1 text-[9px] font-black uppercase tracking-widest text-white/55">{tier.label}</span>
+        </span>
       </div>
     </div>
   );
@@ -282,6 +291,96 @@ function JetFuelChip({ fuel, thrusting }: { fuel: number; thrusting: boolean }) 
   );
 }
 
+/** Air support chip — radar sweep + blinking border (5-star chopper). */
+function HeliChip() {
+  return (
+    <div className="hyperion-policechip mt-1 flex items-center gap-2 rounded border border-red-400/45 bg-black/60 px-2 py-1">
+      <span className="relative block h-4 w-4 overflow-hidden rounded-full border border-red-300/60 bg-black/60">
+        <span className="hyperion-radar absolute inset-0" />
+      </span>
+      <span className="text-[10px] font-black uppercase tracking-[0.18em] text-red-300">🚁 Air support</span>
+    </div>
+  );
+}
+
+/** Vehicle speedometer — SVG arc gauge + hull integrity + tank cannon reload. */
+function Speedo({ driving }: { driving: NonNullable<HudState['driving']> }) {
+  const max = driving.tank ? 60 : 130;
+  const pct = Math.max(0, Math.min(1, driving.speed / max));
+  const angle = (-90 + pct * 180) * (Math.PI / 180);
+  const needleLen = 44;
+  const nx = 75 + needleLen * Math.sin(angle);
+  const ny = 74 - needleLen * Math.cos(angle);
+  const hpct = Math.max(0, Math.min(1, driving.health / (driving.tank ? 400 : 100)));
+  const lowHealth = hpct < 0.3;
+  return (
+    <div
+      className={`mt-1 rounded-lg border px-2 pb-1.5 pt-1 backdrop-blur-[2px] ${
+        driving.tank ? 'border-lime-400/40 bg-[#0d1206]/75' : 'border-white/15 bg-black/60'
+      }`}
+    >
+      <svg width="150" height="88" viewBox="0 0 150 88">
+        {/* gauge arc */}
+        <path d="M 23 74 A 52 52 0 0 1 127 74" fill="none" stroke="rgba(255,255,255,0.13)" strokeWidth="7" strokeLinecap="round" />
+        <path
+          d="M 23 74 A 52 52 0 0 1 127 74"
+          fill="none"
+          stroke={driving.tank ? '#a3e635' : '#fbbf24'}
+          strokeWidth="7"
+          strokeLinecap="round"
+          strokeDasharray={`${pct * 163.4} 400`}
+        />
+        {/* ticks */}
+        {[0, 0.25, 0.5, 0.75, 1].map((t, i) => {
+          const a = (-90 + t * 180) * (Math.PI / 180);
+          const x1 = 75 + 40 * Math.sin(a);
+          const y1 = 74 - 40 * Math.cos(a);
+          const x2 = 75 + 45 * Math.sin(a);
+          const y2 = 74 - 45 * Math.cos(a);
+          return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="rgba(255,255,255,0.4)" strokeWidth="1.6" />;
+        })}
+        {/* needle */}
+        <line x1="75" y1="74" x2={nx} y2={ny} stroke="#ffffff" strokeWidth="2.4" strokeLinecap="round" />
+        <circle cx="75" cy="74" r="4" fill="#ffffff" />
+        <text x="75" y="58" textAnchor="middle" fill="#ffffff" fontSize="19" fontWeight="800" className="tabular-nums">
+          {Math.round(driving.speed)}
+        </text>
+        <text x="75" y="86" textAnchor="middle" fill="rgba(255,255,255,0.5)" fontSize="8" letterSpacing="3">
+          KM/H
+        </text>
+      </svg>
+      {/* hull integrity */}
+      <div className="mt-0.5 h-1.5 overflow-hidden rounded-full bg-white/10">
+        <div
+          className={`h-full rounded-full transition-[width] duration-300 ${
+            lowHealth ? 'bg-gradient-to-r from-red-600 to-orange-400' : 'bg-gradient-to-r from-sky-400/80 to-emerald-400'
+          }`}
+          style={{ width: `${hpct * 100}%` }}
+        />
+      </div>
+      <div className="mt-1 flex items-center justify-between">
+        <span className={`text-[9px] font-black uppercase tracking-[0.14em] ${driving.tank ? 'text-lime-300/90' : 'text-amber-300/90'}`}>
+          {driving.name}
+        </span>
+        {driving.tank && (
+          <span
+            className={`rounded px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest ${
+              driving.reload >= 1 ? 'bg-lime-400/20 text-lime-300' : 'bg-white/10 text-white/45'
+            }`}
+          >
+            {driving.reload >= 1 ? '● LMB · FIRE' : `RELOAD ${Math.round(driving.reload * 100)}%`}
+          </span>
+        )}
+      </div>
+      {driving.tank && driving.reload < 1 && (
+        <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-white/10">
+          <div className="h-full rounded-full bg-lime-400/70 transition-[width] duration-100" style={{ width: `${driving.reload * 100}%` }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Hud(props: HudProps) {
   const { state, toast } = props;
 
@@ -300,6 +399,14 @@ export function Hud(props: HudProps) {
           background: 'radial-gradient(ellipse at center, rgba(255,0,0,0) 40%, rgba(180,0,0,0.85) 100%)',
         }}
       />
+
+      {/* cinematic vignette (always on while playing) */}
+      {state.playing && (
+        <div
+          className="absolute inset-0"
+          style={{ background: 'radial-gradient(ellipse at center, rgba(0,0,0,0) 58%, rgba(0,0,0,0.3) 100%)' }}
+        />
+      )}
 
       {/* Crosshair */}
       {state.playing && !state.dead && (
@@ -349,19 +456,16 @@ export function Hud(props: HudProps) {
               🚓 Police ×{state.police}
             </div>
           )}
+          {state.heli && <HeliChip />}
           {state.police > 0 && state.evading > 0 && <EvadeChip evading={state.evading} />}
           {(() => {
             const sel = state.hotbar[state.slot];
             const showJet = state.playing && !state.dead && (sel?.id === 'jetpack' || state.jetThrusting);
             return showJet ? <JetFuelChip fuel={state.jetFuel} thrusting={state.jetThrusting} /> : null;
           })()}
-          {state.driving && (
-            <div className="mt-1 rounded bg-black/55 px-3 py-1 text-right">
-              <div className="text-[10px] uppercase tracking-widest text-amber-300/90">{state.driving.name}</div>
-              <div className="text-xl font-black leading-none text-white">
-                {Math.round(state.driving.speed)}
-                <span className="ml-1 text-[10px] font-bold text-white/60">KM/H</span>
-              </div>
+          {state.driving && !state.dead && (
+            <div className="mt-1 flex justify-end">
+              <Speedo driving={state.driving} />
             </div>
           )}
         </div>
@@ -558,8 +662,9 @@ export function Hud(props: HudProps) {
             <p className="mb-8 max-w-xl text-sm leading-relaxed text-white/80 md:text-base">
               A photoreal GTA-style open city, tunneled apart by Minecraft freedom. Every building, road and
               sidewalk is a dense micro-voxel lattice — dig through downtown with your pickaxe, rig engines with
-              flint &amp; steel, build sky-bridges from smooth dirt slabs, and fly like creative mode. Complete
-              contract chains to unlock the 🔥 Chaos Jetpack.
+              flint &amp; steel, build sky-bridges from smooth dirt slabs, and fly like creative mode. Contract
+              chains unlock the 🔥 Chaos Jetpack, then the 🪖 Rhino Tank — but at five stars a police chopper
+              joins the hunt, and only the tunnels can hide you.
             </p>
             {state.hasSave && (
               <button

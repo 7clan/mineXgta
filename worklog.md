@@ -203,3 +203,40 @@ Stage Summary:
 - All browser-verified; lint/tsc clean; zero console errors.
 - Known quirks: jetpack fuel yo-yo sputters near empty (by design — sounds like a dying engine); police LOS still distance-capped at 68m (occlusion only refines within range); jetpack maxStack 1 means a second chain bonus can sit unused in the inventory (acceptable).
 - Next-cycle priorities (suggested): (1) mobile touch controls (dig/place/jetpack buttons), (2) draw-call reduction via material atlas for ~175 buildings, (3) contract chain tier 2 rewards (e.g. infinite-TNT "Mega Pack" or a tank vehicle), (4) police helicopter at 5 stars with spotlight, (5) jetpack recoil camera shake + surface scorch decals under thrust.
+
+---
+
+Task ID: cron-review-5 (2026-10-10)
+Agent: Z.ai Code (webDevReview cycle 5)
+Task: Status assessment + QA, then feature development: police helicopter air support, Rhino Tank (chain tier-2), tank gunnery, speedometer + scorch decals + HUD styling pass
+
+Work Log:
+- QA baseline: dev.log clean, lint 0 problems, tsc 0 errors (game code), agent-browser fresh session — start screen renders (CONTINUE + NEW GAME), NEW GAME → 175 buildings / 34 cars, carve pipeline works (67 voxels via carveSphere), 5-star escalation works (stars=5, heat 900), ZERO console errors in cleared console. One stale-console lesson re-confirmed: always clear console before reading errors. Verdict: STABLE → feature development.
+- FEATURE: POLICE HELICOPTER / AIR SUPPORT (new helicopter.ts + audio.ts + game.ts + hud.tsx):
+  - Smooth (non-blocky) chopper: ellipsoid fuselage, glass canopy, white belly band, tapered tail boom + fin, spinning main rotor (4 blades, 27 rad/s) + tail rotor, skids, red/blue belly flashers alternating at 4 Hz.
+  - Motion: parametric orbit (radius 64±11 m, slow drift) around the player, altitude auto-clamped above the tallest standing building within 110 m (re-scan every 1.2 s, minAlt = maxH+9), banks into the turn, bobs.
+  - SEARCHLIGHT: SpotLight (2600 cd, warm) targeted at the player with a lazy circular sweep + additive volumetric beam cone (opacity flicker) — verified light pool on the asphalt in screenshots.
+  - DOOR GUN: every 2.3-3.2 s when the chopper sees the player (surface only, <135 m horizontal): 3-round burst — additive tracer lines (pooled, 0.08 s life), gunCrack audio, 62% hit chance → 3 dmg + hit marker; near-misses shake + debris.
+  - LOS integration: heli counts as "cops see you" (copsSee = computeCopLOS(units) || heliSees) so surface evasion is impossible at 5 stars — GOING UNDERGROUND (y < −2.5) blinds it → tunnels are the counterplay (toast explains).
+  - Rotor wash: dust puffs on the street when hovering < 17 m above ground.
+  - AUDIO: heliLoop() — 12.5 Hz square-LFO chopped noise (blade slap) through bandpass 95 Hz + 34 Hz saw rumble; setHeliDist() attenuates by distance; stopHeli() fades + tears down; wired into dispose().
+  - HUD: 🚁 AIR SUPPORT chip (red/blue blinking border + circular radar sweep via new hyperion-radar conic-gradient keyframes); minimap shows a blinking red ring + dot at the chopper.
+- FEATURE: RHINO TANK (vehicles.ts + game.ts) — contract chain tier-2 reward:
+  - New CarType 'tank': smooth olive hull (rounded), sloped glacis, engine deck, two treads, 8 spinning road wheels, ROTATING TURRET (cylinder + hatch + mantlet) with barrel pivot + muzzle brake + muzzle anchor Object3D; health 400, name 'Rhino Tank'.
+  - Drive physics: accel 5.5, max 16 m/s (58 km/h), heavy steering 1.05, wide collision radius 1.95, takes 0.35× collision damage, bounces off buildings softly (−0.08), CRUSHES civilian cars (contact at >4 m/s → instant health 0 + ignite → explosion chain) instead of bouncing.
+  - GUNNERY: mouse orbits aim (tankAimYaw/Pitch), gun-cam camera (10.5 m behind aim direction, look at turret), turret world-yaw = aim − hull yaw, barrel pitch tracks the camera ray; LMB fires when reload ready (2.6 s cd) → shell projectile (66 m/s, slight gravity, smoke trail) → impact tests (ground / building AABB / car sphere → ignite / NPC) → explode(radius 7.4) + score; muzzle fire+smoke puffs, cannon() audio (distorted boom + 44 Hz sub + crack), 0.42 shake, hull recoil.
+  - Unlock: Missions chainReward now TIERED — tier 1 jetpack (unchanged), tier 2 spawns a tank on the nearest road point (spawnTank, toast "RHINO TANK delivered"), tier 3+ grants TNT ×32 "MEGA PACK" (+200 score). Verified E2E via runtime: chainCount 5 → voxels contract → chainCount 6 → chainTier 2 → second tank spawned + toast.
+- FEATURE: SCORCH DECALS (game.ts) — every explosion (TNT, cars, shells) leaves a dark circle decal on the ground (random size/rotation, polygonOffset against z-fighting), fades over 70 s, cap 26 (FIFO). Air bursts > 7 m above floor skip. Verified: ground explosion → decals 0→1 visible in screenshot; building-facade shell hit → correctly no decal.
+- STYLING PASS (mandatory detail mandate):
+  - SPEEDOMETER: replaced the plain km/h chip with an SVG arc gauge (amber arc for cars, lime for tank) — needle, ticks, big tabular-nums readout, KM/H label, hull-integrity bar (sky→emerald, red gradient when < 30%), vehicle name row; tank variant adds CANNON status chip ("● LMB · FIRE" emerald when ready / "RELOAD N%") + lime reload progress bar.
+  - Cinematic vignette overlay (radial gradient, always on while playing) — subtle filmic framing on top of the existing damage vignette.
+  - Start screen copy + CONTROLS list updated (tank + chopper mentioned, "LMB (tank) — Fire the cannon" row).
+  - MissionChip chain row is now TIERED: claimed-tier emoji badges (🔥🪖) + 3 diamonds for the current tier + next-reward label (→ Jetpack / → Tank / → TNT Mega). Verified: "CHAIN BONUS → TNT MEGA" renders after tier 2.
+- Misc: jetpack thrust now adds a tiny recoil shake (random ~2.4/s × 0.05); CHAIN_GOAL import cleaned up in game.ts.
+- Verification: lint 0 problems, tsc 0 errors, zero console errors, dev.log clean; agent-browser E2E — heli spawn at 5 stars + climb to rooftop-safe alt (y 10→40→minAlt 70), AIR SUPPORT chip + minimap ring, door-gun burst (hitMark 0→1, health 20→17), heli LOS keeps evadeT at 0 while visible, heli despawn at stars<5; tank enter → gun-cam + Speedo + reload chip, cannon fire → shell → 1047 voxels carved, scorch decal on ground explosion, tank crush (sedan 100→0 hp → burning), exit works; chain tier-2 reward flow grants a tank + toast; start screen copy/controls verified.
+
+Stage Summary:
+- New systems this cycle: police helicopter air support (orbit AI, rooftop-safe altitude, volumetric searchlight, door-gun bursts with tracers, LOS integration forcing underground evasion), Rhino Tank with full gunnery (rotating turret, camera-ray aiming, shell projectiles with gravity + impact explosions), tiered contract-chain rewards (jetpack → tank → TNT mega packs), scorch decals, SVG speedometer with hull + cannon reload readout, cinematic vignette.
+- All browser-verified; lint/tsc clean; zero console errors.
+- Known quirks: heli LOS is horizontal-distance based (<135 m, no occlusion raycast — acceptable for an airborne unit); heli gun damage is probabilistic spread (62%); tank shells vs wrecked/falling cars are skipped (no overkill); scorch decals don't stick to building walls (ground only by design); headless throttling makes game-time crawl (deterministic QA via direct runtime calls, real GPU browsers unaffected).
+- Next-cycle priorities (suggested): (1) mobile touch controls (dig/place/drive/fire buttons), (2) draw-call reduction via material atlas for ~175 buildings, (3) heli spotlight as gameplay tool — spotlights expose you to ground cops even behind cover (deepen stealth loop), (4) tank vs police balance — cops should target the tank with ramming + heli focuses tank, (5) radio station HUD presets + volume settings persisted in save.

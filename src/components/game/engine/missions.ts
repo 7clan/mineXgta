@@ -37,13 +37,15 @@ export interface MissionSnapshot {
   offered: boolean;
   /** Contract target marker in world XZ (location contracts only). */
   marker: { x: number; z: number } | null;
-  /** Chain progress 0..CHAIN_GOAL (contracts completed toward the bonus). */
+  /** Contracts completed toward the CURRENT chain tier (0..CHAIN_GOAL). */
   chain: number;
-  /** True when the chain bonus (jetpack) has already been claimed once. */
+  /** True when the tier-1 bonus (jetpack) has been claimed. */
   chainDone: boolean;
+  /** Completed chain tiers: 1 = jetpack, 2 = tank, 3+ = TNT mega packs. */
+  chainTier: number;
 }
 
-/** Contracts completed in a row (session) needed for the chain bonus. */
+/** Contracts per chain tier (tier 1 → jetpack, tier 2 → tank, 3+ → TNT mega packs). */
 export const CHAIN_GOAL = 3;
 
 const DEFS: MissionDef[] = [
@@ -125,8 +127,8 @@ const OFFER_DELAY = 40;
 interface Callbacks {
   toast: (msg: string) => void;
   complete: (def: MissionDef) => void;
-  /** Fired after every CHAIN_GOAL completed contracts — the game grants the jetpack. */
-  chainReward: () => void;
+  /** Fired after every CHAIN_GOAL completed contracts — tier 1 jetpack, 2 tank, 3+ mega pack. */
+  chainReward: (tier: number) => void;
   /** Pick a tall standing building near the player for location contracts. */
   pickBuilding?: () => { id: number; x: number; z: number } | null;
 }
@@ -138,7 +140,8 @@ export class Missions {
   private active: { def: MissionDef; progress: number; timeLeft: number; buildingId?: number } | null = null;
   /** Contracts completed this session (drives the chain bonus). */
   chainCount = 0;
-  private chainClaimed = false;
+  /** Completed chain tiers (1 = jetpack claimed, 2 = tank delivered, 3+ = mega packs). */
+  chainTier = 0;
 
   constructor(private cb: Callbacks) {}
 
@@ -204,9 +207,9 @@ export class Missions {
       this.cb.toast(`CONTRACT COMPLETE — ${a.def.rewardLabel}`);
       this.cb.complete(a.def);
       this.chainCount++;
-      if (!this.chainClaimed && this.chainCount >= CHAIN_GOAL) {
-        this.chainClaimed = true;
-        this.cb.chainReward();
+      if (this.chainCount % CHAIN_GOAL === 0) {
+        this.chainTier = this.chainCount / CHAIN_GOAL;
+        this.cb.chainReward(this.chainTier);
       }
       this.offerTimer = 45;
     }
@@ -254,6 +257,11 @@ export class Missions {
       offered: false,
       marker: markerFor ? markerFor(def, buildingId) : null,
     });
+    const chainInfo = () => ({
+      chain: this.chainCount - this.chainTier * CHAIN_GOAL,
+      chainDone: this.chainTier >= 1,
+      chainTier: this.chainTier,
+    });
     if (this.active) {
       const a = this.active;
       return {
@@ -261,8 +269,7 @@ export class Missions {
         progress: Math.min(a.progress, a.def.target),
         timeLeft: Math.max(0, a.timeLeft),
         offered: false,
-        chain: Math.min(this.chainCount, CHAIN_GOAL),
-        chainDone: this.chainClaimed,
+        ...chainInfo(),
       };
     }
     if (this.offered) {
@@ -271,8 +278,7 @@ export class Missions {
         ...mk(o.def),
         timeLeft: Math.max(0, o.ttl),
         offered: true,
-        chain: Math.min(this.chainCount, CHAIN_GOAL),
-        chainDone: this.chainClaimed,
+        ...chainInfo(),
       };
     }
     return null;

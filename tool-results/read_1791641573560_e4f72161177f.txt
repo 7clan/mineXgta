@@ -1,0 +1,595 @@
+     1→'use client';
+     2→
+     3→import { useMemo, type ReactNode } from 'react';
+     4→import { HudState, ItemStack, ItemId } from './engine/types';
+     5→import { ICON_URLS, ITEMS, UI_ICONS } from './engine/items';
+     6→
+     7→const SLOT_BASE =
+     8→  'relative flex items-center justify-center bg-[#8b8b8b] border-2 border-t-[#373737] border-l-[#373737] border-b-[#c6c6c6] border-r-[#c6c6c6]';
+     9→
+    10→function ItemIcon({ id, size = 40 }: { id: ItemId; size?: number }) {
+    11→  const src = ICON_URLS[id];
+    12→  if (!src) return null;
+    13→  return (
+    14→    <img
+    15→      src={src}
+    16→      alt={ITEMS[id].name}
+    17→      width={size}
+    18→      height={size}
+    19→      style={{ imageRendering: 'pixelated' }}
+    20→      className="drop-shadow-[2px_2px_0_rgba(0,0,0,0.45)]"
+    21→      draggable={false}
+    22→    />
+    23→  );
+    24→}
+    25→
+    26→function Slot({
+    27→  stack,
+    28→  selected,
+    29→  onClick,
+    30→  size = 48,
+    31→}: {
+    32→  stack: ItemStack | null;
+    33→  selected?: boolean;
+    34→  onClick?: () => void;
+    35→  size?: number;
+    36→}) {
+    37→  return (
+    38→    <button
+    39→      onClick={onClick}
+    40→      className={`${SLOT_BASE} ${selected ? 'outline outline-[3px] outline-white z-10 scale-110' : ''} transition-transform`}
+    41→      style={{ width: size, height: size }}
+    42→      aria-label={stack ? ITEMS[stack.id].name : 'empty slot'}
+    43→    >
+    44→      {stack && <ItemIcon id={stack.id} size={size - 14} />}
+    45→      {stack && stack.count > 1 && (
+    46→        <span className="absolute bottom-0 right-1 text-white text-[13px] font-bold leading-none [text-shadow:2px_2px_0_#000]">
+    47→          {stack.count}
+    48→        </span>
+    49→      )}
+    50→    </button>
+    51→  );
+    52→}
+    53→
+    54→function Hearts({ health }: { health: number }) {
+    55→  const hearts: ReactNode[] = [];
+    56→  for (let i = 0; i < 10; i++) {
+    57→    const full = health >= (i + 1) * 2;
+    58→    hearts.push(
+    59→      <img
+    60→        key={i}
+    61→        src={full ? UI_ICONS.heartFull : UI_ICONS.heartEmpty}
+    62→        alt={full ? 'heart' : 'empty heart'}
+    63→        width={22}
+    64→        height={22}
+    65→        style={{ imageRendering: 'pixelated' }}
+    66→        draggable={false}
+    67→      />
+    68→    );
+    69→  }
+    70→  return <div className="flex gap-[2px]">{hearts}</div>;
+    71→}
+    72→
+    73→function Stars({ count }: { count: number }) {
+    74→  const stars: ReactNode[] = [];
+    75→  for (let i = 0; i < 5; i++) {
+    76→    stars.push(
+    77→      <img
+    78→        key={i}
+    79→        src={i < count ? UI_ICONS.starFull : UI_ICONS.starEmpty}
+    80→        alt={i < count ? 'wanted star' : 'empty star'}
+    81→        width={30}
+    82→        height={30}
+    83→        style={{ imageRendering: 'auto' }}
+    84→        className={i < count ? 'drop-shadow-[0_0_6px_rgba(255,255,255,0.7)]' : 'opacity-60'}
+    85→        draggable={false}
+    86→      />
+    87→    );
+    88→  }
+    89→  return <div className="flex flex-col items-end gap-[2px]">{stars}</div>;
+    90→}
+    91→
+    92→export interface HudProps {
+    93→  state: HudState;
+    94→  toast: string | null;
+    95→  onSlotClick: (i: number) => void;
+    96→  onInventorySwap: (i: number) => void;
+    97→  onResume: () => void;
+    98→  onRespawn: () => void;
+    99→  onPlay: () => void;
+   100→  onContinue: () => void;
+   101→  onSave: () => void;
+   102→  paused: boolean;
+   103→  inventoryOpen: boolean;
+   104→  onCloseInventory: () => void;
+   105→  showStart: boolean;
+   106→}
+   107→
+   108→const CONTROLS: Array<[string, string]> = [
+   109→  ['W A S D', 'Move'],
+   110→  ['Mouse', 'Look'],
+   111→  ['LMB (hold)', 'Dig / carve micro-voxels'],
+   112→  ['RMB', 'Place block / use item'],
+   113→  ['RMB (hold) 🚀', 'Jetpack thrust (selected)'],
+   114→  ['Space ×2', 'Toggle creative flight'],
+   115→  ['Space / C', 'Fly up / down'],
+   116→  ['Shift', 'Sprint'],
+   117→  ['1–9 / Wheel', 'Select hotbar slot'],
+   118→  ['E', 'Inventory'],
+   119→  ['F', 'Enter / exit car'],
+   120→  ['M', 'Accept / quit contract'],
+   121→  ['R', 'Car radio station'],
+   122→  ['F5', 'Third-person view'],
+   123→  ['F3', 'Debug overlay'],
+   124→  ['Esc', 'Pause'],
+   125→];
+   126→
+   127→/** Contract tracker — GTA-style offer/active chip with progress + countdown. */
+   128→function MissionChip({ mission }: { mission: NonNullable<HudState['mission']> }) {
+   129→  const pct = mission.target > 0 ? Math.min(100, (mission.progress / mission.target) * 100) : 0;
+   130→  const offer = mission.offered;
+   131→  return (
+   132→    <div
+   133→      className={`hyperion-missionchip absolute left-1/2 top-4 w-[300px] max-w-[80vw] -translate-x-1/2 rounded-lg border bg-black/70 px-3 py-2 backdrop-blur-[2px] ${
+   134→        offer ? 'hyperion-offer border-amber-400/70' : 'border-amber-400/25'
+   135→      }`}
+   136→    >
+   137→      <div className="flex items-center justify-between gap-2">
+   138→        <div className="flex items-center gap-1.5 text-[11px] font-black uppercase tracking-[0.16em] text-amber-300">
+   139→          <span className="text-[13px] leading-none">{offer ? '📡' : '🎯'}</span>
+   140→          {offer ? 'CONTRACT OFFER' : 'CONTRACT'} · {mission.title}
+   141→        </div>
+   142→        <div className={`text-[12px] font-black tabular-nums ${mission.timeLeft < 10 && !offer ? 'text-red-400' : 'text-white/90'}`}>
+   143→          {Math.ceil(mission.timeLeft)}s
+   144→        </div>
+   145→      </div>
+   146→      <div className="mt-1 text-[11px] font-bold text-white/80">
+   147→        {offer ? `${mission.desc} — press M to accept` : mission.desc}
+   148→      </div>
+   149→      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/10">
+   150→        <div
+   151→          className={`h-full rounded-full transition-[width] duration-200 ${offer ? 'w-full bg-amber-400/50' : 'bg-amber-400'}`}
+   152→          style={offer ? undefined : { width: `${pct}%` }}
+   153→        />
+   154→      </div>
+   155→      <div className="mt-1 flex items-center justify-between text-[9px] font-bold uppercase tracking-widest text-white/45">
+   156→        <span>
+   157→          {offer ? 'Reward' : `${mission.progress} / ${mission.target}`}
+   158→          {mission.marker && (
+   159→            <span className="ml-2 text-amber-300/90">◆ {Math.round(mission.marker.dist)}m</span>
+   160→          )}
+   161→        </span>
+   162→        <span>{mission.reward}</span>
+   163→      </div>
+   164→      {/* Contract chain — 3 completions unlock the Chaos Jetpack */}
+   165→      <div className="mt-1 flex items-center justify-between border-t border-white/10 pt-1">
+   166→        <span className="text-[8px] font-black uppercase tracking-[0.22em] text-white/40">Chain bonus</span>
+   167→        {mission.chainDone ? (
+   168→          <span className="text-[9px] font-black uppercase tracking-widest text-emerald-300">🔥 Jetpack claimed ✓</span>
+   169→        ) : (
+   170→          <span className="flex items-center gap-1">
+   171→            {[0, 1, 2].map((i) => (
+   172→              <span
+   173→                key={i}
+   174→                className={`inline-block h-[7px] w-[7px] rotate-45 rounded-[1px] ${
+   175→                  i < mission.chain ? 'bg-amber-400 shadow-[0_0_5px_rgba(251,191,36,0.8)]' : 'bg-white/15'
+   176→                }`}
+   177→              />
+   178→            ))}
+   179→            <span className="ml-1 text-[9px] font-black uppercase tracking-widest text-white/55">→ Jetpack</span>
+   180→          </span>
+   181→        )}
+   182→      </div>
+   183→    </div>
+   184→  );
+   185→}
+   186→
+   187→/** Animated radio equalizer bars. */
+   188→function EqBars() {
+   189→  return (
+   190→    <span className="flex h-3 items-end gap-[2px]">
+   191→      {[0, 1, 2, 3].map((i) => (
+   192→        <span key={i} className="hyperion-eqbar block h-3 w-[3px] rounded-sm bg-emerald-400/90" />
+   193→      ))}
+   194→    </span>
+   195→  );
+   196→}
+   197→
+   198→/** Weather chip — clear / overcast / rain with animated droplets + wet-roads tag. */
+   199→function WeatherChip({ weather }: { weather: HudState['weather'] }) {
+   200→  const rain = weather.state === 'rain';
+   201→  const over = weather.state === 'overcast';
+   202→  const wet = weather.wet > 0.3;
+   203→  return (
+   204→    <div
+   205→      className={`flex items-center gap-2 rounded-lg border px-2.5 py-1 backdrop-blur-[2px] transition-colors duration-700 ${
+   206→        rain
+   207→          ? 'border-sky-300/30 bg-[#0d1420]/70'
+   208→          : over
+   209→            ? 'border-white/15 bg-black/55'
+   210→            : 'border-amber-300/20 bg-black/45'
+   211→      }`}
+   212→      title={`Weather: ${weather.state}${wet ? ' · wet roads' : ''}`}
+   213→    >
+   214→      {rain ? (
+   215→        <span className="relative block h-4 w-4 overflow-hidden">
+   216→          <span className="absolute left-[3px] top-0 hyperion-drop h-[5px] w-[2px] rounded-full bg-sky-300" />
+   217→          <span className="absolute left-[8px] top-0 hyperion-drop h-[5px] w-[2px] rounded-full bg-sky-300" style={{ animationDelay: '0.35s' }} />
+   218→          <span className="absolute left-[13px] top-0 hyperion-drop h-[5px] w-[2px] rounded-full bg-sky-300" style={{ animationDelay: '0.7s' }} />
+   219→        </span>
+   220→      ) : (
+   221→        <span className={`text-[13px] leading-none ${over ? 'opacity-70' : ''}`}>{over ? '☁️' : '☀️'}</span>
+   222→      )}
+   223→      <div className="leading-tight">
+   224→        <div className="text-[8px] font-bold uppercase tracking-[0.24em] text-white/45">Weather</div>
+   225→        <div className="flex items-center gap-1.5">
+   226→          <span className={`text-[10px] font-black uppercase tracking-wider ${rain ? 'text-sky-300' : over ? 'text-white/70' : 'text-amber-200/90'}`}>
+   227→            {weather.state}
+   228→          </span>
+   229→          {wet && !rain && (
+   230→            <span className="rounded bg-sky-400/15 px-1 text-[8px] font-black uppercase tracking-widest text-sky-300/90">💧 wet</span>
+   231→          )}
+   232→        </div>
+   233→      </div>
+   234→    </div>
+   235→  );
+   236→}
+   237→
+   238→/** "LOSING THEM" evade progress — amber sweep that fills as the cops lose sight. */
+   239→function EvadeChip({ evading }: { evading: number }) {
+   240→  return (
+   241→    <div className="hyperion-losing mt-1 w-32 rounded border border-amber-300/35 bg-black/65 px-2 py-1">
+   242→      <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-[0.18em] text-amber-300">
+   243→        <span>👁 LOSING THEM</span>
+   244→        <span className="tabular-nums">{Math.round(evading * 100)}%</span>
+   245→      </div>
+   246→      <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-white/10">
+   247→        <div
+   248→          className="h-full rounded-full bg-gradient-to-r from-amber-400 to-emerald-400 transition-[width] duration-200"
+   249→          style={{ width: `${Math.round(evading * 100)}%` }}
+   250→        />
+   251→      </div>
+   252→    </div>
+   253→  );
+   254→}
+   255→
+   256→/** Jetpack fuel gauge — shown while a Chaos Jetpack is selected (or thrusting). */
+   257→function JetFuelChip({ fuel, thrusting }: { fuel: number; thrusting: boolean }) {
+   258→  const pct = Math.round(fuel * 100);
+   259→  const low = fuel < 0.22;
+   260→  return (
+   261→    <div
+   262→      className={`mt-1 w-36 rounded border px-2 py-1 backdrop-blur-[2px] transition-colors duration-300 ${
+   263→        thrusting ? 'border-orange-400/70 bg-[#1d1005]/80 shadow-[0_0_14px_rgba(255,120,30,0.35)]' : 'border-white/15 bg-black/60'
+   264→      }`}
+   265→    >
+   266→      <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-[0.18em]">
+   267→        <span className={thrusting ? 'text-orange-300' : 'text-white/60'}>
+   268→          {thrusting ? <span className="hyperion-flame">🔥 BURNING</span> : '🚀 JETPACK'}
+   269→        </span>
+   270→        <span className={`tabular-nums ${low ? 'text-red-400' : 'text-white/85'}`}>{pct}%</span>
+   271→      </div>
+   272→      <div className="mt-0.5 h-1.5 overflow-hidden rounded-full bg-white/10">
+   273→        <div
+   274→          className={`h-full rounded-full transition-[width] duration-150 ${
+   275→            low ? 'bg-gradient-to-r from-red-500 to-orange-400' : 'bg-gradient-to-r from-orange-500 via-amber-400 to-yellow-300'
+   276→          }`}
+   277→          style={{ width: `${pct}%` }}
+   278→        />
+   279→      </div>
+   280→      <div className="mt-0.5 text-right text-[8px] font-bold uppercase tracking-widest text-white/35">Hold RMB — thrust</div>
+   281→    </div>
+   282→  );
+   283→}
+   284→
+   285→export function Hud(props: HudProps) {
+   286→  const { state, toast } = props;
+   287→
+   288→  const itemName = useMemo(() => {
+   289→    const it = state.hotbar[state.slot];
+   290→    return it ? ITEMS[it.id].name : null;
+   291→  }, [state.hotbar, state.slot]);
+   292→
+   293→  return (
+   294→    <div className="pointer-events-none fixed inset-0 select-none font-mono">
+   295→      {/* damage vignette */}
+   296→      <div
+   297→        className="absolute inset-0 transition-opacity duration-200"
+   298→        style={{
+   299→          opacity: state.hurt * 0.55,
+   300→          background: 'radial-gradient(ellipse at center, rgba(255,0,0,0) 40%, rgba(180,0,0,0.85) 100%)',
+   301→        }}
+   302→      />
+   303→
+   304→      {/* Crosshair */}
+   305→      {state.playing && !state.dead && (
+   306→        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 mix-blend-difference">
+   307→          <div className="relative h-5 w-5">
+   308→            <div className="absolute left-1/2 top-0 h-5 w-[2px] -translate-x-1/2 bg-white" />
+   309→            <div className="absolute top-1/2 left-0 h-[2px] w-5 -translate-y-1/2 bg-white" />
+   310→          </div>
+   311→        </div>
+   312→      )}
+   313→
+   314→      {/* Hit marker — remounts per hit via key, replaying the pop animation */}
+   315→      {state.playing && !state.dead && state.hitMark > 0 && (
+   316→        <div key={state.hitMark} className="hyperion-hitmark absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+   317→          <svg width="26" height="26" viewBox="0 0 26 26">
+   318→            <g stroke="#ffffff" strokeWidth="2.6" strokeLinecap="round">
+   319→              <line x1="4" y1="4" x2="10" y2="10" />
+   320→              <line x1="22" y1="4" x2="16" y2="10" />
+   321→              <line x1="4" y1="22" x2="10" y2="16" />
+   322→              <line x1="22" y1="22" x2="16" y2="16" />
+   323→            </g>
+   324→          </svg>
+   325→        </div>
+   326→      )}
+   327→
+   328→      {/* Police light wash across screen edges (only with active pursuit) */}
+   329→      {state.playing && !state.dead && state.police > 0 && <div className="hyperion-policeflash absolute inset-0" />}
+   330→
+   331→      {/* Contract tracker (top center) */}
+   332→      {state.playing && !state.dead && state.mission && <MissionChip mission={state.mission} />}
+   333→
+   334→      {/* Stars — GTA chaos level (top right) */}
+   335→      {state.playing && (
+   336→        <div className="absolute right-4 top-4 flex flex-col items-end gap-1">
+   337→          <Stars count={state.stars} />
+   338→          <div className="rounded bg-black/55 px-2 py-0.5 text-right text-[11px] font-bold tracking-widest text-white/90">
+   339→            CHAOS {state.score}
+   340→          </div>
+   341→          <div className="h-1 w-24 overflow-hidden rounded-full bg-black/50">
+   342→            <div
+   343→              className="h-full rounded-full bg-gradient-to-r from-amber-500 to-red-400 transition-[width] duration-300"
+   344→              style={{ width: `${Math.min(100, ((state.score % 150) / 150) * 100)}%` }}
+   345→            />
+   346→          </div>
+   347→          {state.police > 0 && (
+   348→            <div className="hyperion-policechip mt-1 rounded border border-red-400/40 bg-black/60 px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.18em] text-red-300">
+   349→              🚓 Police ×{state.police}
+   350→            </div>
+   351→          )}
+   352→          {state.police > 0 && state.evading > 0 && <EvadeChip evading={state.evading} />}
+   353→          {(() => {
+   354→            const sel = state.hotbar[state.slot];
+   355→            const showJet = state.playing && !state.dead && (sel?.id === 'jetpack' || state.jetThrusting);
+   356→            return showJet ? <JetFuelChip fuel={state.jetFuel} thrusting={state.jetThrusting} /> : null;
+   357→          })()}
+   358→          {state.driving && (
+   359→            <div className="mt-1 rounded bg-black/55 px-3 py-1 text-right">
+   360→              <div className="text-[10px] uppercase tracking-widest text-amber-300/90">{state.driving.name}</div>
+   361→              <div className="text-xl font-black leading-none text-white">
+   362→                {Math.round(state.driving.speed)}
+   363→                <span className="ml-1 text-[10px] font-bold text-white/60">KM/H</span>
+   364→              </div>
+   365→            </div>
+   366→          )}
+   367→        </div>
+   368→      )}
+   369→
+   370→      {/* Depth chip — underground mining readout */}
+   371→      {state.playing && !state.dead && state.depth > 0 && (
+   372→        <div className="absolute bottom-4 right-4 rounded border border-emerald-400/30 bg-black/65 px-3 py-1.5 text-right">
+   373→          <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-300/90">Depth</div>
+   374→          <div className="text-lg font-black leading-none text-emerald-200">
+   375→            −{state.depth}
+   376→            <span className="ml-1 text-[10px] font-bold text-emerald-400/70">M</span>
+   377→          </div>
+   378→        </div>
+   379→      )}
+   380→
+   381→      {/* Quick-hints chip (bottom right) */}
+   382→      {state.playing && !state.dead && state.depth <= 0 && (
+   383→        <div className="absolute bottom-6 right-4 rounded bg-black/45 px-2.5 py-1 text-right text-[10px] font-bold leading-relaxed tracking-wide text-white/55">
+   384→          <div>E INVENTORY · F5 VIEW</div>
+   385→          <div>F CAR · M CONTRACT</div>
+   386→        </div>
+   387→      )}
+   388→
+   389→      {/* Radio chip — animated EQ + station name while driving */}
+   390→      {state.playing && !state.dead && state.radio && (
+   391→        <div className="absolute bottom-24 right-4 flex items-center gap-2 rounded-lg border border-emerald-400/25 bg-black/65 px-3 py-1.5">
+   392→          <EqBars />
+   393→          <div>
+   394→            <div className="text-[9px] font-bold uppercase tracking-[0.22em] text-emerald-300/80">Radio · R</div>
+   395→            <div className="text-[11px] font-black leading-tight text-white/90">{state.radio}</div>
+   396→          </div>
+   397→        </div>
+   398→      )}
+   399→
+   400→      {/* Weather chip — above the minimap */}
+   401→      {state.playing && !state.dead && <div className="absolute bottom-[172px] left-4"><WeatherChip weather={state.weather} /></div>}
+   402→
+   403→      {/* Minimap — GTA style bottom-left */}
+   404→      {state.playing && (
+   405→        <div className="absolute bottom-4 left-4 overflow-hidden rounded-lg border-2 border-black/70 shadow-lg shadow-black/50">
+   406→          <canvas id="hyperion-minimap" width={208} height={140} className="block bg-black" />
+   407→          <div className="absolute inset-0 rounded-lg ring-1 ring-inset ring-white/10" />
+   408→        </div>
+   409→      )}
+   410→
+   411→      {/* Debug (F3) */}
+   412→      {state.debug && state.playing && (
+   413→        <div className="absolute left-4 top-4 space-y-0.5 rounded bg-black/60 px-3 py-2 text-[11px] leading-relaxed text-emerald-200">
+   414→          <div className="font-bold text-white">PROJECT HYPERION · debug</div>
+   415→          <div>FPS: {state.fps}</div>
+   416→          <div>
+   417→            XYZ: {state.pos[0].toFixed(1)} / {state.pos[1].toFixed(1)} / {state.pos[2].toFixed(1)}
+   418→          </div>
+   419→          <div>Depth: {state.depth} m</div>
+   420→          <div>Micro-voxels carved: {state.removed.toLocaleString()}</div>
+   421→          <div>Mode: {state.driving ? 'driving' : state.flying ? 'creative flight' : 'walking'}</div>
+   422→        </div>
+   423→      )}
+   424→
+   425→      {/* Hint */}
+   426→      {state.hint && state.playing && !state.dead && (
+   427→        <div className="absolute bottom-32 left-1/2 -translate-x-1/2 rounded bg-black/60 px-4 py-1.5 text-sm font-bold text-white/90">
+   428→          {state.hint}
+   429→        </div>
+   430→      )}
+   431→
+   432→      {/* Actionbar toast + selected item name */}
+   433→      <div className="absolute bottom-28 left-1/2 -translate-x-1/2 text-center">
+   434→        {toast && !toast.startsWith('__') && (
+   435→          <div
+   436→            key={toast}
+   437→            className="hyperion-toast rounded bg-black/65 px-4 py-1.5 text-sm font-bold text-white [text-shadow:1px_1px_0_#000]"
+   438→          >
+   439→            {toast}
+   440→          </div>
+   441→        )}
+   442→      </div>
+   443→
+   444→      {/* Bottom center: hearts + hotbar */}
+   445→      {state.playing && !state.dead && (
+   446→        <div className="pointer-events-auto absolute bottom-4 left-1/2 -translate-x-1/2">
+   447→          <div className="mb-1 flex items-end justify-between px-1">
+   448→            <Hearts health={state.health} />
+   449→            <div className="text-[11px] font-bold text-white/85 [text-shadow:1px_1px_0_#000]">
+   450→              {state.flying ? '✦ CREATIVE FLIGHT' : itemName ? itemName : ''}
+   451→            </div>
+   452→          </div>
+   453→          <div className="flex gap-[3px] rounded border-2 border-black/60 bg-black/40 p-[3px]">
+   454→            {state.hotbar.map((s, i) => (
+   455→              <Slot key={i} stack={s} selected={i === state.slot} onClick={() => props.onSlotClick(i)} />
+   456→            ))}
+   457→          </div>
+   458→        </div>
+   459→      )}
+   460→
+   461→      {/* Inventory overlay */}
+   462→      {props.inventoryOpen && (
+   463→        <div className="pointer-events-auto absolute inset-0 flex items-center justify-center bg-black/55 backdrop-blur-[2px]">
+   464→          <div className="w-[430px] max-w-[92vw] rounded-lg border-4 border-[#1d1d1f] bg-[#c6c6c6] p-4 shadow-2xl">
+   465→            <div className="mb-3 flex items-center justify-between">
+   466→              <div className="text-lg font-black tracking-wide text-[#3a3a3a]">Inventory</div>
+   467→              <button
+   468→                onClick={props.onCloseInventory}
+   469→                className="rounded bg-[#8b8b8b] px-3 py-1 text-sm font-bold text-white hover:bg-[#9c9c9c]"
+   470→              >
+   471→                Close (E)
+   472→              </button>
+   473→            </div>
+   474→            <div className="grid grid-cols-9 gap-[3px]">
+   475→              {state.inventory.map((s, i) => (
+   476→                <Slot key={i} stack={s} onClick={() => props.onInventorySwap(i)} size={44} />
+   477→              ))}
+   478→            </div>
+   479→            <div className="my-3 h-[2px] bg-[#8b8b8b]" />
+   480→            <div className="grid grid-cols-9 gap-[3px]">
+   481→              {state.hotbar.map((s, i) => (
+   482→                <Slot key={i} stack={s} selected={i === state.slot} onClick={() => props.onSlotClick(i)} size={44} />
+   483→              ))}
+   484→            </div>
+   485→            <div className="mt-3 text-center text-[11px] font-bold text-[#555]">
+   486→              Click an item to swap it into the selected hotbar slot
+   487→            </div>
+   488→          </div>
+   489→        </div>
+   490→      )}
+   491→
+   492→      {/* Pause menu */}
+   493→      {props.paused && !props.showStart && !state.dead && (
+   494→        <div className="pointer-events-auto absolute inset-0 flex items-center justify-center bg-black/65 backdrop-blur-sm">
+   495→          <div className="w-[440px] max-w-[94vw] rounded-xl border border-white/10 bg-[#141416]/95 p-6 text-center shadow-2xl">
+   496→            <div className="mb-1 text-xs font-bold uppercase tracking-[0.3em] text-amber-400/90">Paused</div>
+   497→            <div className="mb-5 text-3xl font-black italic tracking-tight text-white">PROJECT HYPERION</div>
+   498→            <button
+   499→              onClick={props.onResume}
+   500→              className="mb-4 w-full rounded-lg bg-amber-500 py-3 text-lg font-black text-black transition hover:bg-amber-400 active:scale-[0.98]"
+   501→            >
+   502→              RESUME
+   503→            </button>
+   504→            <button
+   505→              onClick={props.onSave}
+   506→              className="mb-4 w-full rounded-lg border border-emerald-400/40 bg-emerald-500/15 py-2 text-sm font-black uppercase tracking-widest text-emerald-300 transition hover:bg-emerald-500/25 active:scale-[0.98]"
+   507→            >
+   508→              💾 Save world
+   509→            </button>
+   510→            <div className="grid grid-cols-2 gap-x-4 gap-y-1 rounded-lg bg-black/40 p-3 text-left text-[11px] text-white/75">
+   511→              {CONTROLS.map(([k, v]) => (
+   512→                <div key={k} className="flex justify-between gap-2">
+   513→                  <span className="font-bold text-amber-300/90">{k}</span>
+   514→                  <span className="text-right">{v}</span>
+   515→                </div>
+   516→              ))}
+   517→            </div>
+   518→          </div>
+   519→        </div>
+   520→      )}
+   521→
+   522→      {/* Death screen */}
+   523→      {state.dead && (
+   524→        <div className="pointer-events-auto absolute inset-0 flex items-center justify-center bg-red-950/70 backdrop-blur-sm">
+   525→          <div className="text-center">
+   526→            <div className="mb-2 text-5xl font-black tracking-tight text-red-200 [text-shadow:3px_3px_0_#000]">
+   527→              You died!
+   528→            </div>
+   529→            <div className="mb-6 text-sm font-bold text-red-100/80">
+   530→              Chaos score: {state.score} · Voxels carved: {state.removed.toLocaleString()}
+   531→            </div>
+   532→            <button
+   533→              onClick={props.onRespawn}
+   534→              className="rounded-lg bg-white px-8 py-3 text-lg font-black text-red-900 transition hover:bg-red-100 active:scale-[0.98]"
+   535→            >
+   536→              RESPAWN
+   537→            </button>
+   538→          </div>
+   539→        </div>
+   540→      )}
+   541→
+   542→      {/* Start screen */}
+   543→      {props.showStart && (
+   544→        <div className="pointer-events-auto absolute inset-0 overflow-hidden">
+   545→          <div
+   546→            className="absolute inset-0 bg-cover bg-center"
+   547→            style={{ backgroundImage: 'url(/hyperion-splash.png)' }}
+   548→          />
+   549→          <div className="absolute inset-0 bg-gradient-to-t from-black via-black/55 to-black/30" />
+   550→          <div className="relative flex h-full flex-col items-center justify-center px-6 text-center">
+   551→            <div className="mb-2 text-[11px] font-bold uppercase tracking-[0.5em] text-amber-400">
+   552→              Los Santos · Micro-Voxel Engine
+   553→            </div>
+   554→            <h1 className="mb-3 text-6xl font-black italic leading-none tracking-tighter text-white drop-shadow-[0_4px_0_rgba(0,0,0,0.8)] md:text-8xl">
+   555→              PROJECT
+   556→              <span className="ml-4 text-amber-400">HYPERION</span>
+   557→            </h1>
+   558→            <p className="mb-8 max-w-xl text-sm leading-relaxed text-white/80 md:text-base">
+   559→              A photoreal GTA-style open city, tunneled apart by Minecraft freedom. Every building, road and
+   560→              sidewalk is a dense micro-voxel lattice — dig through downtown with your pickaxe, rig engines with
+   561→              flint &amp; steel, build sky-bridges from smooth dirt slabs, and fly like creative mode. Complete
+   562→              contract chains to unlock the 🔥 Chaos Jetpack.
+   563→            </p>
+   564→            {state.hasSave && (
+   565→              <button
+   566→                onClick={props.onContinue}
+   567→                className="mb-3 rounded-lg border border-emerald-400/40 bg-emerald-500/15 px-10 py-2.5 text-base font-black tracking-wide text-emerald-300 transition hover:bg-emerald-500/25 active:scale-[0.98]"
+   568→              >
+   569→                ⟳ CONTINUE SAVED CITY
+   570→              </button>
+   571→            )}
+   572→            <button
+   573→              onClick={props.onPlay}
+   574→              className="mb-8 rounded-lg bg-amber-500 px-14 py-4 text-2xl font-black tracking-wide text-black shadow-[0_6px_0_#8a5a00] transition hover:bg-amber-400 active:translate-y-[3px] active:shadow-[0_3px_0_#8a5a00]"
+   575→            >
+   576→              ▶ NEW GAME
+   577→            </button>
+   578→            <div className="grid max-w-2xl grid-cols-2 gap-x-8 gap-y-1 rounded-xl bg-black/55 p-4 text-left text-[11px] text-white/75 md:grid-cols-3">
+   579→              {CONTROLS.map(([k, v]) => (
+   580→                <div key={k} className="flex justify-between gap-2">
+   581→                  <span className="font-bold text-amber-300/90">{k}</span>
+   582→                  <span className="text-right">{v}</span>
+   583→                </div>
+   584→              ))}
+   585→            </div>
+   586→            <div className="mt-6 text-[10px] uppercase tracking-widest text-white/40">
+   587→              Desktop · Mouse &amp; Keyboard · WebGL2 — inspired by GTA-V decompiled scripts &amp; Minecraft
+   588→            </div>
+   589→          </div>
+   590→        </div>
+   591→      )}
+   592→    </div>
+   593→  );
+   594→}
+   595→

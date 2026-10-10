@@ -310,3 +310,24 @@ body {
   transform-origin: bottom center;
 }
 
+/* Air-support chip: rotating radar sweep inside the circular scope */
+@keyframes hyperion-radar-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.hyperion-radar {
+  background: conic-gradient(
+    from 0deg,
+    rgba(255, 80, 60, 0.95),
+    rgba(255, 80, 60, 0.25) 60deg,
+    transparent 110deg,
+    transparent 360deg
+  );
+  animation: hyperion-radar-spin 1.5s linear infinite;
+}
+

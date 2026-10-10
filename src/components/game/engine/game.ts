@@ -25,8 +25,9 @@ import { NPCs } from './npcs';
 import { Particles } from './particles';
 import { Vehicles, Car } from './vehicles';
 import { HyperionAudio } from './audio';
-import { Missions, CHAIN_GOAL } from './missions';
+import { Missions } from './missions';
 import { Weather } from './weather';
+import { Helicopter } from './helicopter';
 import { SAVE_TYPES, clearSave, hasSave, loadSave, writeSave } from './save';
 import {
   HUD_EMIT_INTERVAL,
@@ -82,6 +83,19 @@ interface FirePatch {
   pos: THREE.Vector3;
   ttl: number;
 }
+interface TankShell {
+  mesh: THREE.Mesh;
+  vel: THREE.Vector3;
+  t: number;
+}
+interface ScorchDecal {
+  mesh: THREE.Mesh;
+  life: number;
+}
+interface Tracer {
+  line: THREE.Line;
+  life: number;
+}
 
 export class HyperionGame implements World {
   private canvas: HTMLCanvasElement;
@@ -107,6 +121,9 @@ export class HyperionGame implements World {
   private tnts: TntEntity[] = [];
   private pearls: Pearl[] = [];
   private fires: FirePatch[] = [];
+  private shells: TankShell[] = [];
+  private decals: ScorchDecal[] = [];
+  private tracers: Tracer[] = [];
 
   playing = false;
   paused = false;
@@ -150,6 +167,19 @@ export class HyperionGame implements World {
   /** Ground wetness 0..1 — rises in rain, dries slowly after. */
   private wetT = 0;
   private lightningT = 0;
+  /** Police air support (5 stars) + door-gun combat state. */
+  private heli: Helicopter | null = null;
+  private heliGunT = 2;
+  private heliBurst = 0;
+  private heliBurstT = 0;
+  private heliMinAlt = 44;
+  private heliScanT = 0;
+  /** Rhino tank gunnery (chain tier-2 reward). */
+  private tankAimYaw = 0;
+  private tankAimPitch = 0.14;
+  private shellCd = 0;
+  private shellGeo: THREE.SphereGeometry | null = null;
+  private shellMat: THREE.MeshStandardMaterial | null = null;
   private hitMark = 0;
   private clockStr = '17:20';
   private raycaster = new THREE.Raycaster();
@@ -171,11 +201,23 @@ export class HyperionGame implements World {
       for (const r of def.rewards) this.addItem(r.id as ItemId, r.count, true);
       this.audio.pickup();
     },
-    chainReward: () => {
-      this.addItem('jetpack', 1, true);
-      this.audio.pickup();
-      this.addScore(80);
-      this.toast('🔥 CHAIN BONUS — Chaos Jetpack! Select it, hold RMB to thrust');
+    chainReward: (tier) => {
+      if (tier === 1) {
+        this.addItem('jetpack', 1, true);
+        this.audio.pickup();
+        this.addScore(80);
+        this.toast('🔥 CHAIN BONUS — Chaos Jetpack! Select it, hold RMB to thrust');
+      } else if (tier === 2) {
+        this.vehicles.spawnTank(this.playerPos());
+        this.audio.pickup();
+        this.addScore(150);
+        this.toast('🪖 CHAIN BONUS — RHINO TANK delivered nearby! Press F to commandeer · LMB fires the cannon');
+      } else {
+        this.addItem('tnt', 32, true);
+        this.audio.pickup();
+        this.addScore(200);
+        this.toast('💥 MEGA PACK — TNT ×32 granted!');
+      }
     },
     pickBuilding: () => this.pickContractBuilding(),
   });
@@ -925,6 +967,8 @@ export class HyperionGame implements World {
       if (Math.random() < dt * 22) {
         this.particles.smokePuff(this.tmpV2.set(p.x - fwd.x * 0.6, p.y + 0.05, p.z - fwd.z * 0.6), 1, 0.45, 1.8);
       }
+      // Thrust recoil: tiny camera tremor while the rocket burns
+      if (Math.random() < dt * 2.4) this.shake(0.05);
       this.audio.jetThrust(true);
     } else {
       if (this.jetFuel < 1) this.jetFuel = Math.min(1, this.jetFuel + dt / 9); // refill in ~9s
@@ -961,6 +1005,11 @@ export class HyperionGame implements World {
       this.audio.startEngine();
       this.audio.startRadio(this.audio.radioStation > 0 ? this.audio.radioStation : 1);
       this.player.group.visible = false;
+      if (car.type === 'tank') {
+        // Seed the gun-cam behind the hull so the first frame already looks right.
+        this.tankAimYaw = car.yaw;
+        this.tankAimPitch = 0.14;
+      }
       this.toast(`Driving ${car.name}`);
     }
   }
@@ -979,6 +1028,7 @@ export class HyperionGame implements World {
     if (isCar) this.missions.onCarWreck();
     this.city.checkCollapses();
     this.ensureStrata(this.player.pos.y);
+    this.addScorch(pos, r * 0.85);
 
     // Damage & chaos
     this.ragdollNPCsNear(pos, r * 1.35);
@@ -1021,6 +1071,10 @@ export class HyperionGame implements World {
     if (!this.drivingCar) {
       this.player.yaw -= dx * 0.0023;
       this.player.pitch = Math.max(-1.55, Math.min(1.55, this.player.pitch - dy * 0.0023));
+    } else if (this.drivingCar.type === 'tank') {
+      // Tank gunnery: mouse orbits the turret aim (camera follows).
+      this.tankAimYaw -= dx * 0.0023;
+      this.tankAimPitch = Math.max(-0.55, Math.min(0.38, this.tankAimPitch - dy * 0.0023));
     }
 
     // Hotbar select
@@ -1051,8 +1105,18 @@ export class HyperionGame implements World {
       const throttle = (this.input.isDown('KeyW') ? 1 : 0) + (this.input.isDown('KeyS') ? -1 : 0);
       const steer = (this.input.isDown('KeyA') ? 1 : 0) + (this.input.isDown('KeyD') ? -1 : 0);
       this.vehicles.drivePlayer(this.drivingCar, dt, throttle, steer, this.input.isDown('Space'), this);
-      if (this.input.leftClicked) this.audio.horn(0.05);
+      if (this.input.leftClicked) {
+        if (this.drivingCar.type === 'tank') this.fireCannon();
+        else this.audio.horn(0.05);
+      }
       this.audio.setEngine(Math.min(1, Math.abs(this.drivingCar.speed) / 30));
+      // Tank turret follows the aim (world yaw + barrel pitch from the camera ray)
+      const tk = this.drivingCar;
+      if (tk.type === 'tank' && tk.turret && tk.barrel) {
+        tk.turret.rotation.y = this.tankAimYaw - tk.yaw;
+        const camDir = this.camera.getWorldDirection(this.tmpV);
+        tk.barrel.rotation.x = -Math.asin(THREE.MathUtils.clamp(camDir.y, -1, 1));
+      }
     } else {
       this.updateJetpack(dt);
       const res = this.player.update(dt, this.input, this, true);
@@ -1066,6 +1130,12 @@ export class HyperionGame implements World {
     // Digging (LMB)
     this.tryDig(dt);
     if (this.input.rightClicked) this.useItem();
+
+    // Tank shells, tracer lines, scorch decals
+    if (this.shellCd > 0) this.shellCd -= dt;
+    this.updateShells(dt);
+    this.updateTracers(dt);
+    this.updateDecals(dt);
 
     // TNT fuses
     for (let i = this.tnts.length - 1; i >= 0; i--) {
@@ -1165,6 +1235,138 @@ export class HyperionGame implements World {
 
     this.hurtVignette = Math.max(0, this.hurtVignette - dt * 1.6);
     this.shakeT = Math.max(0, this.shakeT - dt * 2.2);
+  }
+
+  // ------------------------------------------------------------------ tank gunnery
+
+  /** Fire the Rhino Tank's main gun toward the camera aim. */
+  private fireCannon(): void {
+    if (this.shellCd > 0 || !this.drivingCar?.muzzle) return;
+    this.shellCd = 2.6;
+    if (!this.shellGeo || !this.shellMat) {
+      this.shellGeo = new THREE.SphereGeometry(0.17, 10, 8);
+      this.shellMat = new THREE.MeshStandardMaterial({ color: 0x1c1c1c, emissive: 0xff8830, emissiveIntensity: 1.5, roughness: 0.4 });
+    }
+    const muzzle = this.drivingCar.muzzle.getWorldPosition(new THREE.Vector3());
+    const dir = this.camera.getWorldDirection(new THREE.Vector3());
+    const mesh = new THREE.Mesh(this.shellGeo, this.shellMat);
+    mesh.position.copy(muzzle).addScaledVector(dir, 0.9);
+    this.scene.add(mesh);
+    this.shells.push({ mesh, vel: dir.clone().multiplyScalar(66).add(new THREE.Vector3(0, 2.4, 0)), t: 4 });
+    this.audio.cannon();
+    this.particles.firePuff(muzzle, 4);
+    this.particles.smokePuff(muzzle, 3, 0.7, 1.5);
+    this.shake(0.42);
+    this.drivingCar.speed = Math.max(-5, this.drivingCar.speed - 1.3); // recoil
+  }
+
+  private updateShells(dt: number): void {
+    for (let i = this.shells.length - 1; i >= 0; i--) {
+      const s = this.shells[i];
+      s.t -= dt;
+      s.vel.y -= 6.5 * dt;
+      s.mesh.position.addScaledVector(s.vel, dt);
+      const p = s.mesh.position;
+      if (Math.random() < dt * 26) this.particles.smokePuff(p.clone(), 1, 0.16, 0.3);
+      let hit = s.t <= 0;
+      if (!hit && p.y <= this.floorHeightAt(p.x, p.z, p.y) + 0.12) hit = true;
+      if (!hit && !!this.city.buildingAt(p, 0.2)) hit = true;
+      if (!hit) {
+        for (const car of this.vehicles.cars) {
+          if (car === this.drivingCar || car.state === 'wrecked' || car.state === 'falling') continue;
+          if (car.group.position.distanceToSquared(p) < 7.4) {
+            this.vehicles.ignite(car);
+            hit = true;
+            break;
+          }
+        }
+      }
+      if (!hit) {
+        for (const n of this.npcs.list) {
+          if (n.state === 'down') continue;
+          if (n.group.position.distanceToSquared(p) < 1.9) {
+            this.ragdollNPCsNear(p, 2.3);
+            hit = true;
+            break;
+          }
+        }
+      }
+      if (hit) {
+        this.explode(p.clone(), 7.4);
+        this.addScore(20);
+        this.scene.remove(s.mesh);
+        this.shells.splice(i, 1);
+      }
+    }
+  }
+
+  /** Dark scorch circle left on the ground under explosions, fading over ~70 s. */
+  private addScorch(p: THREE.Vector3, radius: number): void {
+    const fy = this.floorHeightAt(p.x, p.z, p.y);
+    if (p.y - fy > 7) return; // air burst: nothing to scorch below
+    const geo = new THREE.CircleGeometry(radius * (0.8 + Math.random() * 0.35), 14);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x0a0a0a,
+      transparent: true,
+      opacity: 0.52,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+    });
+    const m = new THREE.Mesh(geo, mat);
+    m.rotation.x = -Math.PI / 2;
+    m.rotation.z = Math.random() * Math.PI * 2;
+    m.position.set(p.x, fy + 0.03 + Math.random() * 0.025, p.z);
+    m.renderOrder = 3;
+    this.scene.add(m);
+    this.decals.push({ mesh: m, life: 70 });
+    if (this.decals.length > 26) {
+      const old = this.decals.shift();
+      if (old) {
+        this.scene.remove(old.mesh);
+        old.mesh.geometry.dispose();
+        (old.mesh.material as THREE.Material).dispose();
+      }
+    }
+  }
+
+  private updateDecals(dt: number): void {
+    for (let i = this.decals.length - 1; i >= 0; i--) {
+      const d = this.decals[i];
+      d.life -= dt;
+      const mat = d.mesh.material as THREE.MeshBasicMaterial;
+      mat.opacity = d.life < 18 ? Math.max(0, (d.life / 18) * 0.52) : 0.52;
+      if (d.life <= 0) {
+        this.scene.remove(d.mesh);
+        d.mesh.geometry.dispose();
+        mat.dispose();
+        this.decals.splice(i, 1);
+      }
+    }
+  }
+
+  /** Brief additive tracer line for the chopper's door gun. */
+  private spawnTracer(from: THREE.Vector3, to: THREE.Vector3): void {
+    const geo = new THREE.BufferGeometry().setFromPoints([from, to]);
+    const mat = new THREE.LineBasicMaterial({ color: 0xffd28a, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
+    const line = new THREE.Line(geo, mat);
+    this.scene.add(line);
+    this.tracers.push({ line, life: 0.08 });
+  }
+
+  private updateTracers(dt: number): void {
+    for (let i = this.tracers.length - 1; i >= 0; i--) {
+      const tr = this.tracers[i];
+      tr.life -= dt;
+      const mat = tr.line.material as THREE.LineBasicMaterial;
+      mat.opacity = Math.max(0, tr.life / 0.08) * 0.95;
+      if (tr.life <= 0) {
+        this.scene.remove(tr.line);
+        tr.line.geometry.dispose();
+        mat.dispose();
+        this.tracers.splice(i, 1);
+      }
+    }
   }
 
   // ------------------------------------------------------------------ save / load
@@ -1376,14 +1578,82 @@ export class HyperionGame implements World {
       this.loseWarned = false;
     }
 
-    // --- Line-of-sight / evade logic (occlusion-aware, fixes corner-camping) ---
-    if (want > 0 && active > 0) {
+    // --- Air support: one chopper at 5 stars --------------------------------
+    if (this.stars >= 5) {
+      if (!this.heli) {
+        this.heli = new Helicopter(this.scene);
+        this.heliGunT = 2.5;
+        this.heliBurst = 0;
+        this.audio.heliLoop();
+        this.toast('🚁 AIR SUPPORT INBOUND — its searchlight sees everything; tunnels are safe!');
+      }
+    } else if (this.heli) {
+      this.heli.dispose(this.scene);
+      this.heli = null;
+      this.audio.stopHeli();
+    }
+    let heliSees = false;
+    if (this.heli) {
+      const hp = this.heli.pos;
+      const pp = this.playerPos();
+      // Keep clear of rooftops: re-scan nearby building heights every 1.2 s.
+      this.heliScanT -= dt;
+      if (this.heliScanT <= 0) {
+        this.heliScanT = 1.2;
+        let maxH = 20;
+        for (const b of this.city.buildings) {
+          if (b.collapsed || b.collapsing) continue;
+          if (Math.abs(b.cx - pp.x) < 110 && Math.abs(b.cz - pp.z) < 110) maxH = Math.max(maxH, b.h);
+        }
+        this.heliMinAlt = maxH + 9;
+      }
+      // The chopper watches the surface above the player (underground = blind).
+      const surface = this.tmpV.set(pp.x, Math.max(pp.y, 0), pp.z);
+      this.heli.update(dt, surface, this.heliMinAlt);
+      this.audio.setHeliDist(hp.distanceTo(pp) / 130);
+      heliSees = pp.y > -2.5 && Math.hypot(hp.x - pp.x, hp.z - pp.z) < 135;
+      // Rotor wash when hovering low over the streets
+      const below = this.floorHeightAt(hp.x, hp.z, hp.y);
+      if (hp.y - below < 17 && Math.random() < dt * 5) {
+        this.particles.dustPuff(new THREE.Vector3(hp.x, below + 0.4, hp.z), 3, 4.5);
+      }
+      // Door-gun bursts at the player
+      this.heliGunT -= dt;
+      if (heliSees && this.heliGunT <= 0 && !this.player.dead) {
+        this.heliGunT = 2.3 + Math.random() * 0.9;
+        this.heliBurst = 3;
+        this.heliBurstT = 0;
+      }
+      if (this.heliBurst > 0) {
+        this.heliBurstT -= dt;
+        if (this.heliBurstT <= 0) {
+          this.heliBurstT = 0.11;
+          this.heliBurst--;
+          const from = this.heli.muzzle.getWorldPosition(new THREE.Vector3());
+          const eye = new THREE.Vector3(pp.x, pp.y + 1.2, pp.z);
+          const spread = new THREE.Vector3((Math.random() - 0.5) * 2.6, (Math.random() - 0.5) * 2.2, (Math.random() - 0.5) * 2.6);
+          const to = eye.clone().add(spread);
+          this.spawnTracer(from, to);
+          this.audio.gunCrack(0.12);
+          if (Math.random() < 0.62) {
+            this.damagePlayer(3);
+            this.particles.spawnDebris(eye, 2, new THREE.Color(0x992211), 0.5);
+          } else {
+            this.particles.spawnDebris(to, 2, new THREE.Color(0x888888), 0.5);
+            this.shake(0.05);
+          }
+        }
+      }
+    }
+
+    // --- Line-of-sight / evade logic (occlusion-aware + airborne) -----------
+    if (want > 0 && (active > 0 || this.heli)) {
       // Recompute occlusion-aware LOS at 4 Hz: a cop only "sees" the player when
       // nothing blocks the segment cop-eye → player-eye (building AABB test).
       this.losT -= dt;
       if (this.losT <= 0) {
         this.losT = 0.25;
-        this.copsSee = this.computeCopLOS(units);
+        this.copsSee = this.computeCopLOS(units) || heliSees;
       }
       let seen = this.copsSee;
       // Tunnels are safe: cops can't see you from the surface once underground.
@@ -1519,12 +1789,25 @@ export class HyperionGame implements World {
     const quat = new THREE.Quaternion().setFromEuler(new THREE.Euler(this.player.pitch, this.player.yaw, 0, 'YXZ'));
 
     if (this.drivingCar) {
-      const car = this.drivingCar;
-      const heading = new THREE.Vector3(Math.sin(car.yaw), 0, Math.cos(car.yaw));
-      const target = car.group.position.clone().addScaledVector(heading, -8.2).add(new THREE.Vector3(0, 3.4, 0));
-      this.camera.position.lerp(target, 1 - Math.exp(-5.5 * dt));
-      this.camera.lookAt(car.group.position.x, car.group.position.y + 1.5, car.group.position.z);
-      this.camera.fov = 72;
+      if (this.drivingCar.type === 'tank') {
+        // GTA-style gun-cam: orbit the hull with the aim, look at the turret.
+        const car = this.drivingCar;
+        const fwd = new THREE.Vector3(Math.sin(this.tankAimYaw), 0, Math.cos(this.tankAimYaw));
+        const target = car.group.position
+          .clone()
+          .addScaledVector(fwd, -10.5)
+          .add(new THREE.Vector3(0, 4.8 + this.tankAimPitch * 9, 0));
+        this.camera.position.lerp(target, 1 - Math.exp(-7 * dt));
+        this.camera.lookAt(car.group.position.x, car.group.position.y + 2.1, car.group.position.z);
+        this.camera.fov = 70;
+      } else {
+        const car = this.drivingCar;
+        const heading = new THREE.Vector3(Math.sin(car.yaw), 0, Math.cos(car.yaw));
+        const target = car.group.position.clone().addScaledVector(heading, -8.2).add(new THREE.Vector3(0, 3.4, 0));
+        this.camera.position.lerp(target, 1 - Math.exp(-5.5 * dt));
+        this.camera.lookAt(car.group.position.x, car.group.position.y + 1.5, car.group.position.z);
+        this.camera.fov = 72;
+      }
     } else if (this.thirdPerson) {
       const back = new THREE.Vector3(0, 0, 1).applyQuaternion(quat);
       const desired = eye.clone().addScaledVector(back, 4.6);
@@ -1597,7 +1880,15 @@ export class HyperionGame implements World {
       health: this.player.health,
       flying: this.player.flying,
       thirdPerson: this.thirdPerson,
-      driving: this.drivingCar ? { name: this.drivingCar.name, speed: Math.abs(this.drivingCar.speed) * 3.6 } : null,
+      driving: this.drivingCar
+        ? {
+            name: this.drivingCar.name,
+            speed: Math.abs(this.drivingCar.speed) * 3.6,
+            health: Math.max(0, this.drivingCar.health),
+            tank: this.drivingCar.type === 'tank',
+            reload: this.drivingCar.type === 'tank' ? 1 - Math.max(0, this.shellCd) / 2.6 : 0,
+          }
+        : null,
       slot: this.slot,
       hotbar: this.hotbar.map((s) => (s ? { ...s } : null)),
       inventory: this.inventory.map((s) => (s ? { ...s } : null)),
@@ -1628,6 +1919,7 @@ export class HyperionGame implements World {
       evading: this.stars >= 2 && this.evadeT > 0 ? Math.min(1, this.evadeT / 16) : 0,
       jetFuel: this.jetFuel,
       jetThrusting: this.jetThrusting,
+      heli: !!this.heli,
     };
     this.cb.onState(state);
     this.drawMinimap();
@@ -1692,6 +1984,20 @@ export class HyperionGame implements World {
       const c = car.group.position;
       ctx.fillStyle = car.state === 'wrecked' ? '#555' : car.state === 'burning' ? '#ff5030' : '#e8c34a';
       ctx.fillRect((c.x - p.x) - 1.6, (c.z - p.z) - 1.6, 3.2, 3.2);
+    }
+    // Air support: blinking red ring around the chopper
+    if (this.heli) {
+      const hp = this.heli.pos;
+      const blink = 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(performance.now() * 0.012));
+      ctx.strokeStyle = `rgba(255,70,50,${blink})`;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(hp.x - p.x, hp.z - p.z, 4.4, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = `rgba(255,120,90,${blink})`;
+      ctx.beginPath();
+      ctx.arc(hp.x - p.x, hp.z - p.z, 1.8, 0, Math.PI * 2);
+      ctx.fill();
     }
     // tnt
     for (const t of this.tnts) {
@@ -1818,12 +2124,35 @@ export class HyperionGame implements World {
     this.detachInput();
     document.removeEventListener('pointerlockchange', this.onLockChange);
     window.removeEventListener('resize', this.onResize);
+    if (this.heli) {
+      this.heli.dispose(this.scene);
+      this.heli = null;
+    }
+    for (const s of this.shells) {
+      this.scene.remove(s.mesh);
+    }
+    this.shells.length = 0;
+    for (const d of this.decals) {
+      this.scene.remove(d.mesh);
+      d.mesh.geometry.dispose();
+      (d.mesh.material as THREE.Material).dispose();
+    }
+    this.decals.length = 0;
+    for (const tr of this.tracers) {
+      this.scene.remove(tr.line);
+      tr.line.geometry.dispose();
+      (tr.line.material as THREE.Material).dispose();
+    }
+    this.tracers.length = 0;
+    this.shellGeo?.dispose();
+    this.shellMat?.dispose();
     this.weather.dispose();
     this.city.dispose();
     this.vehicles.dispose();
     this.npcs.dispose();
     this.particles.dispose();
     this.destruction.dispose();
+    this.audio.dispose();
     this.renderer.dispose();
   }
 }

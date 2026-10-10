@@ -8,7 +8,7 @@ import { World } from './types';
  * Traffic AI follows right-hand lanes on the road grid, brakes for cars/players,
  * turns at intersections. Cars are enterable, ignitable (flint & steel) and explode.
  */
-export type CarType = 'sedan' | 'sports' | 'suv' | 'taxi' | 'police';
+export type CarType = 'sedan' | 'sports' | 'suv' | 'taxi' | 'police' | 'tank';
 export type CarState = 'traffic' | 'parked' | 'player' | 'burning' | 'wrecked' | 'falling' | 'police';
 
 export interface Car {
@@ -36,6 +36,12 @@ export interface Car {
   flashT: number;
   stuckT: number;
   reverseT: number;
+  /** Tank-only: rotating turret group (child of group). */
+  turret?: THREE.Group;
+  /** Tank-only: barrel pitch pivot (child of turret). */
+  barrel?: THREE.Group;
+  /** Tank-only: muzzle anchor at the barrel tip (child of barrel). */
+  muzzle?: THREE.Object3D;
 }
 
 const DIR_VEC: Array<[number, number]> = [
@@ -70,7 +76,8 @@ export class Vehicles {
     return g;
   }
 
-  private buildMesh(type: CarType, color: number): { group: THREE.Group; wheels: THREE.Mesh[]; lightbar: THREE.Mesh[] } {
+  private buildMesh(type: CarType, color: number): { group: THREE.Group; wheels: THREE.Mesh[]; lightbar: THREE.Mesh[]; turret?: THREE.Group; barrel?: THREE.Group; muzzle?: THREE.Object3D } {
+    if (type === 'tank') return this.buildTank();
     const group = new THREE.Group();
     const paint = new THREE.MeshStandardMaterial({ color, roughness: 0.28, metalness: 0.65 });
     const dark = new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.55, metalness: 0.3 });
@@ -167,6 +174,94 @@ export class Vehicles {
     return { group, wheels, lightbar };
   }
 
+  /** Rhino Tank: smooth olive hull, rotating turret + barrel, treads, road wheels. */
+  private buildTank(): { group: THREE.Group; wheels: THREE.Mesh[]; lightbar: THREE.Mesh[]; turret: THREE.Group; barrel: THREE.Group; muzzle: THREE.Object3D } {
+    const group = new THREE.Group();
+    const olive = new THREE.MeshStandardMaterial({ color: 0x4d5a33, roughness: 0.62, metalness: 0.38 });
+    const oliveDark = new THREE.MeshStandardMaterial({ color: 0x39441f, roughness: 0.7, metalness: 0.3 });
+    const dark = new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.6, metalness: 0.35 });
+    const gun = new THREE.MeshStandardMaterial({ color: 0x2a2d26, roughness: 0.45, metalness: 0.7 });
+
+    // Hull — low, wide, rounded
+    const hullGeo = this.bodyGeo(2.5, 0.82, 5.5, 0.14);
+    const hull = new THREE.Mesh(hullGeo, olive);
+    hull.position.y = 0.72;
+    hull.castShadow = true;
+    group.add(hull);
+    // Glacis (sloped front plate)
+    const glacisGeo = this.bodyGeo(2.3, 0.5, 1.5, 0.1);
+    const glacis = new THREE.Mesh(glacisGeo, oliveDark);
+    glacis.position.set(0, 0.95, 2.15);
+    glacis.rotation.x = -0.42;
+    group.add(glacis);
+    // Engine deck grating
+    const deckGeo = this.bodyGeo(2.2, 0.08, 1.4, 0.03);
+    const deck = new THREE.Mesh(deckGeo, dark);
+    deck.position.set(0, 1.15, -1.9);
+    group.add(deck);
+
+    // Treads: two dark boxes hugging the hull sides
+    const treadGeo = this.bodyGeo(0.58, 0.62, 5.3, 0.08);
+    for (const sx of [-1.16, 1.16]) {
+      const tread = new THREE.Mesh(treadGeo, dark);
+      tread.position.set(sx, 0.42, 0);
+      tread.castShadow = true;
+      group.add(tread);
+    }
+    // Road wheels (spinning, partially visible outside the treads)
+    const wheelGeo = new THREE.CylinderGeometry(0.3, 0.3, 0.2, 12);
+    wheelGeo.rotateZ(Math.PI / 2);
+    const hubGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.22, 8);
+    hubGeo.rotateZ(Math.PI / 2);
+    this.geometries.push(wheelGeo, hubGeo);
+    const wheels: THREE.Mesh[] = [];
+    for (const sx of [-1.47, 1.47]) {
+      for (const wz of [1.75, 0.55, -0.65, -1.85]) {
+        const wm = new THREE.Mesh(wheelGeo, oliveDark);
+        const hub = new THREE.Mesh(hubGeo, dark);
+        wm.add(hub);
+        wm.position.set(sx, 0.36, wz);
+        group.add(wm);
+        wheels.push(wm);
+      }
+    }
+
+    // Turret (rotates with aim) + barrel pivot + muzzle anchor
+    const turret = new THREE.Group();
+    turret.position.set(0, 1.18, -0.25);
+    const turGeo = new THREE.CylinderGeometry(0.92, 1.12, 0.52, 18);
+    const tur = new THREE.Mesh(turGeo, olive);
+    tur.castShadow = true;
+    const hatchGeo = new THREE.SphereGeometry(0.3, 10, 8, 0, Math.PI * 2, 0, Math.PI * 0.55);
+    const hatch = new THREE.Mesh(hatchGeo, oliveDark);
+    hatch.position.set(-0.25, 0.24, -0.3);
+    const mantletGeo = this.bodyGeo(0.72, 0.42, 0.5, 0.08);
+    const mantlet = new THREE.Mesh(mantletGeo, oliveDark);
+    mantlet.position.set(0, -0.02, 1.0);
+    turret.add(tur, hatch, mantlet);
+    this.geometries.push(turGeo, hatchGeo);
+
+    const barrel = new THREE.Group();
+    const barrelGeo = new THREE.CylinderGeometry(0.085, 0.105, 3.7, 12);
+    barrelGeo.rotateX(Math.PI / 2);
+    const barrelMesh = new THREE.Mesh(barrelGeo, gun);
+    barrelMesh.position.z = 1.95;
+    barrelMesh.castShadow = true;
+    const brakeGeo = new THREE.CylinderGeometry(0.14, 0.14, 0.42, 12);
+    brakeGeo.rotateX(Math.PI / 2);
+    const brake = new THREE.Mesh(brakeGeo, gun);
+    brake.position.z = 3.55;
+    const muzzle = new THREE.Object3D();
+    muzzle.position.set(0, 0, 3.85);
+    barrel.add(barrelMesh, brake, muzzle);
+    barrel.position.set(0, 0, 0.9);
+    turret.add(barrel);
+    this.geometries.push(barrelGeo, brakeGeo);
+    group.add(turret);
+
+    return { group, wheels, lightbar: [], turret, barrel, muzzle };
+  }
+
   spawnTraffic(n: number): void {
     for (let i = 0; i < n; i++) this.spawnCar('traffic');
   }
@@ -206,8 +301,8 @@ export class Vehicles {
     const palette = [0xc23b22, 0x22262b, 0xd8d8dc, 0x8f9aa4, 0xb7791f, 0x37545c, 0x6b2f26, 0xe0dcd2, 0x4a5d23];
     const taxiColor = 0xf7c531;
     const policeColor = 0xe8e8ec;
-    const color = type === 'taxi' ? taxiColor : type === 'police' ? policeColor : palette[Math.floor(this.rng() * palette.length)];
-    const { group, wheels, lightbar } = this.buildMesh(type, color);
+    const color = type === 'taxi' ? taxiColor : type === 'police' ? policeColor : type === 'tank' ? 0x4d5a33 : palette[Math.floor(this.rng() * palette.length)];
+    const { group, wheels, lightbar, turret, barrel, muzzle } = this.buildMesh(type, color);
     this.scene.add(group);
     const car: Car = {
       id: this.nextId++,
@@ -222,7 +317,7 @@ export class Vehicles {
       lane: 0,
       yaw: 0,
       yawVis: 0,
-      health: 100,
+      health: type === 'tank' ? 400 : 100,
       burnT: 0,
       honkT: 0,
       blockedT: 0,
@@ -237,12 +332,17 @@ export class Vehicles {
               ? 'Comet Sports'
               : type === 'suv'
                 ? 'Cavalcade SUV'
-                : 'Washington Sedan',
+                : type === 'tank'
+                  ? 'Rhino Tank'
+                  : 'Washington Sedan',
       smokeAcc: 0,
       lightbar,
       flashT: 0,
       stuckT: 0,
       reverseT: 0,
+      turret,
+      barrel,
+      muzzle,
     };
     this.cars.push(car);
     return car;
@@ -296,6 +396,37 @@ export class Vehicles {
       return car;
     }
     return null;
+  }
+
+  /** Deliver the Rhino Tank on a road point near the player (chain tier-2 reward). */
+  spawnTank(playerPos: THREE.Vector3): Car {
+    const car = this.makeCar('tank', 'parked');
+    // Prefer the nearest road centerline point; fall back beside the player.
+    const roadX = Math.round(playerPos.x / BLOCK) * BLOCK;
+    const roadZ = Math.round(playerPos.z / BLOCK) * BLOCK;
+    const cands: THREE.Vector3[] = [
+      new THREE.Vector3(roadX + 2.4, 0, playerPos.z),
+      new THREE.Vector3(roadX - 2.4, 0, playerPos.z),
+      new THREE.Vector3(playerPos.x, 0, roadZ + 2.4),
+      new THREE.Vector3(playerPos.x, 0, roadZ - 2.4),
+      new THREE.Vector3(playerPos.x + 5, 0, playerPos.z + 3),
+    ];
+    let best = cands[cands.length - 1];
+    let bd = Infinity;
+    for (const c of cands) {
+      if (Math.abs(c.x) > GRID_HALF * BLOCK - 4 || Math.abs(c.z) > GRID_HALF * BLOCK - 4) continue;
+      const d = c.distanceTo(playerPos);
+      if (d < bd) {
+        bd = d;
+        best = c;
+      }
+    }
+    car.group.position.copy(best);
+    const toP = playerPos.clone().sub(best);
+    car.yaw = Math.atan2(toP.x, toP.z);
+    car.yawVis = car.yaw;
+    car.group.rotation.y = car.yaw;
+    return car;
   }
 
   /** Remove the farthest pursuit units beyond `keep`. */
@@ -463,61 +594,73 @@ export class Vehicles {
 
   /** Drive as player: throttle/brake/steer arcade physics. */
   drivePlayer(car: Car, dt: number, throttle: number, steer: number, handbrake: boolean, world: World): void {
-    const accel = car.type === 'sports' ? 11 : car.type === 'suv' ? 7.5 : 8.5;
-    const maxSpeed = car.type === 'sports' ? 34 : car.type === 'suv' ? 24 : 27;
+    const tank = car.type === 'tank';
+    const accel = tank ? 5.5 : car.type === 'sports' ? 11 : car.type === 'suv' ? 7.5 : 8.5;
+    const maxSpeed = tank ? 16 : car.type === 'sports' ? 34 : car.type === 'suv' ? 24 : 27;
+    const maxRev = tank ? -5 : -9;
     if (throttle > 0) car.speed += accel * throttle * dt;
     else if (throttle < 0) car.speed -= (car.speed > 0 ? 26 : 10) * dt;
-    car.speed = Math.max(-9, Math.min(maxSpeed, car.speed));
-    const drag = handbrake ? 3.4 : 0.55;
+    car.speed = Math.max(maxRev, Math.min(maxSpeed, car.speed));
+    const drag = handbrake ? 3.4 : tank ? 0.9 : 0.55;
     car.speed -= car.speed * drag * dt * Math.abs(car.speed) * 0.012;
-    if (Math.abs(throttle) < 0.05) car.speed -= Math.sign(car.speed) * 4.2 * dt;
+    if (Math.abs(throttle) < 0.05) car.speed -= Math.sign(car.speed) * (tank ? 5.5 : 4.2) * dt;
 
-    const speedFactor = Math.min(1, Math.abs(car.speed) / 14);
-    car.yaw += steer * 1.9 * speedFactor * dt * Math.sign(car.speed || 1) * (handbrake ? 1.5 : 1);
+    const speedFactor = Math.min(1, Math.abs(car.speed) / (tank ? 11 : 14));
+    car.yaw += steer * (tank ? 1.05 : 1.9) * speedFactor * dt * Math.sign(car.speed || 1) * (handbrake ? 1.5 : 1);
     const heading = new THREE.Vector3(Math.sin(car.yaw), 0, Math.cos(car.yaw));
     const next = car.group.position.clone().addScaledVector(heading, car.speed * dt);
 
     // Collisions with buildings (circle vs AABB).
-    const r = 1.35;
+    const r = tank ? 1.95 : 1.35;
     const probe = next.clone();
     probe.y = 1;
     const before = probe.clone();
-    world.resolveCircleXZ(probe, r, 0.2, 1.6);
+    world.resolveCircleXZ(probe, r, 0.2, tank ? 1.8 : 1.6);
     if (probe.distanceToSquared(before) > 1e-6) {
       // Hit something solid
       if (Math.abs(car.speed) > 9) {
-        car.health -= Math.abs(car.speed) * 1.1;
+        car.health -= Math.abs(car.speed) * (tank ? 0.35 : 1.1);
         world.audio.thud(0.1);
-        world.spawnDebris(probe, 4, new THREE.Color(0x888888), 0.7);
-        world.shake(Math.min(0.5, Math.abs(car.speed) * 0.02));
+        world.spawnDebris(probe, tank ? 2 : 4, new THREE.Color(0x888888), 0.7);
+        world.shake(Math.min(0.5, Math.abs(car.speed) * (tank ? 0.012 : 0.02)));
       }
-      car.speed *= -0.18;
+      car.speed *= tank ? -0.08 : -0.18;
     } else {
       car.group.position.copy(next);
     }
 
-    // Car-vs-car
+    // Car-vs-car (the Rhino crushes traffic instead of bouncing)
     for (const o of this.cars) {
       if (o === car) continue;
       const d = o.group.position.distanceTo(car.group.position);
-      if (d < 3.4 && d > 0.01) {
-        const push = car.group.position.clone().sub(o.group.position).normalize().multiplyScalar((3.4 - d) * 0.5);
+      const hitR = tank ? 3.9 : 3.4;
+      if (d < hitR && d > 0.01) {
+        const push = car.group.position.clone().sub(o.group.position).normalize().multiplyScalar((hitR - d) * (tank ? 0.78 : 0.5));
         car.group.position.add(push);
         o.group.position.sub(push);
-        if (Math.abs(car.speed) > 10) {
+        if (tank) {
+          if (Math.abs(car.speed) > 4 && o.state !== 'wrecked' && o.state !== 'falling') {
+            o.health = 0;
+            o.burnT = Math.min(o.burnT > 0 ? o.burnT : 99, 1.1);
+            this.ignite(o);
+            world.audio.thud(0.15);
+            world.shake(0.22);
+            car.speed *= 0.93;
+          }
+        } else if (Math.abs(car.speed) > 10) {
           o.health -= 24;
           car.health -= 12;
           world.audio.thud(0.2);
           if (o.state === 'traffic') o.state = 'parked';
           if (o.health <= 0 && o.state !== 'burning' && o.state !== 'wrecked') this.ignite(o);
         }
-        car.speed *= 0.72;
+        if (!tank) car.speed *= 0.72;
       }
     }
 
     // Run over NPCs
     if (Math.abs(car.speed) > 5) {
-      this.onRagdollNPCs?.(car.group.position, 1.9);
+      this.onRagdollNPCs?.(car.group.position, tank ? 2.4 : 1.9);
     }
 
     car.group.rotation.y = car.yaw;
