@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { SkinSource } from './skin';
 
 /** Shared types for the Hyperion engine. Avoids circular imports between actor modules. */
 
@@ -49,18 +50,34 @@ export type ItemId =
   | 'flint'
   | 'pearl'
   | 'apple'
-  | 'jetpack';
+  | 'jetpack'
+  | 'rocket'
+  | 'bat';
 
 export interface ItemStack {
   id: ItemId;
   count: number;
 }
 
+export type GameMode = 'survival' | 'creative';
+
 export interface HudState {
   playing: boolean;
   health: number;
+  maxHealth: number;
   flying: boolean;
   thirdPerson: boolean;
+  mode: GameMode;
+  /** Golden transform flash 0..1 when switching modes (decays fast). */
+  modeFlash: number;
+  /** NPC dialogue bubble (E near an NPC): auto-fades. */
+  dialogue: null | { name: string; text: string; kind: 'civ' | 'gang' | 'boss' | 'cop' };
+  /** Boss health bar when the boss is engaged. */
+  boss: null | { name: string; hp: number; maxHp: number };
+  /** Player level (XP bar numeric). */
+  level: number;
+  /** Active cutscene overlay (intro flyover / boss reveal). */
+  cutscene: null | { title: string; sub: string };
   driving: null | {
     name: string;
     speed: number;
@@ -136,13 +153,22 @@ export interface HudState {
   airBest: number;
   /** Landing pop: fires once per landing (key increments) with the scored jump. */
   airPop: { sec: number; score: number; record: boolean; key: number } | null;
+  /** Live character skin info (inventory skin picker + status line). */
+  skin: { source: SkinSource; name: string | null; model: 'classic' | 'slim' };
 }
 
 export const HUD_INITIAL: HudState = {
   playing: false,
   health: 20,
+  maxHealth: 20,
   flying: false,
   thirdPerson: false,
+  mode: 'survival',
+  modeFlash: 0,
+  dialogue: null,
+  boss: null,
+  level: 0,
+  cutscene: null,
   driving: null,
   slot: 0,
   hotbar: new Array(9).fill(null),
@@ -176,6 +202,7 @@ export const HUD_INITIAL: HudState = {
   air: 0,
   airBest: 0,
   airPop: null,
+  skin: { source: 'default', name: null, model: 'classic' },
 };
 
 /**

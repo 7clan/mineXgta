@@ -61,12 +61,51 @@ function vGrad(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: 
   g.fillStyle = gr; g.fillRect(x, y, w, h);
 }
 
-/** Warm lit-window pane (#ffd27f family) painted onto an emissive map. */
-function litPane(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, alpha: number): void {
+/** Warm lit-window pane (#ffd27f family, or an override color) painted onto an emissive map. */
+function litPane(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, alpha: number, color?: [string, string]): void {
+  const [top, bottom] = color ?? ['255,210,127', '255,178,90'];
   const gr = g.createLinearGradient(0, y, 0, y + h);
-  gr.addColorStop(0, `rgba(255,210,127,${alpha})`);
-  gr.addColorStop(1, `rgba(255,178,90,${alpha * 0.7})`);
+  gr.addColorStop(0, `rgba(${top},${alpha})`);
+  gr.addColorStop(1, `rgba(${bottom},${alpha * 0.7})`);
   g.fillStyle = gr; g.fillRect(x, y, w, h);
+}
+
+/** Convert a grayscale height canvas into a tangent-space normal map texture.
+ *  Wraps at the edges so tiles stay seamless. `strength` scales the bump slope. */
+function heightToNormal(c: HTMLCanvasElement, strength: number): THREE.CanvasTexture {
+  const w = c.width, h = c.height;
+  const src = ctx2d(c).getImageData(0, 0, w, h).data;
+  const out = makeCanvas(w, h);
+  const og = ctx2d(out);
+  const img = og.createImageData(w, h);
+  const lum = (i: number) => (src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114) / 255;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const xl = lum(y * w + ((x - 1 + w) % w));
+      const xr = lum(y * w + ((x + 1) % w));
+      const yu = lum(((y - 1 + h) % h) * w + x);
+      const yd = lum(((y + 1) % h) * w + x);
+      const dx = (xl - xr) * strength;
+      const dy = (yu - yd) * strength;
+      const inv = 1 / Math.sqrt(dx * dx + dy * dy + 1);
+      img.data[i * 4] = (dx * inv * 0.5 + 0.5) * 255;
+      img.data[i * 4 + 1] = (dy * inv * 0.5 + 0.5) * 255;
+      img.data[i * 4 + 2] = (inv * 0.5 + 0.5) * 255;
+      img.data[i * 4 + 3] = 255;
+    }
+  }
+  og.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(out);
+  t.colorSpace = THREE.NoColorSpace;
+  t.wrapS = THREE.RepeatWrapping;
+  t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+
+/** Noise-speckle a grayscale height canvas around a base level. */
+function heightNoise(g: CanvasRenderingContext2D, rnd: RNG, w: number, h: number, count: number, levels: string[]): void {
+  speckle(g, rnd, w, h, count, levels, 2);
 }
 
 /** Ellipse blob drawn with wrapped copies so tiles stay seamless. */
@@ -106,75 +145,161 @@ function pixelTexture(c: HTMLCanvasElement): THREE.CanvasTexture {
   return t;
 }
 
-/** Facade material pair: color map + emissive map of the lit windows. */
+/** Facade material set: color map (AO baked in), normal map, emissive map of lit windows. */
 export interface FacadeStyle {
   map: THREE.CanvasTexture;
+  normalMap: THREE.CanvasTexture;
   emissiveMap: THREE.CanvasTexture;
 }
 
+/** Height levels used by the facade normal maps (grayscale strings). */
+const H_WALL = '#808080', H_RAISE = '#a6a6a6', H_RECESS = '#4a4a4a', H_GLASS = '#303030', H_DEEP = '#242424';
+
+/** Baked AO: soft dark gradient inside a window reveal / under a slab. */
+function aoShadow(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, alpha: number): void {
+  const gr = g.createLinearGradient(0, y, 0, y + h);
+  gr.addColorStop(0, `rgba(0,0,0,${alpha})`);
+  gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = gr; g.fillRect(x, y, w, h);
+}
+
 /**
- * Procedural 3m x 3m facade tile (color map + emissive map).
- * The tile repeats over a whole building; `seed` varies the look per building.
+ * Procedural 3m x 3m facade tile (256px): color map with baked AO, normal map
+ * from a height canvas (recessed windows, proud slabs/sills — pops under raking
+ * golden-hour light), and an emissive map of lit windows. The tile repeats over
+ * a whole building; `seed` varies the look per building.
  */
 export function makeFacadeTexture(style: 'concrete' | 'glass' | 'brick' | 'white', seed: number): FacadeStyle {
-  const S = 128;
+  const S = 256;
   const rnd = mulberry32(seed);
-  const c = makeCanvas(S, S), ec = makeCanvas(S, S);
-  const g = ctx2d(c), eg = ctx2d(ec);
+  const c = makeCanvas(S, S), ec = makeCanvas(S, S), hc = makeCanvas(S, S);
+  const g = ctx2d(c), eg = ctx2d(ec), hg = ctx2d(hc);
   px(eg, 0, 0, S, S, '#000000');
+  px(hg, 0, 0, S, S, H_WALL);
   const lit = (x: number, y: number, w: number, h: number, p: number): void => {
-    if (rnd() < p) litPane(eg, x, y, w, h, 0.4 + rnd() * 0.55);
+    if (rnd() < p) {
+      if (rnd() < 0.18) litPane(eg, x, y, w, h, 0.3 + rnd() * 0.3, ['207,226,255', '170,196,236']); // cool office light
+      else litPane(eg, x, y, w, h, 0.4 + rnd() * 0.55);
+    }
+  };
+  // Sky-reflection glass with a diagonal sheen streak.
+  const glassPane = (x: number, y: number, w: number, h: number, tint: string): void => {
+    vGrad(g, x, y, w, h, tint, '#1a2026');
+    g.globalAlpha = 0.10;
+    g.fillStyle = '#bcd3e8';
+    g.beginPath();
+    g.moveTo(x + w * 0.12, y); g.lineTo(x + w * 0.38, y); g.lineTo(x + w * 0.62, y + h); g.lineTo(x + w * 0.36, y + h);
+    g.closePath(); g.fill();
+    g.globalAlpha = 1;
+    px(hg, x, y, w, h, H_GLASS);
   };
 
   if (style === 'concrete') {
-    vGrad(g, 0, 0, S, S, '#b9b1a3', '#a29a8c');
-    speckle(g, rnd, S, S, 520, ['#c4bcae', '#aaa294', '#948c7e', '#beb6a8', '#a8a091']);
-    px(g, 0, 0, S, 5, '#c9c2b4'); px(g, 0, 5, S, 2, '#8d8577'); // floor ledges (slab lines)
-    px(g, 0, 121, S, 3, '#b5ada0'); px(g, 0, 124, S, 4, '#877f72');
-    const wx = 36, wy = 26, ww = 56, wh = 74; // punched window
-    px(g, wx - 3, wy - 3, ww + 6, wh + 6, '#7e776b');
-    vGrad(g, wx, wy, ww, wh, '#7e8b98', '#242b32'); // glass with sky reflection
-    g.globalAlpha = 0.09; px(g, wx + 6, wy + 4, 14, wh - 10, '#ffffff'); g.globalAlpha = 1;
-    px(g, wx + ww / 2 - 1, wy, 2, wh, '#4d5a66'); // center mullion
-    px(g, wx - 5, wy + wh, ww + 10, 4, '#cfc8ba'); px(g, wx - 5, wy + wh + 4, ww + 10, 2, '#877f72'); // sill
-    lit(wx, wy, ww, wh, 0.35);
+    vGrad(g, 0, 0, S, S, '#bab2a4', '#a39b8d');
+    speckle(g, rnd, S, S, 1500, ['#c4bcae', '#aaa294', '#948c7e', '#beb6a8', '#a8a091']);
+    // Floor slab band (proud) + shadow gap (recessed) at the tile top.
+    px(g, 0, 0, S, 8, '#cbc4b6'); px(g, 0, 8, S, 6, '#8b8375');
+    px(hg, 0, 0, S, 8, H_RAISE); px(hg, 0, 8, S, 6, H_RECESS);
+    aoShadow(g, 0, 8, S, 26, 0.16);
+    const wx = 72, wy = 56, ww = 112, wh = 132; // punched window with deep reveal
+    px(g, wx - 10, wy - 10, ww + 20, wh + 20, '#787165'); // reveal wall
+    px(hg, wx - 10, wy - 10, ww + 20, wh + 20, H_RECESS);
+    glassPane(wx, wy, ww, wh, '#5e6d7d');
+    // Baked AO inside the reveal + glass edge shading.
+    aoShadow(g, wx, wy, ww, 22, 0.30); aoShadow(g, wx, wy + wh - 14, ww, 14, 0.18);
+    g.globalAlpha = 0.08; px(g, wx - 4, wy + 4, 10, wh - 8, '#ffffff'); g.globalAlpha = 1;
+    px(g, wx + ww / 2 - 2, wy, 4, wh, '#46525e'); // center mullion
+    px(g, wx, wy + wh / 2 - 2, ww, 4, '#46525e');
+    px(hg, wx + ww / 2 - 2, wy, 4, wh, '#606060');
+    // Sill (proud) with its own cast shadow.
+    px(g, wx - 14, wy + wh + 10, ww + 28, 10, '#cfc8ba');
+    px(g, wx - 14, wy + wh + 20, ww + 28, 5, '#877f72');
+    px(hg, wx - 14, wy + wh + 10, ww + 28, 10, H_RAISE);
+    aoShadow(g, wx - 10, wy + wh + 20, ww + 20, 16, 0.22);
+    lit(wx + 4, wy + 4, ww / 2 - 8, wh / 2 - 8, 0.4);
+    lit(wx + ww / 2 + 4, wy + 4, ww / 2 - 8, wh / 2 - 8, 0.3);
+    lit(wx + 4, wy + wh / 2 + 4, ww / 2 - 8, wh / 2 - 8, 0.35);
+    lit(wx + ww / 2 + 4, wy + wh / 2 + 4, ww / 2 - 8, wh / 2 - 8, 0.4);
   } else if (style === 'glass') {
-    px(g, 0, 0, S, S, '#20242a'); // charcoal mullion base
-    for (let i = 0; i < 2; i++)
-      for (let j = 0; j < 2; j++) {
-        const x = 4 + i * 62, y = 4 + j * 62, w = 58, h = 58;
-        vGrad(g, x, y, w, h, '#48596b', '#161a20'); // glossy pane
-        g.globalAlpha = 0.14; px(g, x, y, w, 10, '#9fb4c8'); g.globalAlpha = 1; // sky sheen
-        px(g, x, y, w, 1, '#0c0e11'); px(g, x, y, 1, h, '#5c7086');
-        lit(x + 2, y + 2, w - 4, h - 4, 0.22);
-      }
+    px(g, 0, 0, S, S, '#22262c'); // anodized mullion base
+    px(hg, 0, 0, S, S, H_RAISE);
+    const panes: Array<[number, number]> = [[8, 8], [136, 8], [8, 136], [136, 136]];
+    const tints = ['#44566a', '#3d5266', '#4a5d72', '#415468'];
+    panes.forEach(([x, y], i) => {
+      const w = 112, h = 112;
+      glassPane(x, y, w, h, tints[(rnd() * tints.length) | 0] ?? tints[i % tints.length]);
+      // sky sheen band across the top of each pane
+      g.globalAlpha = 0.13; px(g, x, y, w, 16, '#9fb4c8'); g.globalAlpha = 1;
+      // thin transom line
+      px(g, x, y + h * 0.42, w, 3, '#2c3238');
+      px(hg, x, y + h * 0.42, w, 3, '#6a6a6a');
+      // per-pane edge highlight (left/top lighter, right/bottom darker)
+      px(g, x, y, w, 2, '#0c0e11'); px(g, x, y, 2, h, '#5c7086');
+      lit(x + 5, y + 5, w - 10, h * 0.42 - 10, 0.2);
+      lit(x + 5, y + h * 0.42 + 6, w - 10, h * 0.58 - 12, 0.24);
+    });
+    // corner bolt dots on mullion crossings
+    for (const [mx, my] of [[0, 0], [128, 0], [0, 128], [128, 128]] as Array<[number, number]>) {
+      px(g, mx + 2, my + 2, 3, 3, '#3a4148');
+    }
   } else if (style === 'brick') {
     px(g, 0, 0, S, S, '#6a564a'); // mortar
+    px(hg, 0, 0, S, S, H_RECESS);
     const pal = ['#9a4a31', '#8b4229', '#a4523a', '#7f3c27', '#96503a', '#8f4630'];
     for (let row = 0; row < 16; row++) {
-      const y = row * 8, off = (row % 2) * 8;
-      for (let x = -16; x < S; x += 16)
-        px(g, x + off + 1, y + 1, 14, 6, pal[(rnd() * pal.length) | 0]);
+      const y = row * 16, off = (row % 2) * 16;
+      for (let x = -32; x < S; x += 32) {
+        const col = pal[(rnd() * pal.length) | 0];
+        px(g, x + off + 2, y + 2, 28, 12, col);
+        px(g, x + off + 2, y + 2, 28, 2, 'rgba(255,255,255,0.07)'); // top-of-brick light
+        px(g, x + off + 2, y + 11, 28, 3, 'rgba(0,0,0,0.18)'); // bottom shadow
+        px(hg, x + off + 2, y + 2, 28, 12, rnd() < 0.5 ? '#8c8c8c' : '#828282');
+      }
     }
-    speckle(g, rnd, S, S, 260, ['#83402c', '#a5573e', '#6e564a']);
-    const wx = 42, wy = 34, ww = 44, wh = 60; // smaller window, light frame
-    px(g, wx - 3, wy - 3, ww + 6, wh + 6, '#d9d2c2');
-    vGrad(g, wx, wy, ww, wh, '#6f7d8a', '#262f38');
-    px(g, wx + ww / 2 - 1, wy, 2, wh, '#c9c2b2');
-    px(g, wx - 5, wy + wh + 3, ww + 10, 4, '#d9d2c2'); // sill
-    lit(wx, wy, ww, wh, 0.4);
-  } else { // white
-    vGrad(g, 0, 0, S, S, '#eeeee9', '#dededa');
-    for (let x = 0; x < S; x += 32) px(g, x, 0, 1, S, '#cfcfca'); // panel seams
-    px(g, 0, 118, S, 2, '#c6c6c1'); px(g, 0, 120, S, 8, '#d6d6d1');
-    const bx = 8, by = 44, bw = 112, bh = 48; // wide window band
-    px(g, bx - 2, by - 2, bw + 4, bh + 4, '#c9c9c4');
-    vGrad(g, bx, by, bw, bh, '#57646e', '#20262c');
-    g.globalAlpha = 0.12; px(g, bx, by, bw, 10, '#ffffff'); g.globalAlpha = 1;
-    for (let x = bx + 16; x < bx + bw; x += 16) px(g, x - 1, by, 2, bh, '#b0b0ab');
-    for (let x = bx; x < bx + bw; x += 16) lit(x + 2, by + 2, 12, bh - 4, 0.3);
+    speckle(g, rnd, S, S, 700, ['#83402c', '#a5573e', '#6e564a']);
+    const wx = 84, wy = 68, ww = 88, wh = 120; // smaller window, light stone frame
+    px(g, wx - 8, wy - 8, ww + 16, wh + 16, '#d5cebe'); // stone surround
+    px(hg, wx - 8, wy - 8, ww + 16, wh + 16, H_RAISE);
+    // lintel keystones
+    px(g, wx - 12, wy - 16, ww + 24, 10, '#c7c0b0');
+    px(hg, wx - 12, wy - 16, ww + 24, 10, H_RAISE);
+    glassPane(wx, wy, ww, wh, '#5d6c78');
+    aoShadow(g, wx, wy, ww, 18, 0.28);
+    px(g, wx + ww / 2 - 2, wy, 4, wh, '#b8b1a1');
+    px(hg, wx + ww / 2 - 2, wy, 4, wh, '#606060');
+    px(g, wx - 12, wy + wh + 8, ww + 24, 9, '#d5cebe'); // stone sill
+    px(hg, wx - 12, wy + wh + 8, ww + 24, 9, H_RAISE);
+    aoShadow(g, wx - 8, wy + wh + 17, ww + 16, 14, 0.2);
+    lit(wx + 4, wy + 4, ww / 2 - 8, wh - 8, 0.42);
+    lit(wx + ww / 2 + 4, wy + 4, ww / 2 - 8, wh - 8, 0.38);
+  } else { // white — modern panel with a shaded window band + louver row
+    vGrad(g, 0, 0, S, S, '#efefe9', '#dededa');
+    for (let x = 0; x < S; x += 64) px(g, x, 0, 2, S, '#cfcfca'); // panel seams
+    for (let y = 0; y < S; y += 128) px(g, 0, y, S, 2, '#d2d2cd');
+    px(hg, 0, 0, S, S, H_WALL);
+    for (let x = 0; x < S; x += 64) px(hg, x, 0, 2, S, H_RECESS);
+    // Louver row (sun shades) above the window band
+    for (let x = 12; x < S - 12; x += 22) {
+      px(g, x, 66, 18, 7, '#dcdcd7'); px(g, x, 73, 18, 3, '#9d9d98');
+      px(hg, x, 66, 18, 7, H_RAISE); px(hg, x, 73, 18, 3, H_RECESS);
+    }
+    aoShadow(g, 12, 80, S - 24, 14, 0.22);
+    // Window band, recessed behind the frame
+    const bx = 16, by = 92, bw = S - 32, bh = 96;
+    px(g, bx - 6, by - 6, bw + 12, bh + 12, '#c6c6c1');
+    px(hg, bx - 6, by - 6, bw + 12, bh + 12, H_RECESS);
+    glassPane(bx, by, bw, bh, '#4a5862');
+    aoShadow(g, bx, by, bw, 16, 0.26);
+    for (let x = bx + 22; x < bx + bw; x += 22) {
+      px(g, x - 1, by, 3, bh, '#b0b0ab');
+      px(hg, x - 1, by, 3, bh, '#686868');
+    }
+    for (let x = bx; x < bx + bw; x += 22) lit(x + 3, by + 3, 15, bh - 6, 0.3);
+    // Base shadow gradient for depth
+    aoShadow(g, 0, S - 20, S, 20, 0.1);
   }
-  return { map: toTexture(c), emissiveMap: toTexture(ec) };
+  heightNoise(hg, rnd, S, S, 260, ['#767676', '#8a8a8a']);
+  return { map: toTexture(c), normalMap: heightToNormal(hc, 2.1), emissiveMap: toTexture(ec) };
 }
 
 /** Gravel/tar roof tile: dark gray noise, lighter worn patches, occasional vent. */
@@ -236,6 +361,130 @@ export function makeGrassTile(): HTMLCanvasElement {
   for (let i = 0; i < 8; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 14 + rnd() * 26, 'rgba(96,142,58,0.28)');
   for (let i = 0; i < 500; i++) px(g, (rnd() * S) | 0, (rnd() * S) | 0, 1, 2, '#6ea84a'); // blades
   return c;
+}
+
+/** Storefront band module (3m wide x 4.2m tall): pilaster frame, fascia sign,
+ *  striped awning, big display glass with warm interior, kick base, side door.
+ *  Variant picks the paint + neon sign color. Returns map/normalMap/emissiveMap.
+ */
+export function makeStorefrontTexture(variant: 0 | 1 | 2): FacadeStyle {
+  const W = 256, H = 384;
+  const rnd = mulberry32(0x57ab + variant * 131);
+  const c = makeCanvas(W, H), ec = makeCanvas(W, H), hc = makeCanvas(W, H);
+  const g = ctx2d(c), eg = ctx2d(ec), hg = ctx2d(hc);
+  px(eg, 0, 0, W, H, '#000000');
+  px(hg, 0, 0, W, H, H_WALL);
+  const THEMES = [
+    { paint: '#274a38', trim: '#c9a86a', neon: '72,229,255', awnA: '#7a2020', awnB: '#e8e0cc' },
+    { paint: '#5a2430', trim: '#d9c9a8', neon: '255,120,200', awnA: '#1f3a5a', awnB: '#e8e0cc' },
+    { paint: '#2e2a26', trim: '#b8a888', neon: '190,255,110', awnA: '#3a5a1f', awnB: '#e8e0cc' },
+  ][variant];
+  const L = 26, R = W - 26; // pilaster inner edges
+
+  // Pilasters (proud) with subtle vertical shading
+  for (const x of [0, W - 26]) {
+    vGrad(g, x, 0, 26, H, THEMES.paint, '#1c1a17');
+    px(g, x + 2, 0, 4, H, 'rgba(255,255,255,0.10)');
+    px(g, x + 20, 0, 6, H, 'rgba(0,0,0,0.25)');
+    px(hg, x, 0, 26, H, H_RAISE);
+  }
+  // Fascia sign band (proud) with neon strip
+  px(g, L, 8, R - L, 52, THEMES.paint);
+  px(g, L, 8, R - L, 4, THEMES.trim);
+  px(g, L, 52, R - L, 6, 'rgba(0,0,0,0.35)');
+  px(hg, L, 8, R - L, 52, H_RAISE);
+  // fake sign glyphs: light box + letter dashes
+  px(eg, L + 14, 22, R - L - 28, 22, `rgba(${THEMES.neon},0.85)`);
+  px(g, L + 14, 22, R - L - 28, 22, `rgba(${THEMES.neon},0.16)`);
+  g.fillStyle = `rgba(${THEMES.neon},0.55)`;
+  for (let i = 0; i < 5; i++) {
+    const gw = 12 + ((rnd() * 20) | 0);
+    g.fillRect(L + 24 + i * 38, 28, gw, 10);
+  }
+  // Awning (strongly proud) with scalloped bottom + stripes
+  const awY = 62, awH = 34;
+  for (let x = L; x < R; x += 24) {
+    px(g, x, awY, 12, awH, THEMES.awnA);
+    px(g, x + 12, awY, 12, awH, THEMES.awnB);
+  }
+  for (let x = L; x < R; x += 16) { // scallops
+    g.fillStyle = 'rgba(0,0,0,0.28)';
+    g.beginPath(); g.arc(x + 8, awY + awH, 8, 0, Math.PI); g.fill();
+  }
+  px(hg, L, awY, R - L, awH, '#c8c8c8');
+  // AO under the awning onto the glass
+  aoShadow(g, L, awY + awH, R - L, 30, 0.38);
+
+  // Display glass (recessed) with warm interior + shelf hints
+  const gy = awY + awH + 2, gh = 208;
+  px(g, L + 2, gy, R - L - 4, gh, '#181d22');
+  px(hg, L + 2, gy, R - L - 4, gh, H_GLASS);
+  const inter = g.createLinearGradient(0, gy, 0, gy + gh);
+  inter.addColorStop(0, '#3a3226');
+  inter.addColorStop(0.5, '#574a33');
+  inter.addColorStop(1, '#2c2619');
+  g.globalAlpha = 0.75; g.fillStyle = inter; g.fillRect(L + 6, gy + 4, R - L - 12, gh - 8); g.globalAlpha = 1;
+  for (let i = 1; i < 3; i++) px(g, L + 6, gy + (gh / 3) * i, R - L - 12, 3, 'rgba(0,0,0,0.4)'); // shelves
+  // silhouettes in windows (mannequin blobs)
+  for (let i = 0; i < 3; i++) {
+    const mx = L + 24 + rnd() * (R - L - 60);
+    g.fillStyle = 'rgba(0,0,0,0.45)';
+    g.beginPath(); g.arc(mx, gy + gh - 46, 7, 0, Math.PI * 2); g.fill();
+    g.fillRect(mx - 9, gy + gh - 40, 18, 38);
+  }
+  // window frame + center divider
+  px(g, L + 2, gy, R - L - 4, 5, '#3c3c40'); px(g, L + 2, gy + gh - 5, R - L - 4, 5, '#3c3c40');
+  px(g, (L + R) / 2 - 2, gy, 4, gh, '#3c3c40');
+  px(hg, (L + R) / 2 - 2, gy, 4, gh, '#5a5a5a');
+  // warm interior glow on the emissive map
+  litPane(eg, L + 8, gy + 8, (R - L) / 2 - 14, gh - 16, 0.5);
+  litPane(eg, (L + R) / 2 + 6, gy + 8, (R - L) / 2 - 14, gh - 16, 0.42);
+
+  // Door (right side, recessed w/ transom)
+  const dx = R - 54, dy = gy + 14, dw = 44, dh = gh - 20;
+  px(g, dx - 4, dy - 4, dw + 8, dh + 8, THEMES.trim);
+  px(hg, dx - 4, dy - 4, dw + 8, dh + 8, H_RECESS);
+  px(g, dx, dy, dw, 30, '#2c343c'); // transom glass
+  px(hg, dx, dy, dw, 30, H_GLASS);
+  px(g, dx, dy + 34, dw, dh - 34, '#4a5560'); // door leaf
+  px(g, dx + 4, dy + 40, dw - 8, dh - 52, '#39434c');
+  px(g, dx + dw - 10, dy + 90, 5, 12, THEMES.trim); // handle
+  aoShadow(g, dx, dy + 30, dw, 12, 0.25);
+  litPane(eg, dx + 3, dy + 3, dw - 6, 24, 0.35, ['255,224,160', '255,200,120']);
+
+  // Kick base (proud, robust)
+  px(g, L, gy + gh + 4, R - L, H - (gy + gh + 4), '#3a3630');
+  px(g, L, gy + gh + 4, R - L, 6, '#4c463c');
+  px(hg, L, gy + gh + 4, R - L, H - (gy + gh + 4), H_RAISE);
+  heightNoise(hg, rnd, W, H, 220, ['#767676', '#8a8a8a']);
+  return { map: toTexture(c), normalMap: heightToNormal(hc, 2.3), emissiveMap: toTexture(ec) };
+}
+
+/** Subtle seamless asphalt micro-bump normal map (wheel wear, patches). */
+export function makeAsphaltNormal(): THREE.CanvasTexture {
+  const S = 256;
+  const rnd = mulberry32(0x3a57);
+  const hc = makeCanvas(S, S), hg = ctx2d(hc);
+  px(hg, 0, 0, S, S, '#808080');
+  heightNoise(hg, rnd, S, S, 2600, ['#787878', '#888888', '#707070', '#909090'], );
+  for (let i = 0; i < 5; i++) wrapBlob(hg, S, rnd() * S, rnd() * S, 18 + rnd() * 30, rnd() < 0.5 ? '#747474' : '#8a8a8a');
+  return heightToNormal(hc, 1.15);
+}
+
+/** Sidewalk slab-seam normal map (matches the 256px 4x4 slab tile). */
+export function makeSidewalkNormal(): THREE.CanvasTexture {
+  const S = 256;
+  const rnd = mulberry32(0x5ab2);
+  const hc = makeCanvas(S, S), hg = ctx2d(hc);
+  px(hg, 0, 0, S, S, '#828282');
+  heightNoise(hg, rnd, S, S, 1600, ['#7c7c7c', '#888888']);
+  for (let k = 0; k < S; k += 64) {
+    px(hg, k, 0, 3, S, '#484848'); // recessed seams
+    px(hg, 0, k, S, 3, '#484848');
+    px(hg, k + 3, 0, 1, S, '#9a9a9a'); // seam lip highlight
+    px(hg, 0, k + 3, S, 1, '#9a9a9a');
+  }
+  return heightToNormal(hc, 1.7);
 }
 
 /** 256px seamless underground strata texture (dirt/stone/deepslate/bedrock). */
@@ -551,151 +800,4 @@ export function makeSteveTextures(): {
   px(gl, 0, 0, 4, 12, denim);
   px(gl, 3, 0, 1, 10, denimD); px(gl, 0, 10, 4, 2, shoe); // gray shoe bottom 2 rows
   return { headFront, headSide, headTop, body, arm, leg };
-}
-
-/** Sobel a grayscale height canvas into a tangent-space normal-map texture.
- *  Emitted in LINEAR color space — data maps must never be tagged sRGB. */
-export function heightToNormal(src: HTMLCanvasElement, strength = 2.2): THREE.CanvasTexture {
-  const W = src.width;
-  const H = src.height;
-  const hgt = ctx2d(src).getImageData(0, 0, W, H).data;
-  const out = makeCanvas(W, H);
-  const g = ctx2d(out);
-  const img = g.createImageData(W, H);
-  const at = (x: number, y: number): number => {
-    const xi = Math.min(W - 1, Math.max(0, x));
-    const yi = Math.min(H - 1, Math.max(0, y));
-    return hgt[(yi * W + xi) * 4] / 255;
-  };
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const dx = (at(x + 1, y) - at(x - 1, y)) * strength;
-      const dy = (at(x, y + 1) - at(x, y - 1)) * strength;
-      let nx = -dx;
-      let ny = dy;
-      const nz = 1;
-      const l = Math.hypot(nx, ny, nz);
-      nx /= l;
-      ny /= l;
-      const o = (y * W + x) * 4;
-      img.data[o] = (nx * 0.5 + 0.5) * 255;
-      img.data[o + 1] = (ny * 0.5 + 0.5) * 255;
-      img.data[o + 2] = ((nz / l) * 0.5 + 0.5) * 255;
-      img.data[o + 3] = 255;
-    }
-  }
-  g.putImageData(img, 0, 0);
-  const t = new THREE.CanvasTexture(out);
-  t.colorSpace = THREE.NoColorSpace;
-  return t;
-}
-
-/** Procedural PBR set for the player's backpack: woven-canvas albedo with stitched
- *  seams, zipper columns and an embroidered diamond patch, plus matching
- *  height-derived normal map and roughness map. All original runtime-generated
- *  content — zero external assets. */
-export function makeBackpackTextures(): {
-  map: THREE.CanvasTexture;
-  normalMap: THREE.CanvasTexture;
-  roughnessMap: THREE.CanvasTexture;
-} {
-  const S = 256;
-  const rnd = mulberry32(0x8acc);
-  const alb = makeCanvas(S, S), ga = ctx2d(alb);
-  const hgt = makeCanvas(S, S), gh = ctx2d(hgt);
-  const rgh = makeCanvas(S, S), gr = ctx2d(rgh);
-
-  // --- Base: warm khaki canvas in a 4px basket weave ------------------------
-  px(ga, 0, 0, S, S, '#977453');
-  px(gh, 0, 0, S, S, '#808080');
-  px(gr, 0, 0, S, S, '#cdcdcd'); // ~0.80 roughness
-  for (let y = 0; y < S; y += 4) {
-    for (let x = 0; x < S; x += 4) {
-      const over = ((x + y) >> 2) % 2 === 0; // alternating weave cells
-      px(ga, x, y, 4, 4, over ? 'rgba(255,236,200,0.09)' : 'rgba(30,18,8,0.09)');
-      px(gh, x, y, 4, 4, over ? '#8d8d8d' : '#737373');
-      px(gr, x, y, 4, 4, rnd() < 0.5 ? '#c6c6c6' : '#d4d4d4'); // micro roughness variation
-    }
-  }
-  // Thread flecks so the weave reads as fabric, not plastic.
-  for (let i = 0; i < 420; i++) {
-    px(ga, (rnd() * S) | 0, (rnd() * S) | 0, 1, 1, rnd() < 0.5 ? '#a58664' : '#8a6848');
-  }
-
-  // --- Flap edge + seam frame (dashed stitch on albedo, raised ridge) -------
-  const dashed = (g: CanvasRenderingContext2D, col: string, w: number): void => {
-    g.strokeStyle = col;
-    g.lineWidth = w;
-    g.setLineDash([4, 5]);
-    g.strokeRect(12, 12, S - 24, S - 24);
-    g.setLineDash([]);
-  };
-  dashed(ga, '#3d2f1f', 2);
-  gh.strokeStyle = '#9c9c9c'; gh.lineWidth = 3; gh.strokeRect(12, 12, S - 24, S - 24);
-  gr.strokeStyle = '#ececec'; gr.lineWidth = 3; gr.strokeRect(12, 12, S - 24, S - 24);
-  // Flap bottom seam (horizontal) + center vertical seam below it.
-  ga.strokeStyle = '#3d2f1f'; ga.lineWidth = 2; ga.setLineDash([4, 5]);
-  ga.beginPath(); ga.moveTo(10, 46); ga.lineTo(S - 10, 46); ga.stroke();
-  ga.beginPath(); ga.moveTo(S / 2, 46); ga.lineTo(S / 2, S - 12); ga.stroke();
-  ga.setLineDash([]);
-  gh.strokeStyle = '#949494'; gh.lineWidth = 2;
-  gh.beginPath(); gh.moveTo(10, 46); gh.lineTo(S - 10, 46); gh.stroke();
-  gh.beginPath(); gh.moveTo(S / 2, 46); gh.lineTo(S / 2, S - 12); gh.stroke();
-  gr.strokeStyle = '#e8e8e8'; gr.lineWidth = 2;
-  gr.beginPath(); gr.moveTo(10, 46); gr.lineTo(S - 10, 46); gr.stroke();
-  gr.beginPath(); gr.moveTo(S / 2, 46); gr.lineTo(S / 2, S - 12); gr.stroke();
-  // Flap shading band on the upper strip.
-  ga.fillStyle = 'rgba(0,0,0,0.16)';
-  ga.fillRect(0, 0, S, 44);
-  gr.fillStyle = 'rgba(255,255,255,0.05)';
-  gr.fillRect(0, 0, S, 44);
-
-  // --- Zipper columns (glossy teeth; groove in height) ----------------------
-  for (const zx of [60, 180]) {
-    px(ga, zx, 54, 16, S - 70, '#2b241e');
-    px(gh, zx, 54, 16, S - 70, '#5c5c5c');
-    px(gr, zx, 54, 16, S - 70, '#6f6f6f');
-    for (let y = 56; y < S - 18; y += 4) {
-      px(ga, zx + 3, y, 10, 2, '#9a8a70');          // teeth glint
-      px(gh, zx + 3, y, 10, 1, '#3c3c3c');          // tooth groove
-      px(gh, zx + 3, y + 2, 10, 1, '#7c7c7c');       // tooth ridge
-      px(gr, zx + 3, y, 10, 2, '#565656');           // teeth glossier
-    }
-    // Metal pull tab at the top of each column.
-    px(ga, zx + 2, 42, 12, 9, '#b8b2a8');
-    px(gh, zx + 2, 42, 12, 9, '#a8a8a8');
-    px(gr, zx + 2, 42, 12, 9, '#4c4c4c');
-    px(ga, zx + 5, 44, 6, 5, '#8f8a80'); // slot
-  }
-
-  // --- Embroidered diamond patch --------------------------------------------
-  const cx = S / 2, cy = 90, r = 26;
-  const diamond = (g: CanvasRenderingContext2D, fill: string, border: string): void => {
-    g.beginPath();
-    g.moveTo(cx, cy - r); g.lineTo(cx + r, cy); g.lineTo(cx, cy + r); g.lineTo(cx - r, cy);
-    g.closePath();
-    g.fillStyle = fill; g.fill();
-    g.strokeStyle = border; g.lineWidth = 2; g.stroke();
-  };
-  diamond(ga, '#d9a441', '#5a4527');
-  diamond(gh, '#989898', '#b0b0b0');
-  diamond(gr, '#b6b6b6', '#c9c9c9');
-  // Patch cross-stitch.
-  ga.strokeStyle = '#8a5f2a'; ga.lineWidth = 2;
-  ga.beginPath(); ga.moveTo(cx - 12, cy - 12); ga.lineTo(cx + 12, cy + 12);
-  ga.moveTo(cx + 12, cy - 12); ga.lineTo(cx - 12, cy + 12); ga.stroke();
-
-  // --- Grime + edge wear ----------------------------------------------------
-  for (let i = 0; i < 9; i++) {
-    wrapBlob(ga, S, rnd() * S, rnd() * S, 12 + rnd() * 22, 'rgba(50,30,10,0.06)');
-  }
-  for (let i = 0; i < 5; i++) { // worn lighter corners
-    wrapBlob(ga, S, rnd() < 0.5 ? 8 : S - 8, rnd() < 0.5 ? 8 : S - 8, 10 + rnd() * 14, 'rgba(255,240,210,0.07)');
-  }
-
-  const map = toTexture(alb, false);
-  const normalMap = heightToNormal(hgt, 2.4);
-  const roughnessMap = new THREE.CanvasTexture(rgh);
-  roughnessMap.colorSpace = THREE.NoColorSpace;
-  return { map, normalMap, roughnessMap };
 }

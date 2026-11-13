@@ -12,7 +12,7 @@ import { makeBlockTexture, makeTNTTextures } from './textures';
 export interface ItemDef {
   id: ItemId;
   name: string;
-  kind: 'tool' | 'weapon' | 'placeable' | 'tnt' | 'igniter' | 'throwable' | 'food' | 'jetpack';
+  kind: 'tool' | 'weapon' | 'placeable' | 'tnt' | 'igniter' | 'throwable' | 'food' | 'jetpack' | 'launcher';
   maxStack: number;
   digRadius: number;
   cooldown: number;
@@ -508,6 +508,62 @@ export const ITEMS: Record<ItemId, ItemDef> = {
       f: '#ff5722',
       g: '#ffb74d',
     },
+  },
+  rocket: {
+    id: 'rocket',
+    name: 'RPG Rocket',
+    kind: 'launcher',
+    maxStack: 16,
+    digRadius: 0,
+    cooldown: 1.25,
+    heldColor: 0x3a5a2e,
+    icon: P([
+      '................',
+      '............cc..',
+      '...........cc...',
+      '..........cc....',
+      '......aaacc.....',
+      '....aaaaac......',
+      '..aaaaaaab......',
+      '.aaaaaaab.......',
+      'aaaaaaab........',
+      '.aaaaab.b.......',
+      '..aab..bb.......',
+      '...a....b.......',
+      '.......bb.......',
+      '........ee......',
+      '.......ee.......',
+      '................',
+    ]),
+    palette: { a: '#3a5a2e', b: '#7a8a5a', c: '#c9302c', e: '#ffb74d' },
+  },
+  bat: {
+    id: 'bat',
+    name: 'Baseball Bat',
+    kind: 'weapon',
+    maxStack: 1,
+    digRadius: 0.55,
+    cooldown: 0.42,
+    heldColor: 0xb08a5a,
+    icon: P([
+      '................',
+      '............aa..',
+      '...........aab..',
+      '..........aab...',
+      '.........aab....',
+      '........aab.....',
+      '.......aab......',
+      '......aab.......',
+      '.....aab........',
+      '....aab.........',
+      '...aab..........',
+      '..aab...........',
+      '.aab............',
+      'aab.............',
+      '.b..............',
+      '................',
+    ]),
+    palette: { a: '#b08a5a', b: '#8a6a42' },
   },
 };
 

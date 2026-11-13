@@ -34,10 +34,12 @@ import { HyperionAudio } from './audio';
 import { Missions } from './missions';
 import { Weather } from './weather';
 import { Helicopter } from './helicopter';
-import { SAVE_TYPES, clearSave, hasSave, loadSave, writeSave, loadSettings, writeSettings, type Settings } from './save';
+import { SAVE_TYPES, clearSave, hasSave, loadSave, writeSave, loadSettings, writeSettings, type Settings, type GraphicsPreset } from './save';
 import {
   HUD_EMIT_INTERVAL,
   MINIMAP_SPAN,
+  SKY_FRAG,
+  SKY_VERT,
   buildSky,
   rayBox,
   updateClouds,
@@ -47,6 +49,7 @@ import { ITEMS, makeBlockMaterial, makeTNTMaterials } from './items';
 import { AimHit, HudState, ItemId, ItemStack, PlaceableId, World } from './types';
 import { makeCloudTexture, makeSunSprite } from './textures';
 import { buildCityProps, type CityProps } from './props';
+import { imageFromDataUrl, loadSkin, makeDefaultSkinCanvas, type SkinSource } from './skin';
 
 export interface GameCallbacks {
   onState: (s: HudState) => void;
@@ -69,11 +72,21 @@ const NIGHT_MID = new THREE.Color(0x12172e);
 const NIGHT_BOTTOM = new THREE.Color(0x1a2140);
 const NIGHT_HORIZON = new THREE.Color(0x2c2a52);
 const NIGHT_FOG = new THREE.Color(0x100d1f);
-const DAY_TOP = new THREE.Color(0x54779e);
-const DAY_MID = new THREE.Color(0xc4a878);
-const DAY_BOTTOM = new THREE.Color(0xf0c58c);
-const DAY_HORIZON = new THREE.Color(0xffd9a0);
-const DAY_FOG = new THREE.Color(0xe4c39a);
+// Golden hour — the warm low-sun phase between blue day and magenta dusk.
+const GOLDEN_SUN = new THREE.Color(0xffb45e);
+const GOLDEN_TOP = new THREE.Color(0x4a6fa8);
+const GOLDEN_MID = new THREE.Color(0xd9a06b);
+const GOLDEN_BOTTOM = new THREE.Color(0xffc37e);
+const GOLDEN_HORIZON = new THREE.Color(0xff9a4a);
+const GOLDEN_FOG = new THREE.Color(0xe0bd94);
+// Realistic blue daytime sky (the old "day" set was permanently sunset-warm,
+// which flattened the day/night contrast — golden hour is now its own phase).
+const DAY_TOP = new THREE.Color(0x3a6fb5);
+const DAY_MID = new THREE.Color(0x84a9d6);
+const DAY_BOTTOM = new THREE.Color(0xc9dcf0);
+const DAY_HORIZON = new THREE.Color(0xe9f1f6);
+const DAY_FOG = new THREE.Color(0xd3e0ea);
+const DAY_SUN = new THREE.Color(0xfff1d8);
 // Overcast/rain palette.
 const GRAY_TOP = new THREE.Color(0x4a5258);
 const GRAY_MID = new THREE.Color(0x6a7076);
@@ -87,18 +100,12 @@ const CLOUD_NIGHT = new THREE.Color(0x2c3352);
 // Hemisphere sky/ground tints.
 const HEMI_DAY_SKY = new THREE.Color(0xcfe0f2);
 const HEMI_DAY_GND = new THREE.Color(0x8a7a5a);
+const HEMI_GOLDEN_SKY = new THREE.Color(0xffd9a8);
+const HEMI_GOLDEN_GND = new THREE.Color(0x8a6a4a);
 const HEMI_DUSK_SKY = new THREE.Color(0xa678c8);
 const HEMI_DUSK_GND = new THREE.Color(0x6e5648);
 const HEMI_NIGHT_SKY = new THREE.Color(0x2a3358);
 const HEMI_NIGHT_GND = new THREE.Color(0x241d26);
-// Golden-hour palette (sun 10–30 deg up): amber sun, caramel horizon, warm fog.
-const GOLDEN_SUN = new THREE.Color(0xffa04d);
-const GOLDEN_FOG = new THREE.Color(0xe8b48a);
-const GOLDEN_HORIZON = new THREE.Color(0xffc27a);
-const GOLDEN_SKY = new THREE.Color(0xe8a860);
-const GOLDEN_HEMI_SKY = new THREE.Color(0xffd2a8);
-const GOLDEN_HEMI_GND = new THREE.Color(0x7a6a52);
-const GOLDEN_CLOUD = new THREE.Color(0xffd8b0);
 
 /** Debris tint per granted block type when carving the world (fallback 0x55555a). */
 const DEBRIS_COLORS: Record<string, number> = {
@@ -113,22 +120,13 @@ const DEBRIS_COLORS: Record<string, number> = {
   planks: 0xa9844f,
 };
 
-/** Cinematic color grade v2: S-curve + saturation + day-aware teal-orange split tone
- *  + soft vignette + animated film grain + subtle radial chromatic aberration. */
+/** Cinematic color grade: GTA-style S-curve + saturation + warm highlights + vignette. */
 const GradeShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
-    contrast: { value: 1.05 },
-    saturation: { value: 1.14 },
-    vignette: { value: 0.26 },
-    /** Golden-hour warmth 0..1 — driven by updateDayNight, fades to 0 at night. */
-    warmth: { value: 0 },
-    /** Film grain amount (luma-weighted so shadows stay clean). */
-    grain: { value: 0.03 },
-    /** Seconds — animates the grain. */
-    time: { value: 0 },
-    /** Radial chromatic aberration strength. */
-    aberration: { value: 0.0009 },
+    contrast: { value: 1.07 },
+    saturation: { value: 1.13 },
+    vignette: { value: 0.24 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -142,37 +140,21 @@ const GradeShader = {
     uniform float contrast;
     uniform float saturation;
     uniform float vignette;
-    uniform float warmth;
-    uniform float grain;
-    uniform float time;
-    uniform float aberration;
     varying vec2 vUv;
-    float hash(vec2 p) {
-      return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
-    }
     void main() {
-      // Subtle radial chromatic aberration (grows toward the frame edges).
-      vec2 d = vUv - 0.5;
-      float r2 = dot(d, d);
-      vec2 off = d * r2 * aberration * 6.0;
-      vec3 c;
-      c.r = texture2D(tDiffuse, vUv - off).r;
-      c.g = texture2D(tDiffuse, vUv).g;
-      c.b = texture2D(tDiffuse, vUv + off).b;
-      // S-curve contrast around midtones.
-      c = clamp((c - 0.5) * contrast + 0.5, 0.0, 1.0);
+      vec3 c = texture2D(tDiffuse, vUv).rgb;
+      // S-curve contrast around midtones (HDR-safe: no clamp — values above 1.0
+      // keep rolling into the ACES pass for natural highlight roll-off).
+      c = (c - 0.5) * contrast + 0.5;
       float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
       c = mix(vec3(l), c, saturation);
-      // Warm highlights / cool shadows (teal-orange grade); warmth deepens the
-      // golden-hour split while the sun is low and releases it at night.
-      c = mix(c, c * vec3(1.05 + 0.05 * warmth, 1.0, 0.955 - 0.045 * warmth), l);
-      c = mix(c, c * vec3(0.97 - 0.02 * warmth, 1.0, 1.05 + 0.03 * warmth), (1.0 - l) * (0.5 + 0.25 * warmth));
-      // Soft cinematic vignette.
-      float v = 1.0 - smoothstep(0.12, 0.85, r2 * 2.0) * vignette;
-      c *= v;
-      // Animated luma-weighted film grain.
-      float g = (hash(vUv * 997.0 + fract(time * 7.13) * 43.7) - 0.5) * grain * (1.0 - l * 0.55);
-      c += g;
+      // Warm highlights / cool shadows (teal-orange grade).
+      c = mix(c, c * vec3(1.045, 1.005, 0.955), l);
+      c = mix(c, c * vec3(0.97, 1.0, 1.05), (1.0 - l) * 0.5);
+      // Vignette.
+      vec2 d = vUv - 0.5;
+      float v = 1.0 - dot(d, d) * vignette * 2.1;
+      c *= clamp(v, 0.0, 1.0);
       gl_FragColor = vec4(c, 1.0);
     }
   `,
@@ -253,6 +235,13 @@ export class HyperionGame implements World {
   private hotbar: (ItemStack | null)[] = new Array(9).fill(null);
   private inventory: (ItemStack | null)[] = new Array(18).fill(null);
 
+  /** Live skin status (drives the inventory's skin picker UI). */
+  skinInfo: { source: SkinSource; name: string | null; model: 'classic' | 'slim' } = {
+    source: 'default',
+    name: null,
+    model: 'classic',
+  };
+
   private heat = 0;
   private stars = 0;
   private digTimer = 0;
@@ -276,22 +265,31 @@ export class HyperionGame implements World {
   private sunSprite: THREE.Sprite | null = null;
   private timeT = 0.72; // 0 = midnight, 0.25 sunrise, 0.5 noon, 0.75 sunset — boot at golden hour
   private nightF = 0; // cached night factor (drives props/glow between cycle updates)
+  private goldenF = 0; // cached golden-hour factor
+  private duskF = 0;
+  /** Time-of-day sky environment: PMREM generated from a proxy sphere that
+   *  re-uses the live sky shaders, refreshed only when the phase bucket changes. */
+  private pmrem: THREE.PMREMGenerator | null = null;
+  private envScene: THREE.Scene | null = null;
+  private envMat: THREE.ShaderMaterial | null = null;
+  private envBucket = -1;
+  private graphicsPreset: GraphicsPreset = 'auto';
+  /** Creative/survival game mode (J toggles). */
+  private mode: 'survival' | 'creative' = 'survival';
+  private modeFlash = 0;
+  /** Player level derived from the chaos score; level-ups bump max HP. */
+  private lastLevel = 0;
+  /** Gang/boss combat: dialogue bubble currently shown (fades). */
+  private dialogueTtl = 0;
+  private dialogue: { name: string; text: string; kind: 'civ' | 'gang' | 'boss' | 'cop' } | null = null;
+  /** Walking boss lifecycle. */
+  private bossSpawned = false;
+  /** Active cutscene (intro flyover / boss reveal). */
+  private cutscene: { kind: 'intro' | 'boss'; t: number; dur: number; boss?: THREE.Group } | null = null;
   private props: CityProps | null = null;
   private composer: EffectComposer | null = null;
   private bloomPass: UnrealBloomPass | null = null;
   private bloomOn = true;
-  private gradePass: ShaderPass | null = null;
-  /** True cycle sun direction — single source of truth for the sky sprite, the
-   *  shadow-casting directional light and the environment bake. */
-  private sunLightDir = new THREE.Vector3(-0.55, 0.42, -0.72).normalize();
-  /** Sky-matched environment: mini dome sharing the live sky material, rebaked
-   *  through PMREM so car paint / glass reflect the ACTUAL sky, not a neutral room. */
-  private envPmrem: THREE.PMREMGenerator | null = null;
-  private envScene: THREE.Scene | null = null;
-  private envSun: THREE.Sprite | null = null;
-  private envMoon: THREE.Sprite | null = null;
-  private lastEnvBake = -10;
-  private lastEnvT = -1;
   private policeTimer = 0;
   private sirenOn = false;
   private policeWarned = false;
@@ -405,15 +403,15 @@ export class HyperionGame implements World {
     this.cb = cb;
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.28;
+    this.renderer.toneMappingExposure = 1.06;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     this.camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1600);
-    this.scene.fog = new THREE.Fog(0xe4c39a, 130, 620);
+    this.scene.fog = new THREE.Fog(0xe4c39a, 130, 680);
 
     // Lighting — golden hour
     this.hemi = new THREE.HemisphereLight(0xcfe0f2, 0x8a7a5a, 0.75);
@@ -421,23 +419,25 @@ export class HyperionGame implements World {
     this.sun = new THREE.DirectionalLight(0xffd9ae, 2.6);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
-    this.sun.shadow.camera.left = -105;
-    this.sun.shadow.camera.right = 105;
-    this.sun.shadow.camera.top = 105;
-    this.sun.shadow.camera.bottom = -105;
-    this.sun.shadow.camera.near = 20;
-    this.sun.shadow.camera.far = 460;
-    this.sun.shadow.bias = -0.0002;
-    this.sun.shadow.normalBias = 0.03; // kills acne on facades without softening contact
-    this.sun.shadow.camera.updateProjectionMatrix();
+    this.sun.shadow.camera.left = -110;
+    this.sun.shadow.camera.right = 110;
+    this.sun.shadow.camera.top = 110;
+    this.sun.shadow.camera.bottom = -110;
+    this.sun.shadow.camera.far = 620;
+    this.sun.shadow.bias = -0.00045;
+    this.sun.shadow.normalBias = 0.9;
+    this.sun.shadow.radius = 3;
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
 
-    // Settings: apply persisted volume/touch BEFORE any audio can start.
+    // Settings: apply persisted volume/touch/graphics BEFORE any audio or composer build.
     this.settings = loadSettings();
+    this.graphicsPreset = this.settings.graphics ?? 'auto';
     this.audio.setMasterVolume(this.settings.volume);
 
     // Post-processing: bloom (neon glow) + cinematic grade + ACES output.
+    // The sky environment (scene.environment) is built after the weather system
+    // so the PMREM proxy can track the live sky + rain state.
     this.bloomOn = this.settings.bloom !== false;
     this.buildComposer();
 
@@ -446,24 +446,6 @@ export class HyperionGame implements World {
     this.starsMat = built.starsMat;
     this.moonMat = built.moonMat;
     this.sunSprite = built.sunSprite;
-
-    // Sky-matched environment: a mini dome sharing the LIVE sky material (uniforms
-    // stay in sync for free) + sun/moon sprite clones sharing their materials, so
-    // reflections always match the actual golden-hour sky. Re-baked by updateDayNight.
-    this.envPmrem = new THREE.PMREMGenerator(this.renderer);
-    this.envScene = new THREE.Scene();
-    const envDome = new THREE.Mesh(new THREE.SphereGeometry(60, 24, 16), built.skyMat);
-    envDome.frustumCulled = false;
-    this.envScene.add(envDome);
-    this.envSun = new THREE.Sprite(built.sunSprite.material);
-    this.envSun.scale.setScalar(11);
-    this.envScene.add(this.envSun);
-    this.envMoon = new THREE.Sprite(built.moonMat);
-    this.envMoon.scale.setScalar(7);
-    this.envMoon.position.set(520, 620, 430).normalize().multiplyScalar(50);
-    this.envScene.add(this.envMoon);
-    this.bakeEnv();
-    this.scene.environmentIntensity = 0.4;
 
     this.city = new City(this.scene, this.destruction);
     this.props = buildCityProps(this.scene, this.city);
@@ -487,6 +469,27 @@ export class HyperionGame implements World {
       this.shake(0.1);
     };
 
+    // Time-of-day sky environment: PMREM from a proxy sphere re-using the sky
+    // shaders, so reflections on glass towers/cars/wet asphalt track the sky.
+    this.pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.envScene = new THREE.Scene();
+    this.envMat = new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      vertexShader: SKY_VERT,
+      fragmentShader: SKY_FRAG,
+      uniforms: {
+        top: { value: new THREE.Color(0x54779e) },
+        mid: { value: new THREE.Color(0xc4a878) },
+        bottom: { value: new THREE.Color(0xf0c58c) },
+        horizon: { value: new THREE.Color(0xffd9a0) },
+        sunDir: { value: new THREE.Vector3(-0.55, 0.12, -0.83) },
+        glow: { value: 0.55 },
+      },
+    });
+    this.envScene.add(new THREE.Mesh(new THREE.SphereGeometry(50, 24, 16), this.envMat));
+    // Initial lighting + environment pass (boot = golden hour).
+    this.updateDayNight();
+
     this.vehicles.onExplosion = (p, r) => this.explode(p, r, true);
     this.vehicles.onRagdollNPCs = (p, r) => {
       if (this.npcs.ragdollNear(p, r)) this.addScore(14);
@@ -503,6 +506,27 @@ export class HyperionGame implements World {
       this.audio.fireCrackle(this.far(p));
     };
     this.npcs.spawn(26, (bi, bj) => this.city.blockType(bi, bj) === 'built');
+    this.npcs.spawnGangs((bi, bj) => this.city.blockType(bi, bj) === 'built', 4);
+    this.npcs.onShoot = (from, to, dmg, far) => {
+      this.spawnTracer(from, to);
+      this.audio.pistol(far);
+      // probabilistic hit: the player is a small target
+      if (Math.random() < 0.55) this.damagePlayer(dmg);
+    };
+    this.npcs.onBossDead = () => {
+      this.addScore(500);
+      this.addItem('rocket', 8);
+      this.addItem('apple', 3);
+      this.toast('👑 BOSS DEFEATED — REY DIAZ is down. RPG ×8 + golden apples recovered!');
+      this.audio.levelJingle();
+      this.particles.dustPuff(this.playerPos(), 10, 3);
+      this.bossSpawned = false;
+    };
+    this.npcs.onGangKill = (gang) => {
+      void gang;
+      this.addScore(60);
+      this.toast('Gang member down — the crew is furious');
+    };
     this.vehicles.spawnTraffic(20);
     this.vehicles.spawnParked(this.city.parkingLots, BLOCK);
 
@@ -514,6 +538,7 @@ export class HyperionGame implements World {
     });
     document.addEventListener('pointerlockchange', this.onLockChange);
     window.addEventListener('resize', this.onResize);
+    this.applyGraphics();
     this.onResize();
     this.hasSaveFile = hasSave();
   }
@@ -522,51 +547,88 @@ export class HyperionGame implements World {
     this.input.setLocked(!!document.pointerLockElement);
   };
 
-  /** Re-bake the sky-matched PMREM environment (throttled by updateDayNight). */
-  private bakeEnv(): void {
-    if (!this.envPmrem || !this.envScene) return;
-    if (this.skyUniforms && this.envSun) {
-      this.envSun.position.copy(this.skyUniforms.sunDir.value).multiplyScalar(50);
-    }
-    const old = this.scene.environment;
-    this.scene.environment = this.envPmrem.fromScene(this.envScene, 0.08).texture;
-    if (old) old.dispose();
-    this.lastEnvBake = this.clock.elapsedTime;
-    this.lastEnvT = this.timeT;
-  }
-
-  /** Build (or rebuild) the post-processing chain: render → bloom → grade → output. */
+  /** Build (or rebuild) the post-processing chain: render → bloom → grade → output.
+   *  HDR pipeline: half-float render target (proper ACES roll-off, meaningful
+   *  bloom thresholds above 1.0) with 4x MSAA on WebGL2 except on Low. */
   private buildComposer(): void {
     if (!this.bloomOn || this.composer) return;
-    const composer = new EffectComposer(this.renderer);
+    const w = this.canvas.clientWidth || window.innerWidth;
+    const h = this.canvas.clientHeight || window.innerHeight;
+    const samples = this.renderer.capabilities.isWebGL2 && (this.graphicsPreset === 'high' || this.graphicsPreset === 'auto') ? 4 : 0;
+    const target = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, samples });
+    const composer = new EffectComposer(this.renderer, target);
     composer.addPass(new RenderPass(this.scene, this.camera));
-    const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.5, 0.6, 0.82);
+    const bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.55, 0.6, 1.05);
     composer.addPass(bloom);
     this.bloomPass = bloom;
-    const grade = new ShaderPass(GradeShader);
-    composer.addPass(grade);
-    this.gradePass = grade;
+    composer.addPass(new ShaderPass(GradeShader));
     composer.addPass(new OutputPass());
-    composer.setSize(this.canvas.clientWidth || window.innerWidth, this.canvas.clientHeight || window.innerHeight);
+    composer.setSize(w, h);
     this.composer = composer;
   }
 
   /** Bloom glow on/off (persisted; falls back to the direct renderer path). */
   setBloom(v: boolean): void {
-    this.bloomOn = v;
     this.settings.bloom = v;
     writeSettings(this.settings);
+    this.setBloomActive(v);
+  }
+
+  /** Apply bloom on/off without persisting (graphics presets use this). */
+  private setBloomActive(v: boolean): void {
+    this.bloomOn = v;
     if (v) this.buildComposer();
     else {
       this.composer?.dispose();
       this.composer = null;
       this.bloomPass = null;
-      this.gradePass = null;
     }
   }
 
   get bloom(): boolean {
     return this.bloomOn;
+  }
+
+  get graphics(): GraphicsPreset {
+    return this.graphicsPreset;
+  }
+
+  /** Graphics quality preset (persisted). Low = 0.75x pixel ratio, shadows and
+   *  bloom off; Medium = 1x, 1536 shadow map; High/Auto = full ratio, 2048 map,
+   *  MSAA — Auto additionally arms the adaptive fps downgrade. */
+  setGraphics(p: GraphicsPreset): void {
+    this.graphicsPreset = p;
+    this.settings.graphics = p;
+    writeSettings(this.settings);
+    this.applyGraphics();
+  }
+
+  private applyGraphics(): void {
+    const p = this.graphicsPreset;
+    this.qualityTier = 0;
+    this.graceT = 0;
+    this.lowFpsStreak = 0;
+    if (p === 'low') {
+      this.renderer.setPixelRatio(0.75);
+      this.renderer.shadowMap.enabled = false;
+      this.sun.castShadow = false;
+      this.setBloomActive(false);
+    } else {
+      this.renderer.setPixelRatio(p === 'medium' ? 1 : Math.min(window.devicePixelRatio, 1.6));
+      this.renderer.shadowMap.enabled = true;
+      this.sun.castShadow = true;
+      this.sun.shadow.mapSize.set(p === 'medium' ? 1536 : 2048, p === 'medium' ? 1536 : 2048);
+      if (this.sun.shadow.map) {
+        this.sun.shadow.map.dispose();
+        this.sun.shadow.map = null as unknown as THREE.WebGLRenderTarget;
+      }
+      this.setBloomActive(this.settings.bloom !== false);
+    }
+    // Toggling shadowMap.enabled needs a material recompile to take effect.
+    this.scene.traverse((o) => {
+      const m = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+      if (m) (Array.isArray(m) ? m : [m]).forEach((mm) => (mm as THREE.Material).needsUpdate = true);
+    });
   }
 
   private onResize = (): void => {
@@ -601,6 +663,8 @@ export class HyperionGame implements World {
     give('pearl', 16);
     give('apple', 8);
     give('sword', 1);
+    give('bat', 1);
+    give('rocket', 6);
   }
 
   addItem(id: ItemId, count: number, silent = false): void {
@@ -649,6 +713,36 @@ export class HyperionGame implements World {
     this.hotbar[this.slot] = inv;
   }
 
+  /**
+   * Install a character skin from a PNG data URL — a TLauncher fetch or a
+   * local file upload. Returns false when the image is not a valid skin.
+   */
+  async applySkinPng(
+    png: string,
+    model: 'classic' | 'slim' | 'auto',
+    source: SkinSource,
+    name: string | null
+  ): Promise<boolean> {
+    try {
+      const img = await imageFromDataUrl(png);
+      const skin = loadSkin(img, model);
+      if (!skin) return false;
+      this.player.applySkin(skin);
+      this.player.setCreativeGlow(this.player.creative); // glow survives skin swaps
+      this.skinInfo = { source, name, model: skin.model };
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Back to the original Hyperion default skin. */
+  resetSkin(): void {
+    this.player.applySkin(loadSkin(makeDefaultSkinCanvas(), 'classic')!);
+    this.player.setCreativeGlow(this.player.creative);
+    this.skinInfo = { source: 'default', name: null, model: 'classic' };
+  }
+
   // ------------------------------------------------------------------ World impl
   floorHeightAt(x: number, z: number, feetY: number): number {
     let best = -Infinity;
@@ -678,6 +772,17 @@ export class HyperionGame implements World {
           if (top <= feetY + 0.55) best = Math.max(best, top);
         }
       }
+    }
+    // Building roofs: stand on top when landing from above (roof chunk carved
+    // away = fall through into the interior, matching the destruction system).
+    for (const b of this.city.buildings) {
+      if (b.collapsed) continue;
+      const a = b.aabb;
+      if (x < a.min.x - 0.05 || x > a.max.x + 0.05 || z < a.min.z - 0.05 || z > a.max.z + 0.05) continue;
+      const roofY = a.max.y;
+      if (roofY > feetY + 0.75) continue; // still below the roofline: walls handle it
+      if (this.destruction.isCarved(x, roofY + 0.3, z)) continue;
+      best = Math.max(best, roofY);
     }
     return best;
   }
@@ -977,12 +1082,23 @@ export class HyperionGame implements World {
       return;
     }
     if (hit.kind === 'npc') {
-      if (this.npcs.hitNear(hit.point, 1.5)) {
+      // Melee: weapon damage routes through the NPC cast (HP for gang/boss).
+      const weaponDmg = def && def.kind === 'weapon' ? (it && it.id === 'bat' ? 26 : 18) : def && def.kind === 'tool' ? 12 : 5;
+      const res = this.npcs.hitNear(hit.point, 1.5, weaponDmg);
+      if (res.hit) {
         this.hitMark++;
-        this.addScore(15);
-        this.missions.onPed();
         this.audio.thud(0.1);
-        this.toast('Pedestrian down');
+        if (res.npc && res.npc.persona === 'civ') {
+          this.addScore(15);
+          this.missions.onPed();
+          this.toast('Pedestrian down');
+        } else if (res.npc && res.npc.persona === 'gang') {
+          this.addScore(20);
+          this.toast(`Gang hit — ${res.npc.name}'s crew is angry!`);
+        } else if (res.npc && res.npc.persona === 'boss') {
+          this.addScore(6);
+          this.toast(`REY DIAZ — ${Math.max(0, Math.ceil(res.npc.hp))} HP`);
+        }
         this.fleeNPCs(hit.point, 18);
       }
       return;
@@ -1090,8 +1206,7 @@ export class HyperionGame implements World {
     }
     const it = this.selectedItem();
     if (it) {
-      it.count--;
-      if (it.count <= 0) this.hotbar[this.slot] = null;
+      this.consumeItem(it);
     }
     this.audio.place();
   }
@@ -1119,10 +1234,7 @@ export class HyperionGame implements World {
     this.scene.add(mesh);
     this.tnts.push({ mesh, fuse: TNT_FUSE, pos: center.clone() });
     const it = this.selectedItem();
-    if (it) {
-      it.count--;
-      if (it.count <= 0) this.hotbar[this.slot] = null;
-    }
+    this.consumeItem(it);
     this.audio.place();
     this.toast('TNT armed — 3s fuse');
   }
@@ -1160,7 +1272,7 @@ export class HyperionGame implements World {
     this.particles.firePuff(hit.point, 10);
   }
 
-  private throwPearl(): void {
+  private throwPearl(it: ItemStack | null): void {
     const dir = this.camera.getWorldDirection(new THREE.Vector3());
     const origin = this.camera.getWorldPosition(new THREE.Vector3());
     const geo = new THREE.SphereGeometry(0.1, 8, 6);
@@ -1170,13 +1282,57 @@ export class HyperionGame implements World {
     this.scene.add(mesh);
     this.pearls.push({ mesh, vel: dir.multiplyScalar(24).add(new THREE.Vector3(0, 3, 0)), t: 6 });
     this.audio.pearl();
-    const it = this.selectedItem();
-    if (it) {
-      it.count--;
-      if (it.count <= 0) this.hotbar[this.slot] = null;
-    }
+    this.consumeItem(it);
   }
 
+  /** Decrement a stack — skipped entirely in CREATIVE (infinite supplies). */
+  private consumeItem(it: ItemStack | null): void {
+    if (this.mode === 'creative' || !it) return;
+    it.count--;
+    if (it.count <= 0) this.hotbar[this.slot] = null;
+  }
+
+  /** Creative/survival toggle (J). Creative = infinite inventory + invulnerable
+   *  + golden Steve glow; the HUD hides hearts/XP and flashes on transform. */
+  private toggleMode(): void {
+    this.mode = this.mode === 'creative' ? 'survival' : 'creative';
+    this.player.creative = this.mode === 'creative';
+    this.player.setCreativeGlow(this.player.creative);
+    this.modeFlash = 1;
+    this.audio.modeJingle(this.player.creative);
+    this.toast(this.player.creative ? '✦ CREATIVE MODE — infinite inventory, no damage' : '⛏ SURVIVAL MODE — damage on, resources count');
+    this.addScore(0);
+  }
+
+  get gameMode(): 'survival' | 'creative' {
+    return this.mode;
+  }
+
+  /** RPG rocket: camera-launched shell with gravity + impact explosion. */
+  private fireRocket(it: ItemStack | null): void {
+    if (this.rocketCd > 0) return;
+    this.rocketCd = ITEMS.rocket.cooldown;
+    const dir = this.camera.getWorldDirection(new THREE.Vector3());
+    const origin = this.camera.getWorldPosition(new THREE.Vector3());
+    if (!this.shellGeo || !this.shellMat) {
+      this.shellGeo = new THREE.SphereGeometry(0.16, 8, 6);
+      this.shellMat = new THREE.MeshStandardMaterial({ color: 0x3a5a2e, emissive: 0xffa030, emissiveIntensity: 0.6, roughness: 0.5, metalness: 0.3 });
+    }
+    const mesh = new THREE.Mesh(this.shellGeo, this.shellMat);
+    mesh.scale.set(1, 1, 2.2);
+    mesh.position.copy(origin).addScaledVector(dir, 0.8);
+    mesh.lookAt(origin.clone().addScaledVector(dir, 10));
+    this.scene.add(mesh);
+    this.shells.push({ mesh, vel: dir.clone().multiplyScalar(34).add(new THREE.Vector3(0, 1.4, 0)), t: 7 });
+    this.consumeItem(it);
+    this.audio.rocketLaunch(0.05);
+    this.particles.smokePuff(mesh.position.clone(), 4, 0.3, 0.6);
+    this.shake(0.18);
+  }
+
+  private rocketCd = 0;
+
+  /** RMB item use dispatcher. */
   private useItem(): void {
     if (this.drivingCar) return;
     const it = this.selectedItem();
@@ -1189,18 +1345,20 @@ export class HyperionGame implements World {
       case 'tnt':
         if (it.count > 0) this.placeTNT();
         break;
+      case 'launcher':
+        if (it.count > 0) this.fireRocket(it);
+        break;
       case 'igniter':
         this.useFlint();
         break;
       case 'throwable':
-        if (it.count > 0) this.throwPearl();
+        if (it.count > 0) this.throwPearl(it);
         break;
       case 'food':
-        if (this.player.health < 20 && it.count > 0) {
+        if (this.player.health < this.player.maxHealth && it.count > 0) {
           this.player.heal(6);
           this.audio.eat();
-          it.count--;
-          if (it.count <= 0) this.hotbar[this.slot] = null;
+          this.consumeItem(it);
           this.toast('Munch — +3 hearts');
         }
         break;
@@ -1302,6 +1460,7 @@ export class HyperionGame implements World {
 
     // Damage & chaos
     this.ragdollNPCsNear(pos, r * 1.35);
+    this.npcs.damageArea(pos, r * 1.25, 60); // rockets/TNT hit gang HP + the boss
     this.fleeNPCs(pos, 55);
     this.igniteCarsNear(pos, r * 1.15);
     const pd = this.playerPos().distanceTo(pos);
@@ -1332,13 +1491,27 @@ export class HyperionGame implements World {
     this.updateCamera(dt);
     this.updateHudEmit(dt);
     this.props?.update(this.clock.elapsedTime, this.nightF);
-    if (this.gradePass) this.gradePass.uniforms.time.value = this.clock.elapsedTime;
     if (this.composer) this.composer.render();
     else this.renderer.render(this.scene, this.camera);
     this.input.endFrame();
   }
 
   private updateGameplay(dt: number): void {
+    // Rocket launcher cooldown
+    if (this.rocketCd > 0) this.rocketCd -= dt;
+    // Dialogue bubble fade
+    if (this.dialogueTtl > 0) {
+      this.dialogueTtl -= dt;
+      if (this.dialogueTtl <= 0) this.dialogue = null;
+    }
+    // Active cutscene: freeze normal gameplay, advance/skip on any key or click.
+    if (this.cutscene) {
+      this.cutscene.t += dt;
+      const skip = this.input.justPressed('Space') || this.input.justPressed('KeyE') || this.input.leftClicked || this.cutscene.t >= this.cutscene.dur;
+      if (skip) this.cutscene = null;
+      this.input.endFrame();
+      return;
+    }
     // Mouse look
     const { dx, dy } = this.input.consumeMouse();
     if (!this.drivingCar) {
@@ -1356,7 +1529,17 @@ export class HyperionGame implements World {
     }
     if (this.input.wheelDelta !== 0) this.setSlot(this.slot + this.input.wheelDelta);
     if (this.input.justPressed('KeyE')) {
-      this.cb.onToast('__OPEN_INVENTORY__');
+      // E near an NPC (aim-gated) talks to them; otherwise it opens the inventory.
+      const eye = this.player.eyePosition(this.tmpV);
+      const near = this.npcs.nearestInteractable(eye, 4.2);
+      const line = near ? this.npcs.interact(near) : null;
+      if (line) {
+        this.dialogue = line;
+        this.dialogueTtl = 4.2;
+        this.audio.voice(line.text, line.kind);
+      } else {
+        this.cb.onToast('__OPEN_INVENTORY__');
+      }
     }
     if (this.input.justPressed('F5')) {
       this.thirdPerson = !this.thirdPerson;
@@ -1364,6 +1547,7 @@ export class HyperionGame implements World {
     }
     if (this.input.justPressed('F3')) this.debugVisible = !this.debugVisible;
     if (this.input.justPressed('KeyF')) this.enterNearestCar();
+    if (this.input.justPressed('KeyJ')) this.toggleMode();
     if (this.input.justPressed('KeyH') && this.drivingCar) this.audio.horn(0.1);
     if (this.input.justPressed('KeyM')) {
       if (!this.missions.accept()) this.missions.abandon();
@@ -1396,8 +1580,8 @@ export class HyperionGame implements World {
     } else {
       this.updateJetpack(dt);
       const res = this.player.update(dt, this.input, this, true);
-      if (res.landed && res.fallVel < -18) this.damagePlayer((Math.abs(res.fallVel) - 18) * 0.7);
       this.ensureStrata(this.player.pos.y);
+      void res;
     }
 
     this.vehicles.setPlayerRef(this.playerPos());
@@ -1489,6 +1673,15 @@ export class HyperionGame implements World {
     const heatDecay = this.evadeT > 1.5 ? 10.5 : 2.5;
     this.heat = Math.max(0, this.heat - dt * heatDecay);
     this.stars = this.heat <= 0 ? 0 : Math.min(5, 1 + Math.floor(this.heat / 150));
+    // Level-up: every 100 CHAOS — +2 max health, full heal, jingle.
+    const lvl = Math.floor(Math.max(0, this.heat) / 100);
+    if (lvl > this.lastLevel) {
+      const gained = lvl - this.lastLevel;
+      this.lastLevel = lvl;
+      for (let i = 0; i < gained; i++) this.player.levelUp();
+      this.audio.levelJingle();
+      this.toast(`⭐ LEVEL ${lvl} — max health +${gained * 2} (survival only)`);
+    }
     if (this.heat <= 0) {
       this.evadeT = 0;
       this.loseWarned = false;
@@ -1722,6 +1915,7 @@ export class HyperionGame implements World {
       radio: this.audio.radioStation,
       jetFuel: this.jetFuel,
       bestAir: this.bestAir,
+      mode: this.mode,
     });
     this.hasSaveFile = ok;
     if (manual) this.toast(ok ? 'World saved' : 'Save failed (storage blocked?)');
@@ -1765,6 +1959,12 @@ export class HyperionGame implements World {
       this.updateDayNight();
       this.heat = d.heat;
       this.destruction.totalRemoved = d.removed;
+      this.player.maxHealth = 20 + Math.min(10, Math.floor(Math.max(0, d.heat) / 100)) * 2;
+      this.player.health = Math.min(d.player.health, this.player.maxHealth);
+      this.mode = d.mode ?? 'survival';
+      this.player.creative = this.mode === 'creative';
+      this.player.setCreativeGlow(this.player.creative);
+      this.lastLevel = Math.floor(Math.max(0, d.heat) / 100);
       this.hotbar = d.hotbar.map((s) => (s ? { ...s } : null));
       this.inventory = d.inventory.map((s) => (s ? { ...s } : null));
       this.slot = ((d.slot % 9) + 9) % 9;
@@ -1788,6 +1988,18 @@ export class HyperionGame implements World {
   resetNewGame(): void {
     clearSave();
     this.hasSaveFile = false;
+    this.heat = 0;
+    this.stars = 0;
+    this.bossSpawned = false;
+    this.lastLevel = 0;
+    this.mode = 'survival';
+    this.player.creative = false;
+    this.player.setCreativeGlow(false);
+    this.player.maxHealth = 20;
+    this.player.health = 20;
+    this.dialogue = null;
+    this.dialogueTtl = 0;
+    this.cutscene = { kind: 'intro', t: 0, dur: 12 };
   }
 
   // ------------------------------------------------------------------ contracts
@@ -2755,14 +2967,15 @@ export class HyperionGame implements World {
 
   // ------------------------------------------------------------------ police
   private updatePolice(dt: number): void {
-    const want = this.stars >= 2 ? Math.min(4, this.stars - 1) : 0;
+    // NERFED dispatch: cap 3 units, 8s spawn interval (was 4 units / 5s).
+    const want = this.stars >= 2 ? Math.min(3, this.stars - 1) : 0;
     const units = this.vehicles.cars.filter((c) => c.state === 'police');
     const active = units.length;
     if (active < want) {
       this.policeTimer -= dt;
       if (this.policeTimer <= 0) {
         this.vehicles.spawnPolice(this.playerPos());
-        this.policeTimer = 5;
+        this.policeTimer = 8;
         if (!this.policeWarned) {
           this.policeWarned = true;
           this.evadeT = 0;
@@ -2778,6 +2991,20 @@ export class HyperionGame implements World {
       this.policeWarned = false;
       this.evadeT = 0;
       this.loseWarned = false;
+    }
+
+    // --- The walking boss: first time the player hits 4 stars ------------------
+    if (this.stars >= 4 && !this.bossSpawned && !this.npcs.bossAlive) {
+      this.bossSpawned = true;
+      const pp = this.playerPos();
+      const spawnPos = new THREE.Vector3(pp.x + 34, 0, pp.z + 26);
+      const boss = this.npcs.spawnBoss(spawnPos);
+      this.cutscene = { kind: 'boss', t: 0, dur: 3.6, boss: boss.group };
+      this.dialogue = { name: boss.name, text: 'You dug into MY city, block man. Now I dig into you.', kind: 'boss' };
+      this.dialogueTtl = 4.5;
+      this.audio.voice(this.dialogue.text, 'boss');
+      this.toast('👑 BOSS INBOUND — REY "THE HAMMER" DIAZ');
+      this.addScore(50);
     }
 
     // --- Air support: one chopper at 5 stars --------------------------------
@@ -2951,72 +3178,75 @@ export class HyperionGame implements World {
     const t = this.timeT;
     const ang = (t - 0.25) * Math.PI * 2; // 0.25 => sunrise
     const day = Math.max(0, Math.sin(ang));
-    // Night only closes in once the sun is truly set (day < 0.14) — keeps the
-    // golden-hour band bright instead of pre-night murk.
-    const night = 1 - Math.min(1, day / 0.14);
+    const night = 1 - Math.min(1, day / 0.22);
     const dusk = Math.max(0, 1 - Math.abs(day - 0.1) / 0.12);
-    // Golden hour: sun roughly 10–30 deg above the horizon (morning or evening band).
-    const golden = Math.max(0, 1 - Math.abs(day - 0.24) / 0.18);
+    // Golden hour: warm low-sun phase (peaks while day ~0.2, morning + evening).
+    const golden = day > 0.02 ? Math.max(0, 1 - Math.abs(day - 0.2) / 0.17) : 0;
     this.nightF = night;
+    this.goldenF = golden;
+    this.duskF = dusk;
     const p = this.playerPos();
     const sx = Math.cos(ang) * 150;
     const sy = Math.sin(ang) * 115;
 
-    // Single source of truth: sky sprite, shader dome, env bake AND the shadow light
-    // all ride this direction (min elevation ~5 deg so the light never dips
-    // underground at twilight). updateCamera re-anchors it to the player each frame.
-    this.sunLightDir.set(sx, Math.max(sy, 14), -60).normalize();
-    this.sun.position.copy(p).addScaledVector(this.sunLightDir, 240);
+    // Light follows the cycle azimuth with a min elevation of ~12.5° so low-sun
+    // shadows stay long but renderable inside the (±110, far 620) frustum.
+    const ly = Math.max(sy, 34);
+    this.sun.position.set(p.x + sx, p.y + ly, p.z - 60);
     this.sun.target.position.set(p.x, p.y, p.z);
     this.sun.target.updateMatrixWorld();
-    this.sun.intensity = 0.08 + day * 2.7 + golden * 1.6;
-    this.sun.color.setHex(0xffd9ae).lerp(DUSK_SUN, Math.min(1, dusk * 1.3)).lerp(GOLDEN_SUN, golden * 0.6);
-    this.hemi.intensity = 0.2 + day * 0.62 + golden * 0.32;
-    // Hemisphere tint drifts amber through golden hour, violet at dusk, deep blue at night.
-    this.hemi.color.copy(HEMI_DAY_SKY).lerp(GOLDEN_HEMI_SKY, golden * 0.6).lerp(HEMI_DUSK_SKY, Math.min(1, dusk * 1.15)).lerp(HEMI_NIGHT_SKY, night);
-    this.hemi.groundColor.copy(HEMI_DAY_GND).lerp(GOLDEN_HEMI_GND, golden * 0.6).lerp(HEMI_DUSK_GND, Math.min(1, dusk * 1.15)).lerp(HEMI_NIGHT_GND, night);
-    this.scene.environmentIntensity = Math.min(0.75, 0.45 + golden * 0.3) - night * 0.22;
-    // Day-aware grade: golden warmth while the sun is low, none at night.
-    if (this.gradePass) this.gradePass.uniforms.warmth.value = Math.max(0, Math.min(1, dusk * 0.9 + golden * 0.75) - night);
+    this.sun.intensity = 0.08 + day * 2.7 + golden * 0.5;
+    this.sun.color.copy(DAY_SUN).lerp(GOLDEN_SUN, Math.min(1, golden * 1.25)).lerp(DUSK_SUN, Math.min(1, dusk * 1.3));
+    this.hemi.intensity = 0.14 + day * 0.62 + golden * 0.1;
+    // Hemisphere tint: blue day → amber golden → violet dusk → deep blue night.
+    this.hemi.color
+      .copy(HEMI_DAY_SKY)
+      .lerp(HEMI_GOLDEN_SKY, Math.min(1, golden * 1.1))
+      .lerp(HEMI_DUSK_SKY, Math.min(1, dusk * 1.15))
+      .lerp(HEMI_NIGHT_SKY, night);
+    this.hemi.groundColor
+      .copy(HEMI_DAY_GND)
+      .lerp(HEMI_GOLDEN_GND, Math.min(1, golden * 1.1))
+      .lerp(HEMI_DUSK_GND, Math.min(1, dusk * 1.15))
+      .lerp(HEMI_NIGHT_GND, night);
+    this.scene.environmentIntensity = 0.5 + golden * 0.12 - night * 0.38;
+    // Phase-tuned exposure: slightly lifted golden/dusk/night reads.
+    this.renderer.toneMappingExposure = 1.02 + golden * 0.1 + dusk * 0.05 + night * 0.13;
 
     if (this.skyUniforms) {
       const u = this.skyUniforms;
-      (u.top.value as THREE.Color).copy(DAY_TOP).lerp(DUSK_TOP, Math.min(1, dusk * 1.1)).lerp(NIGHT_TOP, night);
-      (u.mid.value as THREE.Color).copy(DAY_MID).lerp(GOLDEN_SKY, golden * 0.45).lerp(DUSK_MID, Math.min(1, dusk * 0.9)).lerp(NIGHT_MID, night);
-      (u.bottom.value as THREE.Color).copy(DAY_BOTTOM).lerp(GOLDEN_SKY, golden * 0.5).lerp(DUSK_ORANGE, Math.min(1, dusk * 0.8)).lerp(NIGHT_BOTTOM, night);
-      (u.horizon.value as THREE.Color).copy(DAY_HORIZON).lerp(GOLDEN_HORIZON, golden * 0.55).lerp(DUSK_HORIZON, Math.min(1, dusk * 1.25)).lerp(NIGHT_HORIZON, night);
+      (u.top.value as THREE.Color).copy(DAY_TOP).lerp(GOLDEN_TOP, Math.min(1, golden * 0.95)).lerp(DUSK_TOP, Math.min(1, dusk * 1.1)).lerp(NIGHT_TOP, night);
+      (u.mid.value as THREE.Color).copy(DAY_MID).lerp(GOLDEN_MID, Math.min(1, golden * 0.95)).lerp(DUSK_MID, Math.min(1, dusk * 0.9)).lerp(NIGHT_MID, night);
+      (u.bottom.value as THREE.Color).copy(DAY_BOTTOM).lerp(GOLDEN_BOTTOM, Math.min(1, golden * 0.95)).lerp(DUSK_ORANGE, Math.min(1, dusk * 0.8)).lerp(NIGHT_BOTTOM, night);
+      (u.horizon.value as THREE.Color).copy(DAY_HORIZON).lerp(GOLDEN_HORIZON, Math.min(1, golden * 0.95)).lerp(DUSK_HORIZON, Math.min(1, dusk * 1.25)).lerp(NIGHT_HORIZON, night);
       u.sunDir.value.set(sx, Math.max(sy, 4), -60).normalize();
-      u.glow.value = 0.22 + dusk * 0.95 + golden * 0.4 + night * 0.1;
+      u.glow.value = 0.22 + golden * 0.35 + dusk * 0.95 + night * 0.1;
     }
-    if (this.starsMat) this.starsMat.opacity = night * 0.95;
-    if (this.moonMat) this.moonMat.opacity = night * 0.95;
-    // Sun sprite rides the SAME direction as the shader disc + shadow light
-    // (one sun in the sky, not sprite + disc drifting apart) and fades at night.
+    // Stars and moon only in deep night (used to show up during bright dusk).
+    const deep = Math.max(0, (night - 0.55) / 0.45);
+    if (this.starsMat) this.starsMat.opacity = deep * 0.95;
+    if (this.moonMat) this.moonMat.opacity = deep * 0.9;
+    // Sun sprite rides the actual cycle direction and fades out at night.
     if (this.sunSprite) {
-      this.sunSprite.position.set(sx, Math.max(sy, 4), -60).normalize().multiplyScalar(960);
-      (this.sunSprite.material as THREE.SpriteMaterial).opacity = Math.max(0, Math.min(1, day * 3.2 + dusk * 0.45 + golden * 0.4));
+      const dir = this.sunSprite.position.set(sx, Math.max(sy, 6) + 40, -60).normalize();
+      this.sunSprite.position.copy(dir).multiplyScalar(960);
+      (this.sunSprite.material as THREE.SpriteMaterial).opacity = Math.max(0, Math.min(1, day * 3.2 + dusk * 0.45));
     }
-    // Clouds: white by day, amber at golden hour, pink at dusk, dark blue-grey at night.
+    // Clouds: white by day, amber at golden hour, pink at dusk, blue-grey at night.
     const cloudMat = this.scene.userData.cloudMat as THREE.SpriteMaterial | undefined;
     if (cloudMat) {
-      cloudMat.color.copy(CLOUD_DAY).lerp(GOLDEN_CLOUD, golden * 0.5).lerp(CLOUD_DUSK, Math.min(1, dusk * 1.2)).lerp(CLOUD_NIGHT, night);
+      cloudMat.color.copy(CLOUD_DAY).lerp(GOLDEN_BOTTOM, Math.min(1, golden * 0.7)).lerp(CLOUD_DUSK, Math.min(1, dusk * 1.2)).lerp(CLOUD_NIGHT, night);
       cloudMat.opacity = 0.5 - night * 0.12;
     }
 
-    // Base fog from the day/night cycle.
+    // Base fog from the day/night cycle (deeper aerial perspective by day).
     const fog = this.scene.fog as THREE.Fog | null;
     if (fog) {
-      fog.color.copy(DAY_FOG).lerp(GOLDEN_FOG, golden * 0.45).lerp(DUSK_FOG, Math.min(1, dusk * 0.7)).lerp(NIGHT_FOG, night);
-      fog.near = 130 - night * 45;
-      fog.far = 620 - night * 190;
+      fog.color.copy(DAY_FOG).lerp(GOLDEN_FOG, Math.min(1, golden * 0.9)).lerp(DUSK_FOG, Math.min(1, dusk * 0.7)).lerp(NIGHT_FOG, night);
+      fog.near = 130 + golden * 10 - night * 45;
+      fog.far = 680 - golden * 60 - night * 190;
     }
     this.city.applyNight(night);
-
-    // Sky-matched environment re-bake: every 2.5 s of real time, or immediately
-    // after a save loads a different time of day.
-    if (this.clock.elapsedTime - this.lastEnvBake > 2.5 || Math.abs(this.timeT - this.lastEnvT) > 0.05) {
-      this.bakeEnv();
-    }
 
     // --- Weather dimming (overcast/rain gray-out + lightning spike) ---------
     const rainI = this.weather.intensity;
@@ -3051,9 +3281,55 @@ export class HyperionGame implements World {
 
     const mins = Math.floor(t * 24 * 60);
     this.clockStr = `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+    this.vehicles.setNight(Math.max(night, dusk * 0.6, rainI * 0.3));
+    this.refreshEnvironment();
+  }
+
+  /** Regenerate the PMREM sky environment when the phase bucket changes
+   *  (day/golden/dusk/night × rain) — a few ms a handful of times per cycle. */
+  private refreshEnvironment(): void {
+    if (!this.pmrem || !this.envMat || !this.envScene || !this.skyUniforms) return;
+    const u = this.skyUniforms;
+    const e = this.envMat.uniforms;
+    (e.top.value as THREE.Color).copy(u.top.value as THREE.Color);
+    (e.mid.value as THREE.Color).copy(u.mid.value as THREE.Color);
+    (e.bottom.value as THREE.Color).copy(u.bottom.value as THREE.Color);
+    (e.horizon.value as THREE.Color).copy(u.horizon.value as THREE.Color);
+    (e.sunDir.value as THREE.Vector3).copy(u.sunDir.value as THREE.Vector3);
+    e.glow.value = u.glow.value;
+    const bucket =
+      (this.goldenF > 0.5 ? 1 : 0) + (this.duskF > 0.5 ? 2 : 0) + (this.nightF > 0.5 ? 4 : 0) + (this.weather.intensity > 0.3 ? 8 : 0);
+    if (bucket === this.envBucket) return;
+    this.envBucket = bucket;
+    const old = this.scene.environment;
+    this.scene.environment = this.pmrem.fromScene(this.envScene, 0.09).texture;
+    old?.dispose();
   }
 
   private updateCamera(dt: number): void {
+    // ---- Cinematic override: intro flyover / boss reveal ------------------
+    if (this.cutscene) {
+      const k = Math.min(1, this.cutscene.t / this.cutscene.dur);
+      const ease = k * k * (3 - 2 * k); // smoothstep
+      if (this.cutscene.kind === 'intro') {
+        // Swoop: high above the avenue → glide down to street level at the player.
+        const p = this.playerPos();
+        const start = new THREE.Vector3(p.x + 90, 64, p.z + 150);
+        const end = new THREE.Vector3(p.x + 9, p.y + 3.4, p.z + 11);
+        this.camera.position.copy(start).lerp(end, ease);
+        this.camera.lookAt(p.x, Math.max(p.y + 4 + (1 - ease) * 18, 2), p.z);
+        this.camera.fov = 62 + (1 - ease) * 14;
+      } else if (this.cutscene.boss) {
+        // Slow orbit around the boss, low angle, dramatic.
+        const bp = this.cutscene.boss.position;
+        const a = this.cutscene.t * 0.9;
+        this.camera.position.set(bp.x + Math.cos(a) * 7.5, bp.y + 2.6, bp.z + Math.sin(a) * 7.5);
+        this.camera.lookAt(bp.x, bp.y + 1.5, bp.z);
+        this.camera.fov = 55;
+      }
+      this.camera.updateProjectionMatrix();
+      return;
+    }
     const eye = this.player.eyePosition(new THREE.Vector3());
     const quat = new THREE.Quaternion().setFromEuler(new THREE.Euler(this.player.pitch, this.player.yaw, 0, 'YXZ'));
 
@@ -3110,13 +3386,6 @@ export class HyperionGame implements World {
       this.camera.position.z += (Math.random() - 0.5) * s;
     }
     this.camera.updateProjectionMatrix();
-
-    // Sun follows the player along the TRUE cycle direction (see updateDayNight),
-    // so long golden-hour shadows stay anchored to the sun in the sky.
-    const p = this.playerPos();
-    this.sun.position.copy(p).addScaledVector(this.sunLightDir, 240);
-    this.sun.target.position.set(p.x, p.y, p.z);
-    this.sun.target.updateMatrixWorld();
   }
 
   private updateHudEmit(dt: number): void {
@@ -3134,7 +3403,7 @@ export class HyperionGame implements World {
       this.graceT += 0.5; // one fps sample = 0.5 s
       const lowFps = this.fps < 36;
       this.lowFpsStreak = lowFps ? this.lowFpsStreak + 1 : 0;
-      if (lowFps && this.graceT > 6 && this.lowFpsStreak >= 2 && this.qualityTier < 2) {
+      if (lowFps && this.graceT > 6 && this.lowFpsStreak >= 2 && this.qualityTier < 2 && this.graphicsPreset === 'auto') {
         this.lowFpsStreak = 0;
         this.qualityTier++;
         this.renderer.setPixelRatio(this.qualityTier === 1 ? 1.1 : 0.8);
@@ -3150,19 +3419,30 @@ export class HyperionGame implements World {
             this.composer.dispose();
             this.composer = null;
             this.bloomPass = null;
-            this.gradePass = null;
           }
         }
       }
     }
     this.stateT += dt;
+    this.modeFlash = Math.max(0, this.modeFlash - dt * 1.4);
     if (this.stateT < HUD_EMIT_INTERVAL) return;
     this.stateT = 0;
     const state: HudState = {
       playing: this.playing,
       health: this.player.health,
+      maxHealth: this.player.maxHealth,
       flying: this.player.flying,
       thirdPerson: this.thirdPerson,
+      mode: this.mode,
+      modeFlash: this.modeFlash,
+      dialogue: this.dialogueTtl > 0 ? this.dialogue : null,
+      boss: this.npcs.boss ? { name: 'REY “THE HAMMER” DIAZ', hp: this.npcs.boss.hp, maxHp: this.npcs.boss.maxHp } : null,
+      level: Math.floor(Math.max(0, this.heat) / 100),
+      cutscene: this.cutscene
+        ? this.cutscene.kind === 'intro'
+          ? { title: 'LOS SANTOS VOXEL CITY', sub: 'GOLDEN HOUR — PROJECT HYPERION' }
+          : { title: 'BOSS INBOUND', sub: 'REY “THE HAMMER” DIAZ — 420 HP' }
+        : null,
       driving: this.drivingCar
         ? {
             name: this.drivingCar.name,
@@ -3223,6 +3503,7 @@ export class HyperionGame implements World {
       })(),
       airBest: this.bestAir,
       airPop: this.airPop,
+      skin: this.skinInfo,
     };
     this.cb.onState(state);
     this.drawMinimap();
@@ -3532,19 +3813,6 @@ export class HyperionGame implements World {
     this.composer?.dispose();
     this.composer = null;
     this.bloomPass = null;
-    this.gradePass = null;
-    this.envPmrem?.dispose();
-    this.envPmrem = null;
-    if (this.envScene) {
-      this.envScene.traverse((o) => {
-        if (o instanceof THREE.Mesh) o.geometry.dispose();
-      });
-      this.envScene = null;
-    }
-    this.envSun = null;
-    this.envMoon = null;
-    this.scene.environment?.dispose();
-    this.scene.environment = null;
     if (this.heli) {
       this.heli.dispose(this.scene);
       this.heli = null;
@@ -3624,6 +3892,12 @@ export class HyperionGame implements World {
     this.particles.dispose();
     this.destruction.dispose();
     this.audio.dispose();
+    this.pmrem?.dispose();
+    this.pmrem = null;
+    this.envMat?.dispose();
+    this.envMat = null;
+    this.envScene = null;
+    this.scene.environment?.dispose();
     this.renderer.dispose();
   }
 }

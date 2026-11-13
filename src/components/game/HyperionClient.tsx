@@ -6,6 +6,7 @@ import { HUD_INITIAL, HudState } from './engine/types';
 import { Hud } from './hud';
 import { initIcons, initUIIcons } from './engine/items';
 import { hasSave } from './engine/save';
+import { loadSkinChoice } from './engine/skin';
 
 export default function HyperionClient() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -83,6 +84,15 @@ export default function HyperionClient() {
     };
   }, []);
 
+  // Restore the persisted character skin (TLauncher nickname fetch or uploaded
+  // PNG saved earlier) as soon as the engine instance exists. The stored PNG
+  // data URL restores instantly — no network needed.
+  useEffect(() => {
+    if (!game) return;
+    const choice = loadSkinChoice();
+    if (choice) void game.applySkinPng(choice.png, choice.model, choice.source, choice.name);
+  }, [game]);
+
   const handlePlay = useCallback(() => {
     const game = gameRef.current;
     if (!game) return;
@@ -138,12 +148,16 @@ export default function HyperionClient() {
     gameRef.current?.requestLock();
   }, []);
 
-  // Pause when pointer lock is lost mid-play (unless a UI panel is open)
+  // Pause when pointer lock is lost mid-play (unless a UI panel is open).
+  // Uses the ENGINE's live uiOpen flag — the React closure would still hold a
+  // stale `inventoryOpen` during the pointerlockchange that fires while the
+  // inventory is opening (that race opened the pause menu AND the inventory
+  // at the same time).
   useEffect(() => {
     const onLockChange = () => {
       const game = gameRef.current;
       if (!game) return;
-      if (!document.pointerLockElement && !showStart && !inventoryOpen && !state.dead && game.playing) {
+      if (!document.pointerLockElement && !showStart && !game.uiOpen && !state.dead && game.playing && !game.paused) {
         setPaused(true);
         game.setPaused(true);
       }
@@ -153,7 +167,7 @@ export default function HyperionClient() {
     };
     document.addEventListener('pointerlockchange', onLockChange);
     return () => document.removeEventListener('pointerlockchange', onLockChange);
-  }, [showStart, inventoryOpen, state.dead]);
+  }, [showStart, state.dead]);
 
   // Minecraft-style: while the creative inventory is open, E or Esc closes it
   // (the engine's update loop is gated by uiOpen, so the in-loop KeyE check

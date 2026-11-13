@@ -1,10 +1,13 @@
 'use client';
 
-import { useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
+import * as THREE from 'three';
 import { HudState, ItemStack, ItemId } from './engine/types';
 import { ICON_URLS, ITEMS, UI_ICONS } from './engine/items';
 import { HyperionAudio } from './engine/audio';
 import type { HyperionGame } from './engine/game';
+import type { Player } from './engine/player';
+import { clearSkinChoice, fetchTlauncherSkin, saveSkinChoice } from './engine/skin';
 
 /** Hotbar slot — classic MC dark cell: translucent black fill, inset 2px borders
  *  (dark top/left #2b2b2b, light bottom/right #5a5a5a) + 1px black outer ring. Sharp corners. */
@@ -38,12 +41,14 @@ function Slot({
   onClick,
   size = 48,
   variant = 'hotbar',
+  infinite = false,
 }: {
   stack: ItemStack | null;
   selected?: boolean;
   onClick?: () => void;
   size?: number;
   variant?: 'hotbar' | 'inventory';
+  infinite?: boolean;
 }) {
   return (
     <button
@@ -53,9 +58,9 @@ function Slot({
       aria-label={stack ? ITEMS[stack.id].name : 'empty slot'}
     >
       {stack && <ItemIcon id={stack.id} size={size - 12} />}
-      {stack && stack.count > 1 && (
+      {stack && (infinite || stack.count > 1) && (
         <span className="absolute bottom-0 right-1 text-white text-[13px] font-bold leading-none [text-shadow:2px_2px_0_#000]">
-          {stack.count}
+          {infinite ? '∞' : stack.count}
         </span>
       )}
       {/* inventory hover highlight */}
@@ -74,9 +79,10 @@ function Slot({
   );
 }
 
-function Hearts({ health }: { health: number }) {
+function Hearts({ health, maxHealth = 20 }: { health: number; maxHealth?: number }) {
+  const total = Math.max(10, Math.ceil(maxHealth / 2));
   const hearts: ReactNode[] = [];
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < total; i++) {
     const full = health >= (i + 1) * 2;
     hearts.push(
       <img
@@ -202,6 +208,81 @@ function Stars({ count }: { count: number }) {
   return <div className="flex flex-col items-end gap-[2px]">{stars}</div>;
 }
 
+/** Creative/Survival mode chip (top-left) — J toggles. */
+function ModeChip({ mode }: { mode: 'survival' | 'creative' }) {
+  const creative = mode === 'creative';
+  return (
+    <div
+      className={`absolute left-4 top-4 rounded border px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.22em] ${
+        creative
+          ? 'border-amber-300/60 bg-amber-400/15 text-amber-200 [text-shadow:0_0_10px_rgba(255,200,60,0.55)]'
+          : 'border-white/20 bg-black/55 text-white/60'
+      }`}
+    >
+      {creative ? '✦ Creative · J' : '⛏ Survival · J'}
+    </div>
+  );
+}
+
+/** NPC dialogue bubble (E near an NPC) — speaker name + line + procedural voice. */
+function DialogueBubble({ dialogue }: { dialogue: NonNullable<HudState['dialogue']> }) {
+  const tone =
+    dialogue.kind === 'gang'
+      ? 'border-purple-400/50 text-purple-200'
+      : dialogue.kind === 'boss'
+        ? 'border-red-500/60 text-red-200'
+        : dialogue.kind === 'cop'
+          ? 'border-sky-400/50 text-sky-200'
+          : 'border-white/25 text-white/90';
+  return (
+    <div className="hyperion-dialogue absolute bottom-[132px] left-1/2 w-[440px] max-w-[86vw] -translate-x-1/2 rounded-lg border bg-black/75 px-4 py-2 backdrop-blur-[2px]">
+      <div className={`text-[10px] font-black uppercase tracking-[0.2em] ${tone}`}>{dialogue.name}</div>
+      <div className="mt-0.5 text-[12px] font-bold leading-snug text-white/90 [text-shadow:1px_1px_0_#000]">
+        “{dialogue.text}”
+      </div>
+    </div>
+  );
+}
+
+/** Boss health bar (top center, under the mission chip). */
+function BossBar({ boss }: { boss: NonNullable<HudState['boss']> }) {
+  const pct = Math.max(0, Math.min(100, (boss.hp / boss.maxHp) * 100));
+  return (
+    <div className="absolute left-1/2 top-16 w-[360px] max-w-[80vw] -translate-x-1/2">
+      <div className="mb-1 text-center text-[10px] font-black uppercase tracking-[0.24em] text-red-300 [text-shadow:1px_1px_0_#000]">
+        👑 {boss.name}
+      </div>
+      <div className="h-[10px] w-full overflow-hidden rounded-sm border border-black/70 bg-black/60">
+        <div
+          className="hyperion-bossbar h-full"
+          style={{ width: `${pct}%`, background: 'linear-gradient(90deg,#7f1d1d,#ef4444,#fca5a5)' }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** Cinematic cutscene overlay: letterbox bars + title cards + skip hint. */
+function CutsceneOverlay({ cutscene }: { cutscene: NonNullable<HudState['cutscene']> }) {
+  return (
+    <div className="pointer-events-none fixed inset-0 z-40">
+      <div className="absolute inset-x-0 top-0 h-[13vh] bg-black" />
+      <div className="absolute inset-x-0 bottom-0 h-[13vh] bg-black" />
+      <div className="absolute inset-x-0 top-[20vh] text-center">
+        <div className="text-4xl font-black italic tracking-tight text-white [text-shadow:2px_3px_0_rgba(0,0,0,0.7)]">
+          {cutscene.title}
+        </div>
+        <div className="mt-2 text-[12px] font-bold uppercase tracking-[0.34em] text-amber-300/90">
+          {cutscene.sub}
+        </div>
+        <div className="mt-6 text-[10px] font-bold uppercase tracking-[0.3em] text-white/40">
+          Space / click — skip
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export interface HudProps {
   state: HudState;
   toast: string | null;
@@ -226,11 +307,13 @@ const CONTROLS: Array<[string, string]> = [
   ['RMB', 'Place block / use item'],
   ['LMB (tank)', 'Fire the cannon'],
   ['RMB (hold) 🚀', 'Jetpack thrust (selected)'],
+  ['J', 'Creative ⇄ Survival — infinite inventory + invulnerable'],
+  ['E', 'Inventory — or talk to an NPC when close'],
+  ['RMB 🚀 RPG', 'Fire the rocket launcher'],
   ['Space ×2', 'Toggle creative flight'],
   ['Space / C', 'Fly up / down'],
   ['Shift', 'Sprint'],
   ['1–9 / Wheel', 'Select hotbar slot'],
-  ['E', 'Inventory'],
   ['F', 'Enter / exit car'],
   ['M', 'Accept / quit contract'],
   ["🎨 Drive in", "Pay'n'Spray — clear heat + repair"],
@@ -770,6 +853,7 @@ function TouchControls({ game, state }: { game: HyperionGame; state: HudState })
 function SettingsPanel({ game, state }: { game: HyperionGame; state: HudState }) {
   const [vol, setVol] = useState(Math.round((game.volume ?? 0.8) * 100));
   const [station, setStation] = useState(game.radioStation ?? 0);
+  const [gfx, setGfx] = useState(game.graphics ?? 'auto');
   return (
     <div className="mt-3 rounded-lg bg-black/40 p-3 text-left">
       <div className="mb-2 text-[10px] font-black uppercase tracking-[0.25em] text-white/40">Settings</div>
@@ -811,6 +895,26 @@ function SettingsPanel({ game, state }: { game: HyperionGame; state: HudState })
           ))}
         </div>
       </div>
+      {/* Graphics quality preset */}
+      <div className="mb-2.5 flex items-center gap-2">
+        <span className="w-14 text-[11px] font-bold text-amber-300/90">Graphics</span>
+        <div className="flex flex-1 flex-wrap gap-1">
+          {(['auto', 'low', 'medium', 'high'] as const).map((p) => (
+            <button
+              key={p}
+              onClick={() => {
+                setGfx(p);
+                game.setGraphics(p);
+              }}
+              className={`rounded px-2 py-1 text-[9px] font-black uppercase tracking-wider transition ${
+                gfx === p ? 'bg-amber-500/30 text-amber-200 outline outline-1 outline-amber-400/50' : 'bg-white/8 text-white/55 hover:bg-white/15'
+              }`}
+            >
+              {p === 'auto' ? 'AUTO ✨' : p.toUpperCase()}
+            </button>
+          ))}
+        </div>
+      </div>
       {/* Touch controls */}
       <div className="mb-2.5 flex items-center justify-between">
         <span className="text-[11px] font-bold text-amber-300/90">Touch controls</span>
@@ -839,41 +943,250 @@ function SettingsPanel({ game, state }: { game: HyperionGame; state: HudState })
   );
 }
 
-/** Creative tabs — trapezoid-ish MC tabs; `kinds` filters the inventory grid by item kind. */
-const CREATIVE_TABS: Array<{ id: string; label: string; kinds: string[] }> = [
+/** Inventory tabs — the Character tab (survival-style layout: player preview +
+ *  skin picker + full grid) plus the creative kind-filter tabs (`kinds`). */
+const INV_TABS: Array<{ id: string; label: string; kinds: string[] | null }> = [
+  { id: 'character', label: '🧍 Character', kinds: null },
   { id: 'blocks', label: '🧱 Blocks', kinds: ['placeable', 'tnt'] },
   { id: 'tools', label: '⚔️ Tools', kinds: ['tool', 'weapon', 'igniter'] },
   { id: 'misc', label: '🍎 Misc', kinds: ['food', 'throwable', 'jetpack'] },
 ];
 
-/** Minecraft creative inventory — raised-bevel gray panel, attached filter tabs, MC inset
- *  slots, hotbar mirror row with the white selection frame. All swap/close behavior unchanged. */
+/** Live 3D preview of the character — a mini offscreen renderer showing the
+ *  installed skin (base + overlay layers). Drag to rotate, Minecraft-inventory
+ *  style. Rebuilt whenever the applied skin changes (skinKey). */
+function SkinPreview({ player, skinKey }: { player: Player | null; skinKey: string }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const renderRef = useRef<() => void>(() => {});
+  const rootRef = useRef<THREE.Group | null>(null);
+  const yawRef = useRef(0.55);
+
+  // One-time renderer/scene setup (disposed on unmount).
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const W = 168;
+    const H = 236;
+    const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    renderer.setSize(W, H, false);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    const scene = new THREE.Scene();
+    const cam = new THREE.PerspectiveCamera(38, W / H, 0.1, 60);
+    cam.position.set(0, 1, 3);
+    cam.lookAt(0, 0.98, 0);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.92));
+    const key = new THREE.DirectionalLight(0xfff1dc, 1.2);
+    key.position.set(1.6, 2.6, 2.4);
+    scene.add(key);
+    const rim = new THREE.DirectionalLight(0x9db4ff, 0.5);
+    rim.position.set(-2.2, 1.8, -1.6);
+    scene.add(rim);
+    const root = new THREE.Group();
+    scene.add(root);
+    rootRef.current = root;
+    const render = () => {
+      root.rotation.y = yawRef.current;
+      renderer.render(scene, cam);
+    };
+    renderRef.current = render;
+    // QA debug handle (harmless in production — mirrors window.__hyperion).
+    (window as unknown as Record<string, unknown>).__hyperionSkinPreview = { root, cam, render };
+    // Drag to rotate the model (pointer capture keeps it smooth).
+    let dragging = false;
+    let lastX = 0;
+    const down = (e: PointerEvent) => {
+      dragging = true;
+      lastX = e.clientX;
+      canvas.setPointerCapture(e.pointerId);
+    };
+    const move = (e: PointerEvent) => {
+      if (!dragging) return;
+      yawRef.current += (e.clientX - lastX) * 0.012;
+      lastX = e.clientX;
+      renderRef.current();
+    };
+    const up = () => {
+      dragging = false;
+    };
+    canvas.addEventListener('pointerdown', down);
+    canvas.addEventListener('pointermove', move);
+    canvas.addEventListener('pointerup', up);
+    canvas.addEventListener('pointercancel', up);
+    render();
+    return () => {
+      canvas.removeEventListener('pointerdown', down);
+      canvas.removeEventListener('pointermove', move);
+      canvas.removeEventListener('pointerup', up);
+      canvas.removeEventListener('pointercancel', up);
+      root.clear();
+      renderer.dispose();
+      rootRef.current = null;
+      renderRef.current = () => {};
+    };
+  }, []);
+
+  // Rebuild the model clone whenever the skin changes (materials are shared
+  // with the live player — a fresh clone picks up the new materials).
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    root.clear();
+    if (player) {
+      const clone = player.group.clone(true);
+      clone.visible = true; // the live group is hidden in first person
+      // Strip the player's live world transform — the clone would otherwise
+      // render ~14 units away from the preview camera (out of frame).
+      clone.position.set(0, 0, 0);
+      clone.rotation.set(0, 0, 0);
+      clone.updateMatrixWorld(true);
+      root.add(clone);
+    }
+    renderRef.current();
+  }, [player, skinKey]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      aria-label="Character preview — drag to rotate"
+      className="block cursor-grab touch-none"
+      style={{
+        width: 168,
+        height: 236,
+        background: 'linear-gradient(rgba(0,0,0,0.10), rgba(0,0,0,0) 60%), #b3b3b3',
+        boxShadow: 'inset 2px 2px 0 rgba(255,255,255,0.5), inset -2px -2px 0 rgba(0,0,0,0.14)',
+      }}
+    />
+  );
+}
+
+/** MC-styled skin picker — load the user's own TLauncher skin by nickname
+ *  (proxied through /api/skin), upload a skin PNG, or reset to default.
+ *  The choice is persisted to localStorage and restored on next boot. */
+function SkinPicker({ game, skin }: { game: HyperionGame | null; skin: HudState['skin'] }) {
+  const [nick, setNick] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  const loadTlauncher = async (): Promise<void> => {
+    const name = nick.trim();
+    if (!name || !game || busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const { model, png } = await fetchTlauncherSkin(name);
+      const ok = await game.applySkinPng(png, model, 'tlauncher', name);
+      if (!ok) setErr('TLauncher returned an unusable skin file.');
+      else saveSkinChoice({ source: 'tlauncher', name, model, png });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onFile = (e: ChangeEvent<HTMLInputElement>): void => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f || !game) return;
+    setErr(null);
+    const fr = new FileReader();
+    fr.onload = () => {
+      const png = String(fr.result);
+      void game.applySkinPng(png, 'auto', 'file', f.name).then((ok) => {
+        if (ok) saveSkinChoice({ source: 'file', name: f.name, model: game.skinInfo.model, png });
+        else setErr('Not a valid skin PNG — must be 64×64 or 64×32.');
+      });
+    };
+    fr.onerror = () => setErr('Could not read that file.');
+    fr.readAsDataURL(f);
+  };
+
+  const reset = (): void => {
+    game?.resetSkin();
+    clearSkinChoice();
+    setErr(null);
+  };
+
+  const btn =
+    'border-2 border-t-[#ffffff] border-l-[#ffffff] border-b-[#4a4a4a] border-r-[#4a4a4a] bg-[#8b8b8b] text-[12px] font-bold text-[#1c1c1c] transition-colors hover:bg-[#a3a3a3] active:translate-y-[1px] disabled:opacity-60';
+
+  return (
+    <div className="flex w-full flex-col gap-2">
+      <div className="text-center text-[11px] font-bold text-[#3f3f3f]">
+        {skin.source === 'default'
+          ? 'Default Hyperion skin'
+          : `${skin.name ?? 'file'} · ${skin.model === 'slim' ? 'slim' : 'classic'} model`}
+      </div>
+      <div className="flex gap-[3px]">
+        <input
+          value={nick}
+          onChange={(e) => setNick(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              void loadTlauncher();
+            }
+          }}
+          placeholder="TLauncher nickname"
+          disabled={busy}
+          maxLength={32}
+          className="min-w-0 flex-1 border-2 border-t-[#373737] border-l-[#373737] border-b-[#ffffff] border-r-[#ffffff] bg-[#8b8b8b] px-2 py-[5px] text-[12px] font-bold text-[#1c1c1c] placeholder:text-[#5a5a5a] focus:outline-none"
+        />
+        <button onClick={() => void loadTlauncher()} disabled={busy || !game} className={`${btn} px-2 py-[5px]`}>
+          {busy ? '…' : 'Load'}
+        </button>
+      </div>
+      <div className="flex gap-[3px]">
+        <button onClick={() => fileRef.current?.click()} disabled={!game} className={`${btn} flex-1 py-[5px]`}>
+          📁 Upload .png
+        </button>
+        <button onClick={reset} disabled={!game} aria-label="Reset to default skin" className={`${btn} px-2 py-[5px]`}>
+          ↺
+        </button>
+        <input ref={fileRef} type="file" accept="image/png" className="hidden" onChange={onFile} />
+      </div>
+      {err && <div className="text-center text-[11px] font-bold text-[#a01616]">{err}</div>}
+    </div>
+  );
+}
+
+/** Minecraft inventory — raised-bevel gray panel with the Character tab
+ *  (survival-style: live 3D player preview + skin picker + full grid + hotbar)
+ *  and the creative kind-filter tabs. All swap/close behavior unchanged. */
 function InventoryOverlay({
   state,
+  game,
   onInventorySwap,
   onSlotClick,
   onCloseInventory,
 }: {
   state: HudState;
+  game: HyperionGame | null;
   onInventorySwap: (i: number) => void;
   onSlotClick: (i: number) => void;
   onCloseInventory: () => void;
 }) {
-  const [tabId, setTabId] = useState('blocks');
+  const [tabId, setTabId] = useState('character');
+  const tab = INV_TABS.find((t) => t.id === tabId) ?? INV_TABS[0];
   const filtered = useMemo(() => {
-    const tab = CREATIVE_TABS.find((t) => t.id === tabId) ?? CREATIVE_TABS[0];
+    if (!tab.kinds) return [];
     const kinds = new Set<string>(tab.kinds);
     return state.inventory
       .map((stack, index) => ({ stack, index }))
       .filter(({ stack }) => stack !== null && kinds.has(ITEMS[stack.id].kind));
-  }, [state.inventory, tabId]);
+  }, [state.inventory, tab.kinds]);
+  const skinKey = `${state.skin.source}:${state.skin.name}:${state.skin.model}`;
 
   return (
     <div className="pointer-events-auto absolute inset-0 flex items-center justify-center bg-black/55 backdrop-blur-[2px]">
-      <div className="flex w-[470px] min-w-[340px] max-w-[92vw] flex-col">
-        {/* creative tabs — attached to the panel top (active tab merges with the panel face) */}
+      <div
+        className={`flex ${tab.kinds === null ? 'w-[660px]' : 'w-[470px]'} min-w-[340px] max-w-[94vw] flex-col`}
+      >
+        {/* tabs — attached to the panel top (active tab merges with the panel face) */}
         <div className="relative z-10 -mb-[2px] flex items-end gap-[2px] pl-3">
-          {CREATIVE_TABS.map((t) => (
+          {INV_TABS.map((t) => (
             <button
               key={t.id}
               onClick={() => setTabId(t.id)}
@@ -887,9 +1200,11 @@ function InventoryOverlay({
         </div>
         {/* panel — 2px black outer border + raised bevel (light top/left, dark bottom/right) */}
         <div className="border-2 border-black bg-[#c6c6c6] shadow-2xl shadow-black/60">
-          <div className="hyperion-mc-scroll max-h-[calc(80vh-52px)] overflow-y-auto border-[3px] border-t-[#ffffff] border-l-[#ffffff] border-b-[#555555] border-r-[#555555] p-4 md:p-5">
+          <div className="hyperion-mc-scroll max-h-[calc(82vh-52px)] overflow-y-auto border-[3px] border-t-[#ffffff] border-l-[#ffffff] border-b-[#555555] border-r-[#555555] p-4 md:p-5">
             <div className="mb-3 flex items-center justify-between">
-              <div className="text-lg font-black tracking-wide text-[#3f3f3f]">Creative Inventory</div>
+              <div className="text-lg font-black tracking-wide text-[#3f3f3f]">
+                {tab.kinds === null ? 'Inventory' : 'Creative Inventory'}
+              </div>
               {/* MC beveled close button */}
               <button
                 onClick={onCloseInventory}
@@ -899,35 +1214,83 @@ function InventoryOverlay({
                 ✕
               </button>
             </div>
-            {/* filtered item grid — fixed original indices passed to onInventorySwap */}
-            {filtered.length > 0 ? (
-              <div className="flex flex-wrap content-start gap-[3px]">
-                {filtered.map(({ stack, index }) => (
-                  <Slot key={index} stack={stack} onClick={() => onInventorySwap(index)} size={44} variant="inventory" />
-                ))}
+
+            {tab.kinds === null ? (
+              /* ---- Character tab: player preview + skin picker + full grid + hotbar ---- */
+              <div className="flex flex-col gap-4 md:flex-row">
+                <div className="flex w-[184px] shrink-0 flex-col items-center gap-3">
+                  <SkinPreview player={game?.player ?? null} skinKey={skinKey} />
+                  <SkinPicker game={game} skin={state.skin} />
+                </div>
+                <div className="flex min-w-0 flex-1 flex-col">
+                  {/* full 18-slot main grid (2 × 9) — original indices */}
+                  <div className="flex flex-col gap-[3px]">
+                    {[0, 1].map((row) => (
+                      <div key={row} className="flex gap-[3px]">
+                        {state.inventory.slice(row * 9, row * 9 + 9).map((s, i) => (
+                          <Slot
+                            key={row * 9 + i}
+                            stack={s}
+                            onClick={() => onInventorySwap(row * 9 + i)}
+                            size={44}
+                            variant="inventory"
+                          />
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="my-3 h-[2px] bg-[#8b8b8b]" />
+                  {/* hotbar mirror row — white selection frame on the active slot */}
+                  <div className="flex flex-wrap gap-[3px]">
+                    {state.hotbar.map((s, i) => (
+                      <Slot
+                        key={i}
+                        stack={s}
+                        selected={i === state.slot}
+                        onClick={() => onSlotClick(i)}
+                        size={44}
+                        variant="inventory"
+                      />
+                    ))}
+                  </div>
+                  <div className="mt-3 text-center text-[11px] font-bold text-[#555555]">
+                    Drag the model to rotate · click an item to swap it into the selected hotbar slot
+                  </div>
+                </div>
               </div>
             ) : (
-              <div className="flex h-[124px] items-center justify-center border-2 border-t-[#373737] border-l-[#373737] border-b-[#ffffff] border-r-[#ffffff] bg-[#8b8b8b] text-[12px] font-bold text-[#2c2c2c]">
-                Nothing in this tab yet
-              </div>
+              /* ---- creative kind-filter tabs ---- */
+              <>
+                {filtered.length > 0 ? (
+                  <div className="flex flex-wrap content-start gap-[3px]">
+                    {filtered.map(({ stack, index }) => (
+                      <Slot key={index} stack={stack} onClick={() => onInventorySwap(index)} size={44} variant="inventory" />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex h-[124px] items-center justify-center border-2 border-t-[#373737] border-l-[#373737] border-b-[#ffffff] border-r-[#ffffff] bg-[#8b8b8b] text-[12px] font-bold text-[#2c2c2c]">
+                    Nothing in this tab yet
+                  </div>
+                )}
+                <div className="my-3 h-[2px] bg-[#8b8b8b]" />
+                {/* hotbar mirror row — same MC inset slots + white selection frame */}
+                <div className="flex flex-wrap gap-[3px]">
+                  {state.hotbar.map((s, i) => (
+                    <Slot
+                      key={i}
+                      stack={s}
+                      selected={i === state.slot}
+                      onClick={() => onSlotClick(i)}
+                      size={44}
+                      variant="inventory"
+                    />
+                  ))}
+                </div>
+                <div className="mt-3 text-center text-[11px] font-bold text-[#555555]">
+                  Click an item to swap it into the selected hotbar slot
+                </div>
+              </>
             )}
-            <div className="my-3 h-[2px] bg-[#8b8b8b]" />
-            {/* hotbar mirror row — same MC inset slots + white selection frame on the active slot */}
-            <div className="flex flex-wrap gap-[3px]">
-              {state.hotbar.map((s, i) => (
-                <Slot
-                  key={i}
-                  stack={s}
-                  selected={i === state.slot}
-                  onClick={() => onSlotClick(i)}
-                  size={44}
-                  variant="inventory"
-                />
-              ))}
-            </div>
-            <div className="mt-3 text-center text-[11px] font-bold text-[#555555]">
-              Click an item to swap it into the selected hotbar slot
-            </div>
           </div>
         </div>
       </div>
@@ -945,6 +1308,17 @@ export function Hud(props: HudProps) {
 
   return (
     <div className="pointer-events-none fixed inset-0 select-none font-mono">
+      {/* cutscene letterbox + title cards (intro flyover / boss reveal) */}
+      {state.cutscene && state.playing && <CutsceneOverlay cutscene={state.cutscene} />}
+
+      {/* creative/survival transform flash — golden burst that fades fast */}
+      {state.modeFlash > 0 && (
+        <div
+          className="hyperion-modeflash pointer-events-none fixed inset-0"
+          style={{ opacity: state.modeFlash }}
+        />
+      )}
+
       {/* damage vignette */}
       <div
         className="absolute inset-0 transition-opacity duration-200"
@@ -996,6 +1370,13 @@ export function Hud(props: HudProps) {
 
       {/* Contract tracker (top center) */}
       {state.playing && !state.dead && state.mission && <MissionChip mission={state.mission} />}
+
+      {/* Mode chip (top-left) + boss bar (top center under mission) */}
+      {state.playing && !state.cutscene && <ModeChip mode={state.mode} />}
+      {state.playing && !state.dead && state.boss && <BossBar boss={state.boss} />}
+
+      {/* NPC dialogue bubble */}
+      {state.playing && !state.dead && state.dialogue && <DialogueBubble dialogue={state.dialogue} />}
 
       {/* Stars — GTA chaos level (top right) */}
       {state.playing && (
@@ -1055,7 +1436,7 @@ export function Hud(props: HudProps) {
       {/* Quick-hints chip (bottom right) */}
       {state.playing && !state.dead && state.depth <= 0 && (
         <div className="absolute bottom-6 right-4 rounded bg-black/45 px-2.5 py-1 text-right text-[10px] font-bold leading-relaxed tracking-wide text-white/55">
-          <div>E INVENTORY · F5 VIEW</div>
+          <div>E INVENTORY · F5 VIEW · J MODE</div>
           <div>F CAR · M CONTRACT</div>
         </div>
       )}
@@ -1093,7 +1474,7 @@ export function Hud(props: HudProps) {
                 <div
                   className="h-full rounded-full transition-[width] duration-200"
                   style={{
-                    width: `${Math.max(0, Math.min(1, state.health / 20)) * 100}%`,
+                    width: `${Math.max(0, Math.min(1, state.health / Math.max(1, state.maxHealth))) * 100}%`,
                     background:
                       state.health <= 6
                         ? 'linear-gradient(90deg,#dc2626,#f87171)'
@@ -1144,28 +1525,45 @@ export function Hud(props: HudProps) {
         <div className="pointer-events-auto absolute bottom-4 left-1/2 flex -translate-x-1/2 flex-col items-stretch">
           {/* actionbar line — creative flight tag / selected item name (MC shows it above the status rows) */}
           <div className="mb-1.5 min-h-[16px] text-center text-[11px] font-bold text-white/85 [text-shadow:1px_1px_0_#000]">
-            {state.flying ? '✦ CREATIVE FLIGHT' : itemName ? itemName : ''}
+            {state.flying
+              ? '✦ CREATIVE FLIGHT'
+              : state.mode === 'creative'
+                ? '✦ CREATIVE — infinite supplies'
+                : itemName
+                  ? itemName
+                  : ''}
           </div>
-          {/* XP bar — spans exactly the hotbar width, directly above the hearts/hunger row */}
-          <XpBar score={state.score} />
-          {/* mirrored survival row: hearts left of the center line, hunger right */}
-          <div className="mb-[3px] flex items-end justify-between px-[2px]">
-            <Hearts health={state.health} />
-            <HungerBar />
-          </div>
-          {/* hotbar — 9 sharp MC slots, no outer frame */}
+          {/* XP bar + hearts/hunger hidden in creative (MC creative has no survival stats) */}
+          {state.mode === 'survival' && (
+            <>
+              <XpBar score={state.score} />
+              {/* mirrored survival row: hearts left of the center line, hunger right */}
+              <div className="mb-[3px] flex items-end justify-between px-[2px]">
+                <Hearts health={state.health} maxHealth={state.maxHealth} />
+                <HungerBar />
+              </div>
+            </>
+          )}
+          {/* hotbar — 9 sharp MC slots, no outer frame (counts show ∞ in creative) */}
           <div className="flex gap-[2px]">
             {state.hotbar.map((s, i) => (
-              <Slot key={i} stack={s} selected={i === state.slot} onClick={() => props.onSlotClick(i)} />
+              <Slot
+                key={i}
+                stack={s}
+                selected={i === state.slot}
+                onClick={() => props.onSlotClick(i)}
+                infinite={state.mode === 'creative'}
+              />
             ))}
           </div>
         </div>
       )}
 
-      {/* Inventory overlay — Minecraft creative panel */}
+      {/* Inventory overlay — Minecraft panel: Character tab + creative tabs */}
       {props.inventoryOpen && (
         <InventoryOverlay
           state={state}
+          game={props.game}
           onInventorySwap={props.onInventorySwap}
           onSlotClick={props.onSlotClick}
           onCloseInventory={props.onCloseInventory}

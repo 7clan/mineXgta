@@ -62,6 +62,10 @@ export class Vehicles {
   private rng = mulberry32(555);
   private bodyGeoCache = new Map<string, RoundedBoxGeometry>();
   private geometries: THREE.BufferGeometry[] = [];
+  /** Shared head/tail light materials (identical look on every car; night
+   *  emissive driven by setNight without per-car allocation). */
+  private headMat = new THREE.MeshStandardMaterial({ color: 0xfff6d8, emissive: 0xfff0c0, emissiveIntensity: 1.4 });
+  private tailMat = new THREE.MeshStandardMaterial({ color: 0x550000, emissive: 0xff2a1a, emissiveIntensity: 1.25 });
   onExplosion?: (pos: THREE.Vector3, radius: number) => void;
   onRagdollNPCs?: (pos: THREE.Vector3, r: number) => void;
 
@@ -93,9 +97,9 @@ export class Vehicles {
       clearcoat: 0.6, clearcoatRoughness: 0.04, envMapIntensity: 1.5,
     });
     const tireMat = new THREE.MeshStandardMaterial({ color: 0x101012, roughness: 0.95 });
-    const hubMat = new THREE.MeshStandardMaterial({ color: 0xb8bcc2, roughness: 0.3, metalness: 0.85 });
-    const headMat = new THREE.MeshStandardMaterial({ color: 0xfff6d8, emissive: 0xfff0c0, emissiveIntensity: 1.4 });
-    const tailMat = new THREE.MeshStandardMaterial({ color: 0x550000, emissive: 0xff2a1a, emissiveIntensity: 1.25 });
+    const hubMat = new THREE.MeshStandardMaterial({ color: 0xc8ccd4, roughness: 0.12, metalness: 0.95, envMapIntensity: 1.9 });
+    const headMat = this.headMat;
+    const tailMat = this.tailMat;
 
     const dims =
       type === 'sports'
@@ -117,6 +121,19 @@ export class Vehicles {
     const roof = new THREE.Mesh(this.bodyGeo(dims.w * 0.8, 0.06, dims.cabinLen * 0.72, 0.02), paint);
     roof.position.set(0, dims.ride + dims.h / 2 + dims.cabinH - 0.05, -0.25);
     group.add(roof);
+
+    // Sports cars get a rear wing on struts (GTA coupe silhouette).
+    if (type === 'sports') {
+      const wing = new THREE.Mesh(this.bodyGeo(dims.w * 0.84, 0.05, 0.34, 0.02), paint);
+      wing.position.set(0, dims.ride + dims.h + 0.26, -dims.len / 2 + 0.24);
+      wing.castShadow = true;
+      group.add(wing);
+      for (const s of [-1, 1]) {
+        const strut = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.24, 0.06), dark);
+        strut.position.set(s * dims.w * 0.3, dims.ride + dims.h + 0.13, -dims.len / 2 + 0.24);
+        group.add(strut);
+      }
+    }
 
     // bumpers + grille
     const bumperF = new THREE.Mesh(this.bodyGeo(dims.w * 0.96, 0.18, 0.22, 0.06), dark);
@@ -300,6 +317,13 @@ export class Vehicles {
       car.yawVis = 0;
       car.group.rotation.y = 0;
     }
+  }
+
+  /** Night-driven headlight/taillight emissive boost (0 day → 1 night). */
+  setNight(n: number): void {
+    const k = n < 0 ? 0 : n > 1 ? 1 : n;
+    this.headMat.emissiveIntensity = 0.7 + k * 2.4;
+    this.tailMat.emissiveIntensity = 0.9 + k * 1.5;
   }
 
   private pickType(): CarType {
@@ -894,5 +918,7 @@ export class Vehicles {
     for (const c of this.cars) this.scene.remove(c.group);
     this.cars.length = 0;
     for (const g of this.geometries) g.dispose();
+    this.headMat.dispose();
+    this.tailMat.dispose();
   }
 }

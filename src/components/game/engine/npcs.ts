@@ -7,8 +7,15 @@ import { World } from './types';
  * elbows/knees, canvas-painted faces, hair styles, hats and a wardrobe of
  * outfit archetypes (tee, tank, suit, hoodie, safety vest, shirtless...).
  * Walk cycle with knee flex + elbow bend + torso bob; idle phone / look
- * around behaviours; panic sprint; ragdoll sprawl.
+ * around / pair-chat behaviours; panic sprint; ragdoll sprawl.
+ *
+ * Hyperion cast extension: CIVILIANS with procedural dialogue, GANG crews
+ * (purple Ballas / green Families) that patrol and shoot back when hostile,
+ * and REY "THE HAMMER" DIAZ — a walking boss with 420 HP, a gold pistol and
+ * a suit. Gangs anger when their members are hit; the boss spawns at 4★.
  */
+
+export type Persona = 'civ' | 'gang' | 'boss';
 
 export interface NPC {
   group: THREE.Group;
@@ -17,7 +24,7 @@ export interface NPC {
   shins: { l: THREE.Object3D; r: THREE.Object3D };
   headGrp: THREE.Group;
   torso: THREE.Mesh;
-  state: 'walk' | 'flee' | 'down';
+  state: 'walk' | 'flee' | 'down' | 'fight' | 'cross' | 'chat';
   behavior: 'walk' | 'phone' | 'stand';
   behaviorT: number;
   blockBI: number;
@@ -29,7 +36,52 @@ export interface NPC {
   fleeT: number;
   downT: number;
   walkSpeed: number;
+  // ---- cast extension
+  persona: Persona;
+  /** 0 = purple crew, 1 = green crew (gang only). */
+  gang: 0 | 1;
+  hp: number;
+  maxHp: number;
+  hostile: boolean;
+  shootT: number;
+  meleeT: number;
+  name: string;
+  /** Crosswalk cross: target world pos + the ring param to resume on. */
+  cross: { tx: number; tz: number; fromX: number; fromZ: number } | null;
+  chatPartner: NPC | null;
+  dialogT: number;
+  getUpHostile: boolean;
 }
+
+/** Dialogue banks — civilians get smalltalk, gangs get turf talk, boss gets taunts. */
+const DIALOG: Record<Persona, string[]> = {
+  civ: [
+    'Nice weather for a voxel sunset, huh?',
+    'You seen the price of cobblestone lately? Criminal.',
+    'I\u2019m late. Tower meeting. Structural. Don\u2019t ask.',
+    'Careful with that pickaxe downtown, friend.',
+    'This city used to be flat grass, you know.',
+    'A car almost clipped me at the crosswalk. Again.',
+    'You look like you know where the spray garage is.',
+    'Golden hour really hits different on glass towers.',
+  ],
+  gang: [
+    'This block? This block is ours, tourist.',
+    'Keep walking before I call the crew.',
+    'You lost, or you looking for trouble?',
+    'That pickaxe won\u2019t save you downtown.',
+    'Turf\u2019s turf. Walk around. Capisce?',
+  ],
+  boss: [
+    'You dug into MY city, block man.',
+    'I own these streets. Every voxel of them.',
+    'My crew owns this town. You own nothing.',
+    'Last chance to walk away, pickaxe boy.',
+  ],
+};
+
+const CIV_NAMES = ['Marco', 'Lena', 'Dante', 'Nina', 'Otis', 'Rosa', 'Vic', 'Pam', 'Cleo', 'Ray', 'Ivy', 'Sal'];
+const GANG_NAMES = ['Tyrell', 'Marcus', 'Dre', 'Big Tone', 'Slim', 'Vince', 'Kwame', 'Pockets', 'Rico', 'Fat Dean'];
 
 // ---------------------------------------------------------------- shared pools
 const SKIN_TONES = [0xe8b48c, 0xc68b59, 0x9c6644, 0x6f4a2a, 0xd9a06b, 0x8d5a3a];
@@ -111,6 +163,17 @@ export class NPCs {
   private scene: THREE.Scene;
   private rng = mulberry32(2024);
   private geoCache: THREE.BufferGeometry[] = [];
+  /** Gang/boss combat callback: game draws the tracer, applies damage + audio. */
+  onShoot?: (from: THREE.Vector3, to: THREE.Vector3, dmg: number, far: number) => void;
+  /** Boss died — game pays the reward. */
+  onBossDead?: (boss: NPC) => void;
+  /** Gang member killed by the player — crew aggro escalation feedback. */
+  onGangKill?: (gang: 0 | 1) => void;
+  private pistolGeo: THREE.BoxGeometry | null = null;
+  private pistolMat: THREE.MeshStandardMaterial | null = null;
+  private goldMat: THREE.MeshStandardMaterial | null = null;
+  private bossRef: NPC | null = null;
+  private pairScanT = 0;
   private pools: {
     skin: THREE.MeshStandardMaterial[];
     faceDecal: THREE.MeshStandardMaterial[];
@@ -199,6 +262,125 @@ export class NPCs {
       faceDecal: new THREE.PlaneGeometry(0.155, 0.19),
     };
     for (const g of Object.values(this.G)) this.geoCache.push(g);
+    this.pistolGeo = new THREE.BoxGeometry(0.05, 0.09, 0.19);
+    this.geoCache.push(this.pistolGeo);
+    this.pistolMat = new THREE.MeshStandardMaterial({ color: 0x1c1c22, roughness: 0.35, metalness: 0.7 });
+    this.goldMat = new THREE.MeshStandardMaterial({ color: 0xd4a832, roughness: 0.25, metalness: 0.95, envMapIntensity: 1.6 });
+  }
+
+  get boss(): NPC | null {
+    return this.bossRef && this.bossRef.hp > 0 && this.bossRef.state !== 'down' ? this.bossRef : null;
+  }
+
+  /** True when the walking boss is alive (HUD bar + trigger gating). */
+  get bossAlive(): boolean {
+    return this.boss !== null;
+  }
+
+  /** Procedural dialogue for the E-interaction. Cooldown per NPC. */
+  interact(n: NPC): { name: string; text: string; kind: 'civ' | 'gang' | 'boss' } | null {
+    if (n.dialogT > 0 || n.state === 'down') return null;
+    const bank = DIALOG[n.persona];
+    const text = bank[Math.floor(this.rng() * bank.length)] ?? bank[0] ?? '...';
+    n.dialogT = 4;
+    return { name: n.name, text, kind: n.persona };
+  }
+
+  /** E-interaction query: nearest interactable NPC within reach. */
+  nearestInteractable(pos: THREE.Vector3, reach: number): NPC | null {
+    let best: NPC | null = null;
+    let bestD = reach;
+    for (const n of this.list) {
+      if (n.state === 'down') continue;
+      const d = n.group.position.distanceTo(pos);
+      if (d < bestD) {
+        best = n;
+        bestD = d;
+      }
+    }
+    return best;
+  }
+
+  /** The player hurt a gang member: the whole crew on that gang turns hostile. */
+  angerGang(gang: 0 | 1): void {
+    for (const n of this.list) {
+      if (n.persona === 'gang' && n.gang === gang && n.state !== 'down') {
+        n.hostile = true;
+        if (n.state === 'walk' || n.state === 'cross' || n.state === 'chat') n.state = 'fight';
+      }
+    }
+  }
+
+  /** Apply damage to an NPC. Returns true if the hit was lethal. */
+  damageNPC(n: NPC, dmg: number): boolean {
+    if (n.state === 'down' && n.persona === 'civ') return false;
+    if (n.persona === 'boss' && (n.state === 'down' || n.hp <= 0)) return false;
+    if (n.persona === 'civ') {
+      // Civilians ragdoll instantly (classic chaos behavior).
+      this.knockDown(n);
+      return true;
+    }
+    n.hp = Math.max(0, n.hp - dmg);
+    if (n.hp <= 0) {
+      if (n.persona === 'boss') {
+        this.knockDown(n);
+        this.onBossDead?.(n);
+      } else {
+        this.knockDown(n);
+        this.onGangKill?.(n.gang);
+      }
+      return true;
+    }
+    // Survived: the crew gets angry; the victim fights back once it's up.
+    n.getUpHostile = true;
+    this.angerGang(n.gang);
+    return false;
+  }
+
+  /** Area damage (explosions / rockets) to the cast. */
+  damageArea(pos: THREE.Vector3, r: number, dmg: number): void {
+    for (const n of this.list) {
+      if (n.state === 'down') continue;
+      const d = n.group.position.distanceTo(pos);
+      if (d < r) this.damageNPC(n, d < r * 0.45 ? dmg : dmg * 0.5);
+    }
+  }
+
+  /** Spawn the walking boss (REY "THE HAMMER" DIAZ) at a world position. */
+  spawnBoss(pos: THREE.Vector3): NPC {
+    const npc = this.make(0, 0, 'boss');
+    npc.group.position.set(pos.x, SIDEWALK_H, pos.z);
+    npc.group.scale.setScalar(1.42);
+    npc.hostile = true;
+    npc.state = 'fight';
+    npc.hp = npc.maxHp = 420;
+    npc.walkSpeed = 2.05;
+    npc.name = 'REY "THE HAMMER" DIAZ';
+    this.bossRef = npc;
+    return npc;
+  }
+
+  /** Spawn 2 gang crews (purple + green) that patrol their turf. */
+  spawnGangs(isBuiltBlock: (bi: number, bj: number) => boolean, perGang = 4): void {
+    const crewSpots: Array<{ gang: 0 | 1; bi: number; bj: number }> = [];
+    for (const gang of [0, 1] as const) {
+      let bi = 0, bj = 0;
+      for (let tries = 0; tries < 30; tries++) {
+        bi = Math.floor(this.rng() * 10) - 5;
+        bj = Math.floor(this.rng() * 10) - 5;
+        if (isBuiltBlock(bi, bj) && !crewSpots.some((s) => Math.abs(s.bi - bi) + Math.abs(s.bj - bj) < 3)) break;
+      }
+      crewSpots.push({ gang, bi, bj });
+    }
+    for (const spot of crewSpots) {
+      for (let i = 0; i < perGang; i++) {
+        const npc = this.make(spot.bi, spot.bj, 'gang', spot.gang);
+        npc.perim = (i / perGang) * 90 + this.rng() * 6;
+        this.placeAt(npc, npc.perim);
+        this.list.push(npc);
+        this.scene.add(npc.group);
+      }
+    }
   }
 
   spawn(n: number, isBuiltBlock: (bi: number, bj: number) => boolean): void {
@@ -215,12 +397,11 @@ export class NPCs {
       this.scene.add(npc.group);
     }
   }
-
   private pick<T>(arr: T[]): T {
     return arr[Math.floor(this.rng() * arr.length)];
   }
 
-  private make(bi: number, bj: number): NPC {
+  private make(bi: number, bj: number, persona: Persona = 'civ', gang: 0 | 1 = 0): NPC {
     const G = this.G;
     const skinIdx = Math.floor(this.rng() * this.pools.skin.length);
     const plainSkin = this.pools.skin[skinIdx];
@@ -228,7 +409,17 @@ export class NPCs {
     const pantsMat = this.pick(this.pools.pants);
     const shoeMat = this.pick(this.pools.shoe);
     const hairMat = this.pick(this.pools.hair);
-    const shirtMat = this.pick(this.pools.shirt);
+    let shirtMat = this.pick(this.pools.shirt);
+
+    // ---- persona wardrobe overrides
+    if (persona === 'gang') {
+      // Crew colors: purple jackets vs green hoodies + bandana caps.
+      shirtMat = gang === 0
+        ? new THREE.MeshStandardMaterial({ color: 0x5a2a8a, roughness: 0.85 })
+        : new THREE.MeshStandardMaterial({ color: 0x1f5a2a, roughness: 0.85 });
+    } else if (persona === 'boss') {
+      shirtMat = new THREE.MeshStandardMaterial({ color: 0x7a1220, roughness: 0.55, envMapIntensity: 0.6 });
+    }
 
     // ---- outfit archetype
     const kind = this.pick(OUTFIT_POOL);
@@ -264,7 +455,6 @@ export class NPCs {
     }
 
     const group = new THREE.Group();
-
     // ---- core body
     const torso = new THREE.Mesh(G.torso, torsoMat);
     torso.position.y = 1.2;
@@ -286,7 +476,7 @@ export class NPCs {
     face.renderOrder = 2;
     headGrp.add(face);
 
-    const hairRoll = this.rng();
+    const hairRoll = persona === 'boss' ? 0.9 : this.rng();
     const hairStyle: 'bald' | 'buzz' | 'afro' | 'long' | 'cap' =
       hairRoll < 0.08 ? 'bald' : hairRoll < 0.42 ? 'buzz' : hairRoll < 0.6 ? 'afro' : hairRoll < 0.82 ? 'long' : 'cap';
     if (hairStyle === 'buzz') {
@@ -307,7 +497,8 @@ export class NPCs {
       back.position.set(0, -0.06, 0.1); // back of the head (model forward is -z)
       headGrp.add(back);
     } else if (hairStyle === 'cap') {
-      const capMat = this.pick(this.pools.shirt);
+      // Gang bandanas + civilian ball caps share the cap geometry.
+      const capMat = persona === 'gang' ? shirtMat : this.pick(this.pools.shirt);
       const h = new THREE.Mesh(G.cap, capMat);
       h.position.y = 0.02;
       headGrp.add(h);
@@ -376,17 +567,32 @@ export class NPCs {
       stripe.position.y = 1.16;
       group.add(stripe);
     }
+    if (persona === 'boss' && this.goldMat) {
+      // Gold chain + gold vest stripe + pinky ring: unmistakable boss silhouette.
+      const chain = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.03, 0.03), this.goldMat);
+      chain.position.set(0, 1.36, -0.108);
+      group.add(chain);
+      const goldStripe = new THREE.Mesh(G.stripe, this.goldMat);
+      goldStripe.position.y = 1.14;
+      group.add(goldStripe);
+    }
     if (addHood) {
       const hood = new THREE.Mesh(G.hood, torsoMat);
       hood.position.set(0, 1.5, 0.075); // drapes behind the head
       hood.rotation.x = Math.PI * 0.92;
       group.add(hood);
     }
-    if (this.rng() < 0.3) {
+    if (this.rng() < 0.3 && persona === 'civ') {
       hasPhone = true;
       const phone = new THREE.Mesh(G.phone, this.pools.phone);
       phone.position.set(0, -0.33, -0.045); // in the right hand, screen forward
       rArm.elbow.add(phone);
+    }
+    if (persona !== 'civ' && this.pistolGeo && this.pistolMat && this.goldMat) {
+      // Gang crews + the boss carry pistols in the right hand.
+      const gun = new THREE.Mesh(this.pistolGeo, persona === 'boss' ? this.goldMat : this.pistolMat);
+      gun.position.set(0, -0.34, -0.06);
+      rArm.elbow.add(gun);
     }
     group.userData.hasPhone = hasPhone;
 
@@ -412,8 +618,24 @@ export class NPCs {
       fleeT: 0,
       downT: 0,
       walkSpeed: 1.05 + this.rng() * 0.85,
+      persona,
+      gang,
+      hp: persona === 'gang' ? 34 : persona === 'boss' ? 420 : 1,
+      maxHp: persona === 'gang' ? 34 : persona === 'boss' ? 420 : 1,
+      hostile: false,
+      shootT: 1 + this.rng() * 2,
+      meleeT: 0,
+      name: persona === 'boss'
+        ? 'REY "THE HAMMER" DIAZ'
+        : persona === 'gang'
+          ? (GANG_NAMES[Math.floor(this.rng() * GANG_NAMES.length)] ?? 'Crew')
+          : (CIV_NAMES[Math.floor(this.rng() * CIV_NAMES.length)] ?? 'Ped'),
+      cross: null,
+      chatPartner: null,
+      dialogT: 0,
+      getUpHostile: false,
     };
-    this.placeAt(npc, npc.perim);
+    if (persona !== 'boss') this.placeAt(npc, npc.perim);
     return npc;
   }
 
@@ -450,8 +672,13 @@ export class NPCs {
   ragdollNear(pos: THREE.Vector3, r: number): boolean {
     let hitAny = false;
     for (const n of this.list) {
-      if (n.state === 'down') continue;
+      if (n.state === 'down' || n.persona === 'boss') continue; // boss shrugs off ragdoll
       if (n.group.position.distanceTo(pos) < r) {
+        if (n.persona === 'gang') {
+          // crews get knocked DOWN but wake up hostile
+          n.getUpHostile = true;
+          this.angerGang(n.gang);
+        }
         this.knockDown(n);
         hitAny = true;
       }
@@ -525,26 +752,98 @@ export class NPCs {
   }
 
   update(dt: number, world: World): void {
+    const player = world.playerPos();
+    const dialogDecay = dt;
     for (const n of this.list) {
+      if (n.dialogT > 0) n.dialogT -= dialogDecay;
       if (n.state === 'down') {
         n.downT += dt;
         // Fall over backward with a slight roll
         n.group.rotation.x = Math.min(Math.PI / 2, n.downT * 5);
         n.group.rotation.z = Math.min(0.22, n.downT * 1.1);
         n.group.position.y = Math.max(0.05, SIDEWALK_H - n.downT * 0.08);
-        if (n.downT > 10) {
-          // get up & respawn elsewhere
+        const getUpDelay = n.persona === 'boss' ? 9999 : n.persona === 'gang' ? 2.6 : 10;
+        if (n.downT > getUpDelay) {
+          if (n.persona === 'boss') continue; // the boss stays down (dead)
+          // get up (gangs that were knocked rise ANGRY) & respawn elsewhere
           n.group.rotation.x = 0;
           n.group.rotation.z = 0;
-          n.state = 'walk';
+          if (n.getUpHostile) {
+            n.state = 'fight';
+            n.getUpHostile = false;
+          } else {
+            n.state = 'walk';
+          }
           n.behavior = 'walk';
           n.behaviorT = 0;
           this.resetPose(n);
-          n.blockBI = Math.floor(this.rng() * 12) - 6;
-          n.blockBJ = Math.floor(this.rng() * 12) - 6;
-          this.placeAt(n, this.rng() * 94);
+          if (n.persona === 'civ') {
+            n.blockBI = Math.floor(this.rng() * 12) - 6;
+            n.blockBJ = Math.floor(this.rng() * 12) - 6;
+            this.placeAt(n, this.rng() * 94);
+          }
         }
         continue;
+      }
+
+      // ---- gang & boss combat -------------------------------------------------
+      if (n.persona !== 'civ' && n.hostile && n.state !== 'flee') {
+        this.updateFighter(dt, n, player, world);
+        continue;
+      }
+
+      // ---- crosswalk crossing ------------------------------------------------
+      if (n.state === 'cross' && n.cross) {
+        const dx = n.cross.tx - n.group.position.x;
+        const dz = n.cross.tz - n.group.position.z;
+        const len = Math.hypot(dx, dz);
+        if (len < 0.25) {
+          // Arrived: resume ring-walking on the NEW block.
+          n.state = 'walk';
+          n.cross = null;
+          n.blockBI = Math.floor(n.group.position.x / BLOCK);
+          n.blockBJ = Math.floor(n.group.position.z / BLOCK);
+          n.perim = this.rng() * 94;
+          this.placeAt(n, n.perim);
+        } else {
+          const spd = 1.35;
+          n.group.position.x += (dx / len) * spd * dt;
+          n.group.position.z += (dz / len) * spd * dt;
+          n.group.rotation.y = Math.atan2(-dx, -dz);
+          n.phase += spd * dt * 3.6;
+          const sw = Math.sin(n.phase);
+          n.limbs.lLeg.rotation.x = sw * 0.5;
+          n.limbs.rLeg.rotation.x = -sw * 0.5;
+          n.shins.l.rotation.x = (1 - Math.cos(n.phase)) * 0.4;
+          n.shins.r.rotation.x = (1 + Math.cos(n.phase)) * 0.4;
+          n.limbs.lArm.rotation.x = -sw * 0.4;
+          n.limbs.rArm.rotation.x = sw * 0.4;
+          n.group.position.y = SIDEWALK_H + Math.abs(sw) * 0.02;
+        }
+        continue;
+      }
+
+      // ---- pair chat ----------------------------------------------------------
+      if (n.state === 'chat') {
+        n.behaviorT -= dt;
+        if (n.behaviorT <= 0 || !n.chatPartner || n.chatPartner.state !== 'chat') {
+          n.state = 'walk';
+          n.chatPartner = null;
+          this.resetPose(n);
+        } else {
+          // face the partner + talk gestures
+          const dx = n.chatPartner.group.position.x - n.group.position.x;
+          const dz = n.chatPartner.group.position.z - n.group.position.z;
+          n.group.rotation.y = Math.atan2(-dx, -dz);
+          const g = Math.sin(n.phase * 2.4) * 0.12 + 0.18;
+          n.limbs.rArm.rotation.x = -g;
+          n.fore.r.rotation.x = -0.55;
+          n.limbs.lArm.rotation.x = -0.08;
+          n.fore.l.rotation.x = -0.2;
+          n.phase += dt * 1.6;
+          n.headGrp.rotation.y = Math.sin(n.phase * 1.3) * 0.18;
+          continue;
+        }
       }
 
       const fleeing = n.state === 'flee';
@@ -565,7 +864,10 @@ export class NPCs {
           continue;
         }
       } else if (this.rng() < dt * 0.03) {
-        // occasionally stop for a phone call / to look around
+        // occasionally stop for a phone call / to look around — or CROSS THE ROAD
+        if (n.persona === 'civ' && this.rng() < 0.16 && this.startCross(n)) {
+          continue;
+        }
         n.behavior = n.group.userData.hasPhone && this.rng() < 0.65 ? 'phone' : 'stand';
         n.behaviorT = 4 + this.rng() * 6;
         n.group.userData.swayT = 0;
@@ -599,7 +901,106 @@ export class NPCs {
       n.torso.rotation.x = fleeing ? -0.13 : -0.035; // lean into travel (-z forward)
       n.group.position.y = SIDEWALK_H + Math.abs(Math.sin(n.phase)) * (fleeing ? 0.045 : 0.024);
     }
+    // ---- pair-chat matchmaker: nearby idle walkers pair up every ~2.5s ------
+    this.pairScanT -= dt;
+    if (this.pairScanT <= 0) {
+      this.pairScanT = 2.5;
+      for (let i = 0; i < this.list.length; i++) {
+        const a = this.list[i];
+        if (a.persona !== 'civ' || a.state !== 'walk' || a.behavior !== 'walk') continue;
+        for (let j = i + 1; j < this.list.length; j++) {
+          const b = this.list[j];
+          if (b.persona !== 'civ' || b.state !== 'walk' || b.behavior !== 'walk') continue;
+          if (a.chatPartner || b.chatPartner) continue;
+          if (Math.abs(a.group.position.x - b.group.position.x) > 2.4) continue;
+          if (Math.abs(a.group.position.z - b.group.position.z) > 2.4) continue;
+          if (a.group.position.distanceTo(b.group.position) > 2.6) continue;
+          if (this.rng() > 0.55) continue;
+          a.state = 'chat';
+          b.state = 'chat';
+          a.chatPartner = b;
+          b.chatPartner = a;
+          a.behaviorT = 6 + this.rng() * 7;
+          b.behaviorT = a.behaviorT;
+          this.resetPose(a);
+          this.resetPose(b);
+          break;
+        }
+      }
+    }
     void world;
+  }
+
+  /** Gang/boss combat brain: chase to range, fire, close in, swing. */
+  private updateFighter(dt: number, n: NPC, player: THREE.Vector3, world: World): void {
+    const dx = player.x - n.group.position.x;
+    const dz = player.z - n.group.position.z;
+    const dist = Math.hypot(dx, dz);
+    // Face the player (model forward is -z).
+    n.group.rotation.y = Math.atan2(-dx, -dz);
+    const walk = n.persona === 'boss' ? n.walkSpeed : 2.45;
+    const holdRange = n.persona === 'boss' ? 10 : 13;
+    if (dist > holdRange) {
+      // advance
+      const s = walk * dt;
+      n.group.position.x += (dx / dist) * s;
+      n.group.position.z += (dz / dist) * s;
+      n.group.position.y = world.floorHeightAt(n.group.position.x, n.group.position.z, n.group.position.y + 0.4);
+      n.phase += walk * dt * 3.6;
+      const sw = Math.sin(n.phase);
+      n.limbs.lLeg.rotation.x = sw * 0.62;
+      n.limbs.rLeg.rotation.x = -sw * 0.62;
+      n.shins.l.rotation.x = (1 - Math.cos(n.phase)) * 0.5;
+      n.shins.r.rotation.x = (1 + Math.cos(n.phase)) * 0.5;
+      n.limbs.lArm.rotation.x = -sw * 0.4;
+    } else {
+      // in range: strafe slightly + combat idle
+      n.phase += dt * 2.2;
+      n.limbs.lLeg.rotation.x = 0.12;
+      n.limbs.rLeg.rotation.x = -0.12;
+    }
+    // shooting arm pose (right arm raised, gun forward)
+    n.limbs.rArm.rotation.x = -1.62;
+    n.fore.r.rotation.x = -0.14;
+    n.limbs.rArm.rotation.z = -0.1;
+    n.torso.rotation.x = -0.08;
+    // fire
+    n.shootT -= dt;
+    if (n.shootT <= 0 && dist < 30) {
+      const rate = n.persona === 'boss' ? 1.35 : 1.9 + this.rng() * 0.8;
+      n.shootT = rate;
+      const from = n.group.position.clone().add(new THREE.Vector3(0, 1.35, 0));
+      const to = player.clone().add(new THREE.Vector3(0, 1.1, 0));
+      const dmg = n.persona === 'boss' ? 4.5 : 2.2;
+      this.onShoot?.(from, to, dmg, Math.min(1, dist / 80));
+    }
+    // boss melee swing
+    if (n.persona === 'boss') {
+      n.meleeT -= dt;
+      if (dist < 2.1 && n.meleeT <= 0) {
+        n.meleeT = 1.5;
+        world.damagePlayer(6);
+        // big swing pose pulse
+        n.limbs.rArm.rotation.x = -2.4;
+      }
+    }
+  }
+
+  /** Start a crosswalk cross toward the facing adjacent block. */
+  private startCross(n: NPC): boolean {
+    const side = n.group.userData.ringSide as number;
+    // ring sides: 0 = +x edge, 1 = +z edge, 2 = -x edge, 3 = -z edge (relative).
+    // Outward normal per side (world axis) — crossing goes one block outward.
+    const out: Array<[number, number]> = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+    const [ox, oz] = out[side] ?? [1, 0];
+    const across = BLOCK; // one full block
+    const tx = n.group.position.x + ox * across;
+    const tz = n.group.position.z + oz * across;
+    // keep inside the city
+    if (Math.abs(tx) > 170 || Math.abs(tz) > 170) return false;
+    n.cross = { tx, tz, fromX: n.group.position.x, fromZ: n.group.position.z };
+    n.state = 'cross';
+    return true;
   }
 
   private faceRing(n: NPC): void {
@@ -609,22 +1010,26 @@ export class NPCs {
     n.group.rotation.y = yawMap[side] + (n.dir === 1 ? 0 : Math.PI);
   }
 
-  /** Ragdoll an NPC directly hit (melee / car). */
-  hitNear(pos: THREE.Vector3, r: number): boolean {
+  /** Ragdoll an NPC directly hit (melee / car). Civs go down; gang/boss route
+   *  through damageNPC so HP + crew aggro apply. */
+  hitNear(pos: THREE.Vector3, r: number, dmg = 12): { hit: boolean; npc: NPC | null } {
     for (const n of this.list) {
       if (n.state === 'down') continue;
       if (n.group.position.distanceTo(pos) < r) {
-        this.knockDown(n);
-        return true;
+        this.damageNPC(n, dmg);
+        return { hit: true, npc: n };
       }
     }
-    return false;
+    return { hit: false, npc: null };
   }
 
   dispose(): void {
     for (const n of this.list) this.scene.remove(n.group);
     this.list.length = 0;
+    this.bossRef = null;
     for (const g of this.geoCache) g.dispose();
+    this.pistolMat?.dispose();
+    this.goldMat?.dispose();
     for (const p of Object.values(this.pools)) {
       if (Array.isArray(p)) for (const m of p) m.dispose();
       else p.dispose();
