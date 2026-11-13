@@ -552,3 +552,150 @@ export function makeSteveTextures(): {
   px(gl, 3, 0, 1, 10, denimD); px(gl, 0, 10, 4, 2, shoe); // gray shoe bottom 2 rows
   return { headFront, headSide, headTop, body, arm, leg };
 }
+
+/** Sobel a grayscale height canvas into a tangent-space normal-map texture.
+ *  Emitted in LINEAR color space — data maps must never be tagged sRGB. */
+export function heightToNormal(src: HTMLCanvasElement, strength = 2.2): THREE.CanvasTexture {
+  const W = src.width;
+  const H = src.height;
+  const hgt = ctx2d(src).getImageData(0, 0, W, H).data;
+  const out = makeCanvas(W, H);
+  const g = ctx2d(out);
+  const img = g.createImageData(W, H);
+  const at = (x: number, y: number): number => {
+    const xi = Math.min(W - 1, Math.max(0, x));
+    const yi = Math.min(H - 1, Math.max(0, y));
+    return hgt[(yi * W + xi) * 4] / 255;
+  };
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const dx = (at(x + 1, y) - at(x - 1, y)) * strength;
+      const dy = (at(x, y + 1) - at(x, y - 1)) * strength;
+      let nx = -dx;
+      let ny = dy;
+      const nz = 1;
+      const l = Math.hypot(nx, ny, nz);
+      nx /= l;
+      ny /= l;
+      const o = (y * W + x) * 4;
+      img.data[o] = (nx * 0.5 + 0.5) * 255;
+      img.data[o + 1] = (ny * 0.5 + 0.5) * 255;
+      img.data[o + 2] = ((nz / l) * 0.5 + 0.5) * 255;
+      img.data[o + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(out);
+  t.colorSpace = THREE.NoColorSpace;
+  return t;
+}
+
+/** Procedural PBR set for the player's backpack: woven-canvas albedo with stitched
+ *  seams, zipper columns and an embroidered diamond patch, plus matching
+ *  height-derived normal map and roughness map. All original runtime-generated
+ *  content — zero external assets. */
+export function makeBackpackTextures(): {
+  map: THREE.CanvasTexture;
+  normalMap: THREE.CanvasTexture;
+  roughnessMap: THREE.CanvasTexture;
+} {
+  const S = 256;
+  const rnd = mulberry32(0x8acc);
+  const alb = makeCanvas(S, S), ga = ctx2d(alb);
+  const hgt = makeCanvas(S, S), gh = ctx2d(hgt);
+  const rgh = makeCanvas(S, S), gr = ctx2d(rgh);
+
+  // --- Base: warm khaki canvas in a 4px basket weave ------------------------
+  px(ga, 0, 0, S, S, '#977453');
+  px(gh, 0, 0, S, S, '#808080');
+  px(gr, 0, 0, S, S, '#cdcdcd'); // ~0.80 roughness
+  for (let y = 0; y < S; y += 4) {
+    for (let x = 0; x < S; x += 4) {
+      const over = ((x + y) >> 2) % 2 === 0; // alternating weave cells
+      px(ga, x, y, 4, 4, over ? 'rgba(255,236,200,0.09)' : 'rgba(30,18,8,0.09)');
+      px(gh, x, y, 4, 4, over ? '#8d8d8d' : '#737373');
+      px(gr, x, y, 4, 4, rnd() < 0.5 ? '#c6c6c6' : '#d4d4d4'); // micro roughness variation
+    }
+  }
+  // Thread flecks so the weave reads as fabric, not plastic.
+  for (let i = 0; i < 420; i++) {
+    px(ga, (rnd() * S) | 0, (rnd() * S) | 0, 1, 1, rnd() < 0.5 ? '#a58664' : '#8a6848');
+  }
+
+  // --- Flap edge + seam frame (dashed stitch on albedo, raised ridge) -------
+  const dashed = (g: CanvasRenderingContext2D, col: string, w: number): void => {
+    g.strokeStyle = col;
+    g.lineWidth = w;
+    g.setLineDash([4, 5]);
+    g.strokeRect(12, 12, S - 24, S - 24);
+    g.setLineDash([]);
+  };
+  dashed(ga, '#3d2f1f', 2);
+  gh.strokeStyle = '#9c9c9c'; gh.lineWidth = 3; gh.strokeRect(12, 12, S - 24, S - 24);
+  gr.strokeStyle = '#ececec'; gr.lineWidth = 3; gr.strokeRect(12, 12, S - 24, S - 24);
+  // Flap bottom seam (horizontal) + center vertical seam below it.
+  ga.strokeStyle = '#3d2f1f'; ga.lineWidth = 2; ga.setLineDash([4, 5]);
+  ga.beginPath(); ga.moveTo(10, 46); ga.lineTo(S - 10, 46); ga.stroke();
+  ga.beginPath(); ga.moveTo(S / 2, 46); ga.lineTo(S / 2, S - 12); ga.stroke();
+  ga.setLineDash([]);
+  gh.strokeStyle = '#949494'; gh.lineWidth = 2;
+  gh.beginPath(); gh.moveTo(10, 46); gh.lineTo(S - 10, 46); gh.stroke();
+  gh.beginPath(); gh.moveTo(S / 2, 46); gh.lineTo(S / 2, S - 12); gh.stroke();
+  gr.strokeStyle = '#e8e8e8'; gr.lineWidth = 2;
+  gr.beginPath(); gr.moveTo(10, 46); gr.lineTo(S - 10, 46); gr.stroke();
+  gr.beginPath(); gr.moveTo(S / 2, 46); gr.lineTo(S / 2, S - 12); gr.stroke();
+  // Flap shading band on the upper strip.
+  ga.fillStyle = 'rgba(0,0,0,0.16)';
+  ga.fillRect(0, 0, S, 44);
+  gr.fillStyle = 'rgba(255,255,255,0.05)';
+  gr.fillRect(0, 0, S, 44);
+
+  // --- Zipper columns (glossy teeth; groove in height) ----------------------
+  for (const zx of [60, 180]) {
+    px(ga, zx, 54, 16, S - 70, '#2b241e');
+    px(gh, zx, 54, 16, S - 70, '#5c5c5c');
+    px(gr, zx, 54, 16, S - 70, '#6f6f6f');
+    for (let y = 56; y < S - 18; y += 4) {
+      px(ga, zx + 3, y, 10, 2, '#9a8a70');          // teeth glint
+      px(gh, zx + 3, y, 10, 1, '#3c3c3c');          // tooth groove
+      px(gh, zx + 3, y + 2, 10, 1, '#7c7c7c');       // tooth ridge
+      px(gr, zx + 3, y, 10, 2, '#565656');           // teeth glossier
+    }
+    // Metal pull tab at the top of each column.
+    px(ga, zx + 2, 42, 12, 9, '#b8b2a8');
+    px(gh, zx + 2, 42, 12, 9, '#a8a8a8');
+    px(gr, zx + 2, 42, 12, 9, '#4c4c4c');
+    px(ga, zx + 5, 44, 6, 5, '#8f8a80'); // slot
+  }
+
+  // --- Embroidered diamond patch --------------------------------------------
+  const cx = S / 2, cy = 90, r = 26;
+  const diamond = (g: CanvasRenderingContext2D, fill: string, border: string): void => {
+    g.beginPath();
+    g.moveTo(cx, cy - r); g.lineTo(cx + r, cy); g.lineTo(cx, cy + r); g.lineTo(cx - r, cy);
+    g.closePath();
+    g.fillStyle = fill; g.fill();
+    g.strokeStyle = border; g.lineWidth = 2; g.stroke();
+  };
+  diamond(ga, '#d9a441', '#5a4527');
+  diamond(gh, '#989898', '#b0b0b0');
+  diamond(gr, '#b6b6b6', '#c9c9c9');
+  // Patch cross-stitch.
+  ga.strokeStyle = '#8a5f2a'; ga.lineWidth = 2;
+  ga.beginPath(); ga.moveTo(cx - 12, cy - 12); ga.lineTo(cx + 12, cy + 12);
+  ga.moveTo(cx + 12, cy - 12); ga.lineTo(cx - 12, cy + 12); ga.stroke();
+
+  // --- Grime + edge wear ----------------------------------------------------
+  for (let i = 0; i < 9; i++) {
+    wrapBlob(ga, S, rnd() * S, rnd() * S, 12 + rnd() * 22, 'rgba(50,30,10,0.06)');
+  }
+  for (let i = 0; i < 5; i++) { // worn lighter corners
+    wrapBlob(ga, S, rnd() < 0.5 ? 8 : S - 8, rnd() < 0.5 ? 8 : S - 8, 10 + rnd() * 14, 'rgba(255,240,210,0.07)');
+  }
+
+  const map = toTexture(alb, false);
+  const normalMap = heightToNormal(hgt, 2.4);
+  const roughnessMap = new THREE.CanvasTexture(rgh);
+  roughnessMap.colorSpace = THREE.NoColorSpace;
+  return { map, normalMap, roughnessMap };
+}

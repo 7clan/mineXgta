@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
@@ -92,6 +91,14 @@ const HEMI_DUSK_SKY = new THREE.Color(0xa678c8);
 const HEMI_DUSK_GND = new THREE.Color(0x6e5648);
 const HEMI_NIGHT_SKY = new THREE.Color(0x2a3358);
 const HEMI_NIGHT_GND = new THREE.Color(0x241d26);
+// Golden-hour palette (sun 10–30 deg up): amber sun, caramel horizon, warm fog.
+const GOLDEN_SUN = new THREE.Color(0xffa04d);
+const GOLDEN_FOG = new THREE.Color(0xe8b48a);
+const GOLDEN_HORIZON = new THREE.Color(0xffc27a);
+const GOLDEN_SKY = new THREE.Color(0xe8a860);
+const GOLDEN_HEMI_SKY = new THREE.Color(0xffd2a8);
+const GOLDEN_HEMI_GND = new THREE.Color(0x7a6a52);
+const GOLDEN_CLOUD = new THREE.Color(0xffd8b0);
 
 /** Debris tint per granted block type when carving the world (fallback 0x55555a). */
 const DEBRIS_COLORS: Record<string, number> = {
@@ -106,13 +113,22 @@ const DEBRIS_COLORS: Record<string, number> = {
   planks: 0xa9844f,
 };
 
-/** Cinematic color grade: GTA-style S-curve + saturation + warm highlights + vignette. */
+/** Cinematic color grade v2: S-curve + saturation + day-aware teal-orange split tone
+ *  + soft vignette + animated film grain + subtle radial chromatic aberration. */
 const GradeShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
-    contrast: { value: 1.07 },
-    saturation: { value: 1.13 },
-    vignette: { value: 0.24 },
+    contrast: { value: 1.05 },
+    saturation: { value: 1.14 },
+    vignette: { value: 0.26 },
+    /** Golden-hour warmth 0..1 — driven by updateDayNight, fades to 0 at night. */
+    warmth: { value: 0 },
+    /** Film grain amount (luma-weighted so shadows stay clean). */
+    grain: { value: 0.03 },
+    /** Seconds — animates the grain. */
+    time: { value: 0 },
+    /** Radial chromatic aberration strength. */
+    aberration: { value: 0.0009 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -126,20 +142,37 @@ const GradeShader = {
     uniform float contrast;
     uniform float saturation;
     uniform float vignette;
+    uniform float warmth;
+    uniform float grain;
+    uniform float time;
+    uniform float aberration;
     varying vec2 vUv;
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+    }
     void main() {
-      vec3 c = texture2D(tDiffuse, vUv).rgb;
+      // Subtle radial chromatic aberration (grows toward the frame edges).
+      vec2 d = vUv - 0.5;
+      float r2 = dot(d, d);
+      vec2 off = d * r2 * aberration * 6.0;
+      vec3 c;
+      c.r = texture2D(tDiffuse, vUv - off).r;
+      c.g = texture2D(tDiffuse, vUv).g;
+      c.b = texture2D(tDiffuse, vUv + off).b;
       // S-curve contrast around midtones.
       c = clamp((c - 0.5) * contrast + 0.5, 0.0, 1.0);
       float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
       c = mix(vec3(l), c, saturation);
-      // Warm highlights / cool shadows (teal-orange grade).
-      c = mix(c, c * vec3(1.045, 1.005, 0.955), l);
-      c = mix(c, c * vec3(0.97, 1.0, 1.05), (1.0 - l) * 0.5);
-      // Vignette.
-      vec2 d = vUv - 0.5;
-      float v = 1.0 - dot(d, d) * vignette * 2.1;
-      c *= clamp(v, 0.0, 1.0);
+      // Warm highlights / cool shadows (teal-orange grade); warmth deepens the
+      // golden-hour split while the sun is low and releases it at night.
+      c = mix(c, c * vec3(1.05 + 0.05 * warmth, 1.0, 0.955 - 0.045 * warmth), l);
+      c = mix(c, c * vec3(0.97 - 0.02 * warmth, 1.0, 1.05 + 0.03 * warmth), (1.0 - l) * (0.5 + 0.25 * warmth));
+      // Soft cinematic vignette.
+      float v = 1.0 - smoothstep(0.12, 0.85, r2 * 2.0) * vignette;
+      c *= v;
+      // Animated luma-weighted film grain.
+      float g = (hash(vUv * 997.0 + fract(time * 7.13) * 43.7) - 0.5) * grain * (1.0 - l * 0.55);
+      c += g;
       gl_FragColor = vec4(c, 1.0);
     }
   `,
@@ -241,12 +274,24 @@ export class HyperionGame implements World {
   private starsMat: THREE.PointsMaterial | null = null;
   private moonMat: THREE.SpriteMaterial | null = null;
   private sunSprite: THREE.Sprite | null = null;
-  private timeT = 0.74; // 0 = midnight, 0.25 sunrise, 0.5 noon, 0.75 sunset — boot at GTA dusk
+  private timeT = 0.72; // 0 = midnight, 0.25 sunrise, 0.5 noon, 0.75 sunset — boot at golden hour
   private nightF = 0; // cached night factor (drives props/glow between cycle updates)
   private props: CityProps | null = null;
   private composer: EffectComposer | null = null;
   private bloomPass: UnrealBloomPass | null = null;
   private bloomOn = true;
+  private gradePass: ShaderPass | null = null;
+  /** True cycle sun direction — single source of truth for the sky sprite, the
+   *  shadow-casting directional light and the environment bake. */
+  private sunLightDir = new THREE.Vector3(-0.55, 0.42, -0.72).normalize();
+  /** Sky-matched environment: mini dome sharing the live sky material, rebaked
+   *  through PMREM so car paint / glass reflect the ACTUAL sky, not a neutral room. */
+  private envPmrem: THREE.PMREMGenerator | null = null;
+  private envScene: THREE.Scene | null = null;
+  private envSun: THREE.Sprite | null = null;
+  private envMoon: THREE.Sprite | null = null;
+  private lastEnvBake = -10;
+  private lastEnvT = -1;
   private policeTimer = 0;
   private sirenOn = false;
   private policeWarned = false;
@@ -360,11 +405,11 @@ export class HyperionGame implements World {
     this.cb = cb;
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.06;
+    this.renderer.toneMappingExposure = 1.28;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     this.camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1600);
@@ -376,19 +421,17 @@ export class HyperionGame implements World {
     this.sun = new THREE.DirectionalLight(0xffd9ae, 2.6);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
-    this.sun.shadow.camera.left = -95;
-    this.sun.shadow.camera.right = 95;
-    this.sun.shadow.camera.top = 95;
-    this.sun.shadow.camera.bottom = -95;
-    this.sun.shadow.camera.far = 420;
-    this.sun.shadow.bias = -0.0004;
+    this.sun.shadow.camera.left = -105;
+    this.sun.shadow.camera.right = 105;
+    this.sun.shadow.camera.top = 105;
+    this.sun.shadow.camera.bottom = -105;
+    this.sun.shadow.camera.near = 20;
+    this.sun.shadow.camera.far = 460;
+    this.sun.shadow.bias = -0.0002;
+    this.sun.shadow.normalBias = 0.03; // kills acne on facades without softening contact
+    this.sun.shadow.camera.updateProjectionMatrix();
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
-
-    const pmrem = new THREE.PMREMGenerator(this.renderer);
-    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    this.scene.environmentIntensity = 0.35;
-    pmrem.dispose();
 
     // Settings: apply persisted volume/touch BEFORE any audio can start.
     this.settings = loadSettings();
@@ -403,6 +446,24 @@ export class HyperionGame implements World {
     this.starsMat = built.starsMat;
     this.moonMat = built.moonMat;
     this.sunSprite = built.sunSprite;
+
+    // Sky-matched environment: a mini dome sharing the LIVE sky material (uniforms
+    // stay in sync for free) + sun/moon sprite clones sharing their materials, so
+    // reflections always match the actual golden-hour sky. Re-baked by updateDayNight.
+    this.envPmrem = new THREE.PMREMGenerator(this.renderer);
+    this.envScene = new THREE.Scene();
+    const envDome = new THREE.Mesh(new THREE.SphereGeometry(60, 24, 16), built.skyMat);
+    envDome.frustumCulled = false;
+    this.envScene.add(envDome);
+    this.envSun = new THREE.Sprite(built.sunSprite.material);
+    this.envSun.scale.setScalar(11);
+    this.envScene.add(this.envSun);
+    this.envMoon = new THREE.Sprite(built.moonMat);
+    this.envMoon.scale.setScalar(7);
+    this.envMoon.position.set(520, 620, 430).normalize().multiplyScalar(50);
+    this.envScene.add(this.envMoon);
+    this.bakeEnv();
+    this.scene.environmentIntensity = 0.4;
 
     this.city = new City(this.scene, this.destruction);
     this.props = buildCityProps(this.scene, this.city);
@@ -461,15 +522,30 @@ export class HyperionGame implements World {
     this.input.setLocked(!!document.pointerLockElement);
   };
 
+  /** Re-bake the sky-matched PMREM environment (throttled by updateDayNight). */
+  private bakeEnv(): void {
+    if (!this.envPmrem || !this.envScene) return;
+    if (this.skyUniforms && this.envSun) {
+      this.envSun.position.copy(this.skyUniforms.sunDir.value).multiplyScalar(50);
+    }
+    const old = this.scene.environment;
+    this.scene.environment = this.envPmrem.fromScene(this.envScene, 0.08).texture;
+    if (old) old.dispose();
+    this.lastEnvBake = this.clock.elapsedTime;
+    this.lastEnvT = this.timeT;
+  }
+
   /** Build (or rebuild) the post-processing chain: render → bloom → grade → output. */
   private buildComposer(): void {
     if (!this.bloomOn || this.composer) return;
     const composer = new EffectComposer(this.renderer);
     composer.addPass(new RenderPass(this.scene, this.camera));
-    const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.42, 0.5, 0.85);
+    const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.5, 0.6, 0.82);
     composer.addPass(bloom);
     this.bloomPass = bloom;
-    composer.addPass(new ShaderPass(GradeShader));
+    const grade = new ShaderPass(GradeShader);
+    composer.addPass(grade);
+    this.gradePass = grade;
     composer.addPass(new OutputPass());
     composer.setSize(this.canvas.clientWidth || window.innerWidth, this.canvas.clientHeight || window.innerHeight);
     this.composer = composer;
@@ -485,6 +561,7 @@ export class HyperionGame implements World {
       this.composer?.dispose();
       this.composer = null;
       this.bloomPass = null;
+      this.gradePass = null;
     }
   }
 
@@ -1255,6 +1332,7 @@ export class HyperionGame implements World {
     this.updateCamera(dt);
     this.updateHudEmit(dt);
     this.props?.update(this.clock.elapsedTime, this.nightF);
+    if (this.gradePass) this.gradePass.uniforms.time.value = this.clock.elapsedTime;
     if (this.composer) this.composer.render();
     else this.renderer.render(this.scene, this.camera);
     this.input.endFrame();
@@ -2873,56 +2951,72 @@ export class HyperionGame implements World {
     const t = this.timeT;
     const ang = (t - 0.25) * Math.PI * 2; // 0.25 => sunrise
     const day = Math.max(0, Math.sin(ang));
-    const night = 1 - Math.min(1, day / 0.22);
+    // Night only closes in once the sun is truly set (day < 0.14) — keeps the
+    // golden-hour band bright instead of pre-night murk.
+    const night = 1 - Math.min(1, day / 0.14);
     const dusk = Math.max(0, 1 - Math.abs(day - 0.1) / 0.12);
+    // Golden hour: sun roughly 10–30 deg above the horizon (morning or evening band).
+    const golden = Math.max(0, 1 - Math.abs(day - 0.24) / 0.18);
     this.nightF = night;
     const p = this.playerPos();
     const sx = Math.cos(ang) * 150;
     const sy = Math.sin(ang) * 115;
 
-    this.sun.position.set(p.x + sx, p.y + Math.max(sy, -30), p.z - 60);
+    // Single source of truth: sky sprite, shader dome, env bake AND the shadow light
+    // all ride this direction (min elevation ~5 deg so the light never dips
+    // underground at twilight). updateCamera re-anchors it to the player each frame.
+    this.sunLightDir.set(sx, Math.max(sy, 14), -60).normalize();
+    this.sun.position.copy(p).addScaledVector(this.sunLightDir, 240);
     this.sun.target.position.set(p.x, p.y, p.z);
     this.sun.target.updateMatrixWorld();
-    this.sun.intensity = 0.08 + day * 2.7;
-    this.sun.color.setHex(0xffd9ae).lerp(DUSK_SUN, Math.min(1, dusk * 1.3));
-    this.hemi.intensity = 0.14 + day * 0.62;
-    // Hemisphere tint drifts violet at dusk, deep blue at night.
-    this.hemi.color.copy(HEMI_DAY_SKY).lerp(HEMI_DUSK_SKY, Math.min(1, dusk * 1.15)).lerp(HEMI_NIGHT_SKY, night);
-    this.hemi.groundColor.copy(HEMI_DAY_GND).lerp(HEMI_DUSK_GND, Math.min(1, dusk * 1.15)).lerp(HEMI_NIGHT_GND, night);
-    this.scene.environmentIntensity = 0.35 - night * 0.16;
+    this.sun.intensity = 0.08 + day * 2.7 + golden * 1.6;
+    this.sun.color.setHex(0xffd9ae).lerp(DUSK_SUN, Math.min(1, dusk * 1.3)).lerp(GOLDEN_SUN, golden * 0.6);
+    this.hemi.intensity = 0.2 + day * 0.62 + golden * 0.32;
+    // Hemisphere tint drifts amber through golden hour, violet at dusk, deep blue at night.
+    this.hemi.color.copy(HEMI_DAY_SKY).lerp(GOLDEN_HEMI_SKY, golden * 0.6).lerp(HEMI_DUSK_SKY, Math.min(1, dusk * 1.15)).lerp(HEMI_NIGHT_SKY, night);
+    this.hemi.groundColor.copy(HEMI_DAY_GND).lerp(GOLDEN_HEMI_GND, golden * 0.6).lerp(HEMI_DUSK_GND, Math.min(1, dusk * 1.15)).lerp(HEMI_NIGHT_GND, night);
+    this.scene.environmentIntensity = Math.min(0.75, 0.45 + golden * 0.3) - night * 0.22;
+    // Day-aware grade: golden warmth while the sun is low, none at night.
+    if (this.gradePass) this.gradePass.uniforms.warmth.value = Math.max(0, Math.min(1, dusk * 0.9 + golden * 0.75) - night);
 
     if (this.skyUniforms) {
       const u = this.skyUniforms;
       (u.top.value as THREE.Color).copy(DAY_TOP).lerp(DUSK_TOP, Math.min(1, dusk * 1.1)).lerp(NIGHT_TOP, night);
-      (u.mid.value as THREE.Color).copy(DAY_MID).lerp(DUSK_MID, Math.min(1, dusk * 0.9)).lerp(NIGHT_MID, night);
-      (u.bottom.value as THREE.Color).copy(DAY_BOTTOM).lerp(DUSK_ORANGE, Math.min(1, dusk * 0.8)).lerp(NIGHT_BOTTOM, night);
-      (u.horizon.value as THREE.Color).copy(DAY_HORIZON).lerp(DUSK_HORIZON, Math.min(1, dusk * 1.25)).lerp(NIGHT_HORIZON, night);
+      (u.mid.value as THREE.Color).copy(DAY_MID).lerp(GOLDEN_SKY, golden * 0.45).lerp(DUSK_MID, Math.min(1, dusk * 0.9)).lerp(NIGHT_MID, night);
+      (u.bottom.value as THREE.Color).copy(DAY_BOTTOM).lerp(GOLDEN_SKY, golden * 0.5).lerp(DUSK_ORANGE, Math.min(1, dusk * 0.8)).lerp(NIGHT_BOTTOM, night);
+      (u.horizon.value as THREE.Color).copy(DAY_HORIZON).lerp(GOLDEN_HORIZON, golden * 0.55).lerp(DUSK_HORIZON, Math.min(1, dusk * 1.25)).lerp(NIGHT_HORIZON, night);
       u.sunDir.value.set(sx, Math.max(sy, 4), -60).normalize();
-      u.glow.value = 0.22 + dusk * 0.95 + night * 0.1;
+      u.glow.value = 0.22 + dusk * 0.95 + golden * 0.4 + night * 0.1;
     }
     if (this.starsMat) this.starsMat.opacity = night * 0.95;
     if (this.moonMat) this.moonMat.opacity = night * 0.95;
-    // Sun sprite rides the actual cycle direction and fades out at night.
+    // Sun sprite rides the SAME direction as the shader disc + shadow light
+    // (one sun in the sky, not sprite + disc drifting apart) and fades at night.
     if (this.sunSprite) {
-      const dir = this.sunSprite.position.set(sx, Math.max(sy, 6) + 40, -60).normalize();
-      this.sunSprite.position.copy(dir).multiplyScalar(960);
-      (this.sunSprite.material as THREE.SpriteMaterial).opacity = Math.max(0, Math.min(1, day * 3.2 + dusk * 0.45));
+      this.sunSprite.position.set(sx, Math.max(sy, 4), -60).normalize().multiplyScalar(960);
+      (this.sunSprite.material as THREE.SpriteMaterial).opacity = Math.max(0, Math.min(1, day * 3.2 + dusk * 0.45 + golden * 0.4));
     }
-    // Clouds: white by day, pink at dusk, dark blue-grey at night.
+    // Clouds: white by day, amber at golden hour, pink at dusk, dark blue-grey at night.
     const cloudMat = this.scene.userData.cloudMat as THREE.SpriteMaterial | undefined;
     if (cloudMat) {
-      cloudMat.color.copy(CLOUD_DAY).lerp(CLOUD_DUSK, Math.min(1, dusk * 1.2)).lerp(CLOUD_NIGHT, night);
+      cloudMat.color.copy(CLOUD_DAY).lerp(GOLDEN_CLOUD, golden * 0.5).lerp(CLOUD_DUSK, Math.min(1, dusk * 1.2)).lerp(CLOUD_NIGHT, night);
       cloudMat.opacity = 0.5 - night * 0.12;
     }
 
     // Base fog from the day/night cycle.
     const fog = this.scene.fog as THREE.Fog | null;
     if (fog) {
-      fog.color.copy(DAY_FOG).lerp(DUSK_FOG, Math.min(1, dusk * 0.7)).lerp(NIGHT_FOG, night);
+      fog.color.copy(DAY_FOG).lerp(GOLDEN_FOG, golden * 0.45).lerp(DUSK_FOG, Math.min(1, dusk * 0.7)).lerp(NIGHT_FOG, night);
       fog.near = 130 - night * 45;
       fog.far = 620 - night * 190;
     }
     this.city.applyNight(night);
+
+    // Sky-matched environment re-bake: every 2.5 s of real time, or immediately
+    // after a save loads a different time of day.
+    if (this.clock.elapsedTime - this.lastEnvBake > 2.5 || Math.abs(this.timeT - this.lastEnvT) > 0.05) {
+      this.bakeEnv();
+    }
 
     // --- Weather dimming (overcast/rain gray-out + lightning spike) ---------
     const rainI = this.weather.intensity;
@@ -3017,9 +3111,10 @@ export class HyperionGame implements World {
     }
     this.camera.updateProjectionMatrix();
 
-    // Sun follows player for tight shadows
+    // Sun follows the player along the TRUE cycle direction (see updateDayNight),
+    // so long golden-hour shadows stay anchored to the sun in the sky.
     const p = this.playerPos();
-    this.sun.position.set(p.x - 120, p.y + 95, p.z - 155);
+    this.sun.position.copy(p).addScaledVector(this.sunLightDir, 240);
     this.sun.target.position.set(p.x, p.y, p.z);
     this.sun.target.updateMatrixWorld();
   }
@@ -3055,6 +3150,7 @@ export class HyperionGame implements World {
             this.composer.dispose();
             this.composer = null;
             this.bloomPass = null;
+            this.gradePass = null;
           }
         }
       }
@@ -3436,6 +3532,19 @@ export class HyperionGame implements World {
     this.composer?.dispose();
     this.composer = null;
     this.bloomPass = null;
+    this.gradePass = null;
+    this.envPmrem?.dispose();
+    this.envPmrem = null;
+    if (this.envScene) {
+      this.envScene.traverse((o) => {
+        if (o instanceof THREE.Mesh) o.geometry.dispose();
+      });
+      this.envScene = null;
+    }
+    this.envSun = null;
+    this.envMoon = null;
+    this.scene.environment?.dispose();
+    this.scene.environment = null;
     if (this.heli) {
       this.heli.dispose(this.scene);
       this.heli = null;
