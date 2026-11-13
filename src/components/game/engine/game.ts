@@ -266,6 +266,18 @@ export class HyperionGame implements World {
   private envMat: THREE.ShaderMaterial | null = null;
   private envBucket = -1;
   private graphicsPreset: GraphicsPreset = 'auto';
+  /** Creative/survival game mode (J toggles). */
+  private mode: 'survival' | 'creative' = 'survival';
+  private modeFlash = 0;
+  /** Player level derived from the chaos score; level-ups bump max HP. */
+  private lastLevel = 0;
+  /** Gang/boss combat: dialogue bubble currently shown (fades). */
+  private dialogueTtl = 0;
+  private dialogue: { name: string; text: string; kind: 'civ' | 'gang' | 'boss' | 'cop' } | null = null;
+  /** Walking boss lifecycle. */
+  private bossSpawned = false;
+  /** Active cutscene (intro flyover / boss reveal). */
+  private cutscene: { kind: 'intro' | 'boss'; t: number; dur: number; boss?: THREE.Group } | null = null;
   private props: CityProps | null = null;
   private composer: EffectComposer | null = null;
   private bloomPass: UnrealBloomPass | null = null;
@@ -486,6 +498,27 @@ export class HyperionGame implements World {
       this.audio.fireCrackle(this.far(p));
     };
     this.npcs.spawn(26, (bi, bj) => this.city.blockType(bi, bj) === 'built');
+    this.npcs.spawnGangs((bi, bj) => this.city.blockType(bi, bj) === 'built', 4);
+    this.npcs.onShoot = (from, to, dmg, far) => {
+      this.spawnTracer(from, to);
+      this.audio.pistol(far);
+      // probabilistic hit: the player is a small target
+      if (Math.random() < 0.55) this.damagePlayer(dmg);
+    };
+    this.npcs.onBossDead = () => {
+      this.addScore(500);
+      this.addItem('rocket', 8);
+      this.addItem('apple', 3);
+      this.toast('👑 BOSS DEFEATED — REY DIAZ is down. RPG ×8 + golden apples recovered!');
+      this.audio.levelJingle();
+      this.particles.dustPuff(this.playerPos(), 10, 3);
+      this.bossSpawned = false;
+    };
+    this.npcs.onGangKill = (gang) => {
+      void gang;
+      this.addScore(60);
+      this.toast('Gang member down — the crew is furious');
+    };
     this.vehicles.spawnTraffic(20);
     this.vehicles.spawnParked(this.city.parkingLots, BLOCK);
 
@@ -622,6 +655,8 @@ export class HyperionGame implements World {
     give('pearl', 16);
     give('apple', 8);
     give('sword', 1);
+    give('bat', 1);
+    give('rocket', 6);
   }
 
   addItem(id: ItemId, count: number, silent = false): void {
@@ -699,6 +734,17 @@ export class HyperionGame implements World {
           if (top <= feetY + 0.55) best = Math.max(best, top);
         }
       }
+    }
+    // Building roofs: stand on top when landing from above (roof chunk carved
+    // away = fall through into the interior, matching the destruction system).
+    for (const b of this.city.buildings) {
+      if (b.collapsed) continue;
+      const a = b.aabb;
+      if (x < a.min.x - 0.05 || x > a.max.x + 0.05 || z < a.min.z - 0.05 || z > a.max.z + 0.05) continue;
+      const roofY = a.max.y;
+      if (roofY > feetY + 0.75) continue; // still below the roofline: walls handle it
+      if (this.destruction.isCarved(x, roofY + 0.3, z)) continue;
+      best = Math.max(best, roofY);
     }
     return best;
   }
@@ -998,12 +1044,23 @@ export class HyperionGame implements World {
       return;
     }
     if (hit.kind === 'npc') {
-      if (this.npcs.hitNear(hit.point, 1.5)) {
+      // Melee: weapon damage routes through the NPC cast (HP for gang/boss).
+      const weaponDmg = def && def.kind === 'weapon' ? (it && it.id === 'bat' ? 26 : 18) : def && def.kind === 'tool' ? 12 : 5;
+      const res = this.npcs.hitNear(hit.point, 1.5, weaponDmg);
+      if (res.hit) {
         this.hitMark++;
-        this.addScore(15);
-        this.missions.onPed();
         this.audio.thud(0.1);
-        this.toast('Pedestrian down');
+        if (res.npc && res.npc.persona === 'civ') {
+          this.addScore(15);
+          this.missions.onPed();
+          this.toast('Pedestrian down');
+        } else if (res.npc && res.npc.persona === 'gang') {
+          this.addScore(20);
+          this.toast(`Gang hit — ${res.npc.name}'s crew is angry!`);
+        } else if (res.npc && res.npc.persona === 'boss') {
+          this.addScore(6);
+          this.toast(`REY DIAZ — ${Math.max(0, Math.ceil(res.npc.hp))} HP`);
+        }
         this.fleeNPCs(hit.point, 18);
       }
       return;
@@ -1111,8 +1168,7 @@ export class HyperionGame implements World {
     }
     const it = this.selectedItem();
     if (it) {
-      it.count--;
-      if (it.count <= 0) this.hotbar[this.slot] = null;
+      this.consumeItem(it);
     }
     this.audio.place();
   }
@@ -1140,10 +1196,7 @@ export class HyperionGame implements World {
     this.scene.add(mesh);
     this.tnts.push({ mesh, fuse: TNT_FUSE, pos: center.clone() });
     const it = this.selectedItem();
-    if (it) {
-      it.count--;
-      if (it.count <= 0) this.hotbar[this.slot] = null;
-    }
+    this.consumeItem(it);
     this.audio.place();
     this.toast('TNT armed — 3s fuse');
   }
@@ -1181,7 +1234,7 @@ export class HyperionGame implements World {
     this.particles.firePuff(hit.point, 10);
   }
 
-  private throwPearl(): void {
+  private throwPearl(it: ItemStack | null): void {
     const dir = this.camera.getWorldDirection(new THREE.Vector3());
     const origin = this.camera.getWorldPosition(new THREE.Vector3());
     const geo = new THREE.SphereGeometry(0.1, 8, 6);
@@ -1191,13 +1244,57 @@ export class HyperionGame implements World {
     this.scene.add(mesh);
     this.pearls.push({ mesh, vel: dir.multiplyScalar(24).add(new THREE.Vector3(0, 3, 0)), t: 6 });
     this.audio.pearl();
-    const it = this.selectedItem();
-    if (it) {
-      it.count--;
-      if (it.count <= 0) this.hotbar[this.slot] = null;
-    }
+    this.consumeItem(it);
   }
 
+  /** Decrement a stack — skipped entirely in CREATIVE (infinite supplies). */
+  private consumeItem(it: ItemStack | null): void {
+    if (this.mode === 'creative' || !it) return;
+    it.count--;
+    if (it.count <= 0) this.hotbar[this.slot] = null;
+  }
+
+  /** Creative/survival toggle (J). Creative = infinite inventory + invulnerable
+   *  + golden Steve glow; the HUD hides hearts/XP and flashes on transform. */
+  private toggleMode(): void {
+    this.mode = this.mode === 'creative' ? 'survival' : 'creative';
+    this.player.creative = this.mode === 'creative';
+    this.player.setCreativeGlow(this.player.creative);
+    this.modeFlash = 1;
+    this.audio.modeJingle(this.player.creative);
+    this.toast(this.player.creative ? '✦ CREATIVE MODE — infinite inventory, no damage' : '⛏ SURVIVAL MODE — damage on, resources count');
+    this.addScore(0);
+  }
+
+  get gameMode(): 'survival' | 'creative' {
+    return this.mode;
+  }
+
+  /** RPG rocket: camera-launched shell with gravity + impact explosion. */
+  private fireRocket(it: ItemStack | null): void {
+    if (this.rocketCd > 0) return;
+    this.rocketCd = ITEMS.rocket.cooldown;
+    const dir = this.camera.getWorldDirection(new THREE.Vector3());
+    const origin = this.camera.getWorldPosition(new THREE.Vector3());
+    if (!this.shellGeo || !this.shellMat) {
+      this.shellGeo = new THREE.SphereGeometry(0.16, 8, 6);
+      this.shellMat = new THREE.MeshStandardMaterial({ color: 0x3a5a2e, emissive: 0xffa030, emissiveIntensity: 0.6, roughness: 0.5, metalness: 0.3 });
+    }
+    const mesh = new THREE.Mesh(this.shellGeo, this.shellMat);
+    mesh.scale.set(1, 1, 2.2);
+    mesh.position.copy(origin).addScaledVector(dir, 0.8);
+    mesh.lookAt(origin.clone().addScaledVector(dir, 10));
+    this.scene.add(mesh);
+    this.shells.push({ mesh, vel: dir.clone().multiplyScalar(34).add(new THREE.Vector3(0, 1.4, 0)), t: 7 });
+    this.consumeItem(it);
+    this.audio.rocketLaunch(0.05);
+    this.particles.smokePuff(mesh.position.clone(), 4, 0.3, 0.6);
+    this.shake(0.18);
+  }
+
+  private rocketCd = 0;
+
+  /** RMB item use dispatcher. */
   private useItem(): void {
     if (this.drivingCar) return;
     const it = this.selectedItem();
@@ -1210,18 +1307,20 @@ export class HyperionGame implements World {
       case 'tnt':
         if (it.count > 0) this.placeTNT();
         break;
+      case 'launcher':
+        if (it.count > 0) this.fireRocket(it);
+        break;
       case 'igniter':
         this.useFlint();
         break;
       case 'throwable':
-        if (it.count > 0) this.throwPearl();
+        if (it.count > 0) this.throwPearl(it);
         break;
       case 'food':
-        if (this.player.health < 20 && it.count > 0) {
+        if (this.player.health < this.player.maxHealth && it.count > 0) {
           this.player.heal(6);
           this.audio.eat();
-          it.count--;
-          if (it.count <= 0) this.hotbar[this.slot] = null;
+          this.consumeItem(it);
           this.toast('Munch — +3 hearts');
         }
         break;
@@ -1323,6 +1422,7 @@ export class HyperionGame implements World {
 
     // Damage & chaos
     this.ragdollNPCsNear(pos, r * 1.35);
+    this.npcs.damageArea(pos, r * 1.25, 60); // rockets/TNT hit gang HP + the boss
     this.fleeNPCs(pos, 55);
     this.igniteCarsNear(pos, r * 1.15);
     const pd = this.playerPos().distanceTo(pos);
@@ -1359,6 +1459,21 @@ export class HyperionGame implements World {
   }
 
   private updateGameplay(dt: number): void {
+    // Rocket launcher cooldown
+    if (this.rocketCd > 0) this.rocketCd -= dt;
+    // Dialogue bubble fade
+    if (this.dialogueTtl > 0) {
+      this.dialogueTtl -= dt;
+      if (this.dialogueTtl <= 0) this.dialogue = null;
+    }
+    // Active cutscene: freeze normal gameplay, advance/skip on any key or click.
+    if (this.cutscene) {
+      this.cutscene.t += dt;
+      const skip = this.input.justPressed('Space') || this.input.justPressed('KeyE') || this.input.leftClicked || this.cutscene.t >= this.cutscene.dur;
+      if (skip) this.cutscene = null;
+      this.input.endFrame();
+      return;
+    }
     // Mouse look
     const { dx, dy } = this.input.consumeMouse();
     if (!this.drivingCar) {
@@ -1376,7 +1491,17 @@ export class HyperionGame implements World {
     }
     if (this.input.wheelDelta !== 0) this.setSlot(this.slot + this.input.wheelDelta);
     if (this.input.justPressed('KeyE')) {
-      this.cb.onToast('__OPEN_INVENTORY__');
+      // E near an NPC (aim-gated) talks to them; otherwise it opens the inventory.
+      const eye = this.player.eyePosition(this.tmpV);
+      const near = this.npcs.nearestInteractable(eye, 4.2);
+      const line = near ? this.npcs.interact(near) : null;
+      if (line) {
+        this.dialogue = line;
+        this.dialogueTtl = 4.2;
+        this.audio.voice(line.text, line.kind);
+      } else {
+        this.cb.onToast('__OPEN_INVENTORY__');
+      }
     }
     if (this.input.justPressed('F5')) {
       this.thirdPerson = !this.thirdPerson;
@@ -1384,6 +1509,7 @@ export class HyperionGame implements World {
     }
     if (this.input.justPressed('F3')) this.debugVisible = !this.debugVisible;
     if (this.input.justPressed('KeyF')) this.enterNearestCar();
+    if (this.input.justPressed('KeyJ')) this.toggleMode();
     if (this.input.justPressed('KeyH') && this.drivingCar) this.audio.horn(0.1);
     if (this.input.justPressed('KeyM')) {
       if (!this.missions.accept()) this.missions.abandon();
@@ -1416,8 +1542,8 @@ export class HyperionGame implements World {
     } else {
       this.updateJetpack(dt);
       const res = this.player.update(dt, this.input, this, true);
-      if (res.landed && res.fallVel < -18) this.damagePlayer((Math.abs(res.fallVel) - 18) * 0.7);
       this.ensureStrata(this.player.pos.y);
+      void res;
     }
 
     this.vehicles.setPlayerRef(this.playerPos());
@@ -1509,6 +1635,15 @@ export class HyperionGame implements World {
     const heatDecay = this.evadeT > 1.5 ? 10.5 : 2.5;
     this.heat = Math.max(0, this.heat - dt * heatDecay);
     this.stars = this.heat <= 0 ? 0 : Math.min(5, 1 + Math.floor(this.heat / 150));
+    // Level-up: every 100 CHAOS — +2 max health, full heal, jingle.
+    const lvl = Math.floor(Math.max(0, this.heat) / 100);
+    if (lvl > this.lastLevel) {
+      const gained = lvl - this.lastLevel;
+      this.lastLevel = lvl;
+      for (let i = 0; i < gained; i++) this.player.levelUp();
+      this.audio.levelJingle();
+      this.toast(`⭐ LEVEL ${lvl} — max health +${gained * 2} (survival only)`);
+    }
     if (this.heat <= 0) {
       this.evadeT = 0;
       this.loseWarned = false;
@@ -1742,6 +1877,7 @@ export class HyperionGame implements World {
       radio: this.audio.radioStation,
       jetFuel: this.jetFuel,
       bestAir: this.bestAir,
+      mode: this.mode,
     });
     this.hasSaveFile = ok;
     if (manual) this.toast(ok ? 'World saved' : 'Save failed (storage blocked?)');
@@ -1785,6 +1921,12 @@ export class HyperionGame implements World {
       this.updateDayNight();
       this.heat = d.heat;
       this.destruction.totalRemoved = d.removed;
+      this.player.maxHealth = 20 + Math.min(10, Math.floor(Math.max(0, d.heat) / 100)) * 2;
+      this.player.health = Math.min(d.player.health, this.player.maxHealth);
+      this.mode = d.mode ?? 'survival';
+      this.player.creative = this.mode === 'creative';
+      this.player.setCreativeGlow(this.player.creative);
+      this.lastLevel = Math.floor(Math.max(0, d.heat) / 100);
       this.hotbar = d.hotbar.map((s) => (s ? { ...s } : null));
       this.inventory = d.inventory.map((s) => (s ? { ...s } : null));
       this.slot = ((d.slot % 9) + 9) % 9;
@@ -1808,6 +1950,18 @@ export class HyperionGame implements World {
   resetNewGame(): void {
     clearSave();
     this.hasSaveFile = false;
+    this.heat = 0;
+    this.stars = 0;
+    this.bossSpawned = false;
+    this.lastLevel = 0;
+    this.mode = 'survival';
+    this.player.creative = false;
+    this.player.setCreativeGlow(false);
+    this.player.maxHealth = 20;
+    this.player.health = 20;
+    this.dialogue = null;
+    this.dialogueTtl = 0;
+    this.cutscene = { kind: 'intro', t: 0, dur: 12 };
   }
 
   // ------------------------------------------------------------------ contracts
@@ -2775,14 +2929,15 @@ export class HyperionGame implements World {
 
   // ------------------------------------------------------------------ police
   private updatePolice(dt: number): void {
-    const want = this.stars >= 2 ? Math.min(4, this.stars - 1) : 0;
+    // NERFED dispatch: cap 3 units, 8s spawn interval (was 4 units / 5s).
+    const want = this.stars >= 2 ? Math.min(3, this.stars - 1) : 0;
     const units = this.vehicles.cars.filter((c) => c.state === 'police');
     const active = units.length;
     if (active < want) {
       this.policeTimer -= dt;
       if (this.policeTimer <= 0) {
         this.vehicles.spawnPolice(this.playerPos());
-        this.policeTimer = 5;
+        this.policeTimer = 8;
         if (!this.policeWarned) {
           this.policeWarned = true;
           this.evadeT = 0;
@@ -2798,6 +2953,20 @@ export class HyperionGame implements World {
       this.policeWarned = false;
       this.evadeT = 0;
       this.loseWarned = false;
+    }
+
+    // --- The walking boss: first time the player hits 4 stars ------------------
+    if (this.stars >= 4 && !this.bossSpawned && !this.npcs.bossAlive) {
+      this.bossSpawned = true;
+      const pp = this.playerPos();
+      const spawnPos = new THREE.Vector3(pp.x + 34, 0, pp.z + 26);
+      const boss = this.npcs.spawnBoss(spawnPos);
+      this.cutscene = { kind: 'boss', t: 0, dur: 3.6, boss: boss.group };
+      this.dialogue = { name: boss.name, text: 'You dug into MY city, block man. Now I dig into you.', kind: 'boss' };
+      this.dialogueTtl = 4.5;
+      this.audio.voice(this.dialogue.text, 'boss');
+      this.toast('👑 BOSS INBOUND — REY "THE HAMMER" DIAZ');
+      this.addScore(50);
     }
 
     // --- Air support: one chopper at 5 stars --------------------------------
@@ -3100,6 +3269,29 @@ export class HyperionGame implements World {
   }
 
   private updateCamera(dt: number): void {
+    // ---- Cinematic override: intro flyover / boss reveal ------------------
+    if (this.cutscene) {
+      const k = Math.min(1, this.cutscene.t / this.cutscene.dur);
+      const ease = k * k * (3 - 2 * k); // smoothstep
+      if (this.cutscene.kind === 'intro') {
+        // Swoop: high above the avenue → glide down to street level at the player.
+        const p = this.playerPos();
+        const start = new THREE.Vector3(p.x + 90, 64, p.z + 150);
+        const end = new THREE.Vector3(p.x + 9, p.y + 3.4, p.z + 11);
+        this.camera.position.copy(start).lerp(end, ease);
+        this.camera.lookAt(p.x, Math.max(p.y + 4 + (1 - ease) * 18, 2), p.z);
+        this.camera.fov = 62 + (1 - ease) * 14;
+      } else if (this.cutscene.boss) {
+        // Slow orbit around the boss, low angle, dramatic.
+        const bp = this.cutscene.boss.position;
+        const a = this.cutscene.t * 0.9;
+        this.camera.position.set(bp.x + Math.cos(a) * 7.5, bp.y + 2.6, bp.z + Math.sin(a) * 7.5);
+        this.camera.lookAt(bp.x, bp.y + 1.5, bp.z);
+        this.camera.fov = 55;
+      }
+      this.camera.updateProjectionMatrix();
+      return;
+    }
     const eye = this.player.eyePosition(new THREE.Vector3());
     const quat = new THREE.Quaternion().setFromEuler(new THREE.Euler(this.player.pitch, this.player.yaw, 0, 'YXZ'));
 
@@ -3194,13 +3386,25 @@ export class HyperionGame implements World {
       }
     }
     this.stateT += dt;
+    this.modeFlash = Math.max(0, this.modeFlash - dt * 1.4);
     if (this.stateT < HUD_EMIT_INTERVAL) return;
     this.stateT = 0;
     const state: HudState = {
       playing: this.playing,
       health: this.player.health,
+      maxHealth: this.player.maxHealth,
       flying: this.player.flying,
       thirdPerson: this.thirdPerson,
+      mode: this.mode,
+      modeFlash: this.modeFlash,
+      dialogue: this.dialogueTtl > 0 ? this.dialogue : null,
+      boss: this.npcs.boss ? { name: 'REY “THE HAMMER” DIAZ', hp: this.npcs.boss.hp, maxHp: this.npcs.boss.maxHp } : null,
+      level: Math.floor(Math.max(0, this.heat) / 100),
+      cutscene: this.cutscene
+        ? this.cutscene.kind === 'intro'
+          ? { title: 'LOS SANTOS VOXEL CITY', sub: 'GOLDEN HOUR — PROJECT HYPERION' }
+          : { title: 'BOSS INBOUND', sub: 'REY “THE HAMMER” DIAZ — 420 HP' }
+        : null,
       driving: this.drivingCar
         ? {
             name: this.drivingCar.name,

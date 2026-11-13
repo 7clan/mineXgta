@@ -153,12 +153,12 @@ export class HyperionAudio {
   }
 
   /** One-shot tone: osc -> (lowpass) -> env gain -> master; optional freq sweep. */
-  private tone(o: { type: OscillatorType; f0: number; f1?: number; sweep?: number; a: number; d: number; peak: number; lp?: number }): void {
+  private tone(o: { type: OscillatorType; f0: number; f1?: number; sweep?: number; a: number; d: number; peak: number; lp?: number; at?: number }): void {
     try {
       if (!this.ctx || !this.master) return;
       const osc = this.osc(o.type, o.f0), g = this.ctx.createGain();
       if (!osc) return;
-      const t0 = this.ctx.currentTime;
+      const t0 = this.ctx.currentTime + (o.at ?? 0);
       if (o.f1 !== undefined && o.sweep !== undefined) osc.frequency.exponentialRampToValueAtTime(o.f1, t0 + o.sweep);
       let tail: AudioNode = osc;
       if (o.lp) {
@@ -286,6 +286,95 @@ export class HyperionAudio {
     try {
       if (!this.ctx || !this.master) return;
       this.tone({ type: 'sine', f0: 600, f1: 900, sweep: 0.07, a: 0.005, d: 0.07, peak: 0.3 });
+    } catch { /* noop */ }
+  }
+
+  /** Procedural "voice acting" (Animalese-style syllable bleeps): speaks the
+   *  TEXT live — each syllable becomes a short blip whose pitch tracks the
+   *  sentence contour (rise -> fall, question lift) and the speaker's style.
+   *  civ = mid voice, gang = low gruff, boss = deep slow, cop = nasal radio. */
+  voice(text: string, style: 'civ' | 'gang' | 'boss' | 'cop' = 'civ'): void {
+    try {
+      if (!this.ctx || !this.master) return;
+      const base = style === 'boss' ? 108 : style === 'gang' ? 158 : style === 'cop' ? 285 : 235;
+      const rate = style === 'boss' ? 0.1 : style === 'gang' ? 0.085 : 0.075; // seconds per syllable-ish step
+      const words = text.split(/\s+/).filter(Boolean);
+      // Syllable budget: ~1.6 per word, punctuation pauses.
+      const steps: Array<{ gap: number; emph: boolean }> = [];
+      for (const w of words) {
+        const syl = Math.max(1, Math.round(w.length / 3.2));
+        for (let s = 0; s < syl; s++) steps.push({ gap: rate, emph: false });
+        if (/[,;:.!?-]$/.test(w)) steps.push({ gap: rate * 1.6, emph: /[!?]$/.test(w) });
+      }
+      if (!steps.length) return;
+      let t = this.ctx.currentTime + 0.02;
+      const total = steps.length;
+      steps.forEach((st, i) => {
+        // Sentence contour: rises to ~60%, falls to the end; questions lift at the very end.
+        const k = i / Math.max(1, total - 1);
+        let contour = 1 + 0.28 * Math.sin(Math.min(Math.PI, k * 1.5)) - 0.3 * k;
+        if (/\?\s*$/.test(text) && k > 0.75) contour += 0.22;
+        const f = base * contour * (0.94 + Math.random() * 0.12);
+        const type: OscillatorType = style === 'gang' || style === 'boss' ? 'square' : 'triangle';
+        const o = this.osc(type, f);
+        const g = this.ctx!.createGain();
+        if (!o) return;
+        const lp = this.filter('lowpass', style === 'cop' ? 1400 : 3200);
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.linearRampToValueAtTime(st.emph ? 0.09 : 0.055, t + 0.008);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + rate * 1.15);
+        o.frequency.setValueAtTime(f, t);
+        o.frequency.exponentialRampToValueAtTime(f * (st.emph ? 1.25 : 0.9), t + rate * 0.9);
+        this.chain([o, lp, g]);
+        o.start(t);
+        o.stop(t + rate * 1.25);
+        t += st.gap;
+      });
+    } catch { /* noop */ }
+  }
+
+  /** Pistol crack (gang/boss gunfire): bright noise snap + body thump. */
+  pistol(far: number): void {
+    try {
+      if (!this.ctx || !this.master) return;
+      const v = this.farGain(far);
+      this.burst({ dur: 0.09, type: 'highpass', f0: 1800, a: 0.001, d: 0.08, peak: 0.5 * v });
+      this.burst({ dur: 0.14, type: 'lowpass', f0: 500, f1: 160, sweep: 0.12, a: 0.002, d: 0.12, peak: 0.4 * v });
+    } catch { /* noop */ }
+  }
+
+  /** RPG launch whoosh: broadband blast + descending sine smear. */
+  rocketLaunch(far: number): void {
+    try {
+      if (!this.ctx || !this.master) return;
+      const v = this.farGain(far);
+      this.burst({ dur: 0.5, type: 'bandpass', f0: 900, f1: 260, sweep: 0.4, q: 0.8, a: 0.01, d: 0.45, peak: 0.55 * v });
+      this.tone({ type: 'sawtooth', f0: 320, f1: 90, sweep: 0.42, a: 0.01, d: 0.42, peak: 0.3 * v, lp: 1400 });
+    } catch { /* noop */ }
+  }
+
+  /** Level-up jingle: rising 3-note arpeggio. */
+  levelJingle(): void {
+    try {
+      if (!this.ctx || !this.master) return;
+      const notes = [392, 523, 659, 784];
+      notes.forEach((f, i) => {
+        this.tone({ type: 'triangle', f0: f, a: 0.01, d: 0.24, peak: 0.16, at: i * 0.09 });
+      });
+    } catch { /* noop */ }
+  }
+
+  /** Mode-transform jingle: creative = shimmering up-glide, survival = thumpy down. */
+  modeJingle(creative: boolean): void {
+    try {
+      if (!this.ctx || !this.master) return;
+      if (creative) {
+        this.tone({ type: 'sine', f0: 300, f1: 900, sweep: 0.35, a: 0.02, d: 0.4, peak: 0.22 });
+        this.tone({ type: 'triangle', f0: 600, f1: 1500, sweep: 0.35, a: 0.03, d: 0.45, peak: 0.14 });
+      } else {
+        this.tone({ type: 'sine', f0: 420, f1: 120, sweep: 0.3, a: 0.02, d: 0.35, peak: 0.22 });
+        this.burst({ dur: 0.18, type: 'lowpass', f0: 300, a: 0.004, d: 0.16, peak: 0.3 });
+      }
     } catch { /* noop */ }
   }
 

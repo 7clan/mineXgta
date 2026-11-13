@@ -138,12 +138,16 @@ export default function HyperionClient() {
     gameRef.current?.requestLock();
   }, []);
 
-  // Pause when pointer lock is lost mid-play (unless a UI panel is open)
+  // Pause when pointer lock is lost mid-play (unless a UI panel is open).
+  // Uses the ENGINE's live uiOpen flag — the React closure would still hold a
+  // stale `inventoryOpen` during the pointerlockchange that fires while the
+  // inventory is opening (that race opened the pause menu AND the inventory
+  // at the same time).
   useEffect(() => {
     const onLockChange = () => {
       const game = gameRef.current;
       if (!game) return;
-      if (!document.pointerLockElement && !showStart && !inventoryOpen && !state.dead && game.playing) {
+      if (!document.pointerLockElement && !showStart && !game.uiOpen && !state.dead && game.playing && !game.paused) {
         setPaused(true);
         game.setPaused(true);
       }
@@ -153,7 +157,7 @@ export default function HyperionClient() {
     };
     document.addEventListener('pointerlockchange', onLockChange);
     return () => document.removeEventListener('pointerlockchange', onLockChange);
-  }, [showStart, inventoryOpen, state.dead]);
+  }, [showStart, state.dead]);
 
   // Minecraft-style: while the creative inventory is open, E or Esc closes it
   // (the engine's update loop is gated by uiOpen, so the in-loop KeyE check

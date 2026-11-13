@@ -26,7 +26,11 @@ export class Player {
   flying = false;
   onGround = false;
   health = 20;
+  /** Level-ups raise the cap (2 HP per level; survival HUD reads this). */
+  maxHealth = 20;
   dead = false;
+  /** Creative mode: no damage of any kind (falls, cops, bosses, fire). */
+  creative = false;
   group = new THREE.Group();
   thirdPerson = false;
   private limbs: { lArm: THREE.Object3D; rArm: THREE.Object3D; lLeg: THREE.Object3D; rLeg: THREE.Object3D };
@@ -110,26 +114,44 @@ export class Player {
     this.limbs.rArm.add(this.heldMesh);
   }
 
+  /** Creative-mode visual: warm golden emissive glow on the whole Steve body. */
+  setCreativeGlow(on: boolean): void {
+    for (const m of this.bodyMats) {
+      if (on) {
+        m.emissive.setHex(0x8a6a1a);
+        m.emissiveIntensity = 0.85;
+      } else {
+        m.emissive.setHex(0x000000);
+        m.emissiveIntensity = 1;
+      }
+    }
+  }
+
   toggleFly(): void {
     this.flying = !this.flying;
     if (this.flying) this.vel.y = Math.max(this.vel.y, 0);
   }
 
   damage(n: number): void {
-    if (this.dead) return;
+    if (this.dead || this.creative) return;
     this.health = Math.max(0, this.health - n);
     this.hurtT = 0.45;
     if (this.health <= 0) this.dead = true;
   }
 
   heal(n: number): void {
-    this.health = Math.min(20, this.health + n);
+    this.health = Math.min(this.maxHealth, this.health + n);
+  }
+
+  levelUp(): void {
+    this.maxHealth = Math.min(40, this.maxHealth + 2);
+    this.health = this.maxHealth;
   }
 
   respawn(x: number, z: number): void {
     this.pos.set(x, 2, z);
     this.vel.set(0, 0, 0);
-    this.health = 20;
+    this.health = this.maxHealth;
     this.dead = false;
     this.flying = false;
   }
@@ -196,8 +218,10 @@ export class Player {
       this.pos.addScaledVector(this.vel, dt);
     }
 
-    // Floor collision (works in every mode).
-    const floor = world.floorHeightAt(this.pos.x, this.pos.z, this.pos.y);
+    // Floor collision (works in every mode). The probe height includes the
+    // distance fallen THIS frame so fast drops can't tunnel through rooftops.
+    const drop = !this.flying && this.vel.y < 0 ? Math.min(1.6, -this.vel.y * dt) : 0;
+    const floor = world.floorHeightAt(this.pos.x, this.pos.z, this.pos.y + drop);
     if (this.pos.y <= floor + 0.001) {
       if (!this.onGround && !this.flying) {
         landed = true;
@@ -223,8 +247,8 @@ export class Player {
 
     // Regen
     this.regenT += dt;
-    if (this.regenT > 4.5 && this.health < 20 && this.hurtT <= 0) {
-      this.health = Math.min(20, this.health + 1);
+    if (this.regenT > 4.5 && this.health < this.maxHealth && this.hurtT <= 0) {
+      this.health = Math.min(this.maxHealth, this.health + 1);
       this.regenT = 0;
     }
 

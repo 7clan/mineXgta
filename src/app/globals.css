@@ -505,3 +505,54 @@ input[type='range'].hyperion-vol {
 .hyperion-roadblock-close {
   animation: hyperion-roadblock-pulse 0.75s ease-in-out infinite;
 }
+
+/* ---- mode transform + dialogue + boss bar (cinematic update) ------------- */
+
+@keyframes hyperion-modeflash-burst {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.hyperion-modeflash {
+  background: radial-gradient(
+    ellipse at center,
+    rgba(255, 214, 92, 0) 34%,
+    rgba(255, 196, 60, 0.55) 82%,
+    rgba(255, 168, 30, 0.8) 100%
+  );
+}
+
+@keyframes hyperion-dialogue-in {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+.hyperion-dialogue {
+  animation: hyperion-dialogue-in 0.18s ease-out;
+}
+
+@keyframes hyperion-bossbar-shine {
+  0% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(1.28);
+  }
+  100% {
+    filter: brightness(1);
+  }
+}
+
+.hyperion-bossbar {
+  animation: hyperion-bossbar-shine 1.4s ease-in-out infinite;
+}

@@ -49,18 +49,34 @@ export type ItemId =
   | 'flint'
   | 'pearl'
   | 'apple'
-  | 'jetpack';
+  | 'jetpack'
+  | 'rocket'
+  | 'bat';
 
 export interface ItemStack {
   id: ItemId;
   count: number;
 }
 
+export type GameMode = 'survival' | 'creative';
+
 export interface HudState {
   playing: boolean;
   health: number;
+  maxHealth: number;
   flying: boolean;
   thirdPerson: boolean;
+  mode: GameMode;
+  /** Golden transform flash 0..1 when switching modes (decays fast). */
+  modeFlash: number;
+  /** NPC dialogue bubble (E near an NPC): auto-fades. */
+  dialogue: null | { name: string; text: string; kind: 'civ' | 'gang' | 'boss' | 'cop' };
+  /** Boss health bar when the boss is engaged. */
+  boss: null | { name: string; hp: number; maxHp: number };
+  /** Player level (XP bar numeric). */
+  level: number;
+  /** Active cutscene overlay (intro flyover / boss reveal). */
+  cutscene: null | { title: string; sub: string };
   driving: null | {
     name: string;
     speed: number;
@@ -141,8 +157,15 @@ export interface HudState {
 export const HUD_INITIAL: HudState = {
   playing: false,
   health: 20,
+  maxHealth: 20,
   flying: false,
   thirdPerson: false,
+  mode: 'survival',
+  modeFlash: 0,
+  dialogue: null,
+  boss: null,
+  level: 0,
+  cutscene: null,
   driving: null,
   slot: 0,
   hotbar: new Array(9).fill(null),

@@ -38,12 +38,14 @@ function Slot({
   onClick,
   size = 48,
   variant = 'hotbar',
+  infinite = false,
 }: {
   stack: ItemStack | null;
   selected?: boolean;
   onClick?: () => void;
   size?: number;
   variant?: 'hotbar' | 'inventory';
+  infinite?: boolean;
 }) {
   return (
     <button
@@ -53,9 +55,9 @@ function Slot({
       aria-label={stack ? ITEMS[stack.id].name : 'empty slot'}
     >
       {stack && <ItemIcon id={stack.id} size={size - 12} />}
-      {stack && stack.count > 1 && (
+      {stack && (infinite || stack.count > 1) && (
         <span className="absolute bottom-0 right-1 text-white text-[13px] font-bold leading-none [text-shadow:2px_2px_0_#000]">
-          {stack.count}
+          {infinite ? '∞' : stack.count}
         </span>
       )}
       {/* inventory hover highlight */}
@@ -74,9 +76,10 @@ function Slot({
   );
 }
 
-function Hearts({ health }: { health: number }) {
+function Hearts({ health, maxHealth = 20 }: { health: number; maxHealth?: number }) {
+  const total = Math.max(10, Math.ceil(maxHealth / 2));
   const hearts: ReactNode[] = [];
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < total; i++) {
     const full = health >= (i + 1) * 2;
     hearts.push(
       <img
@@ -202,6 +205,81 @@ function Stars({ count }: { count: number }) {
   return <div className="flex flex-col items-end gap-[2px]">{stars}</div>;
 }
 
+/** Creative/Survival mode chip (top-left) — J toggles. */
+function ModeChip({ mode }: { mode: 'survival' | 'creative' }) {
+  const creative = mode === 'creative';
+  return (
+    <div
+      className={`absolute left-4 top-4 rounded border px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.22em] ${
+        creative
+          ? 'border-amber-300/60 bg-amber-400/15 text-amber-200 [text-shadow:0_0_10px_rgba(255,200,60,0.55)]'
+          : 'border-white/20 bg-black/55 text-white/60'
+      }`}
+    >
+      {creative ? '✦ Creative · J' : '⛏ Survival · J'}
+    </div>
+  );
+}
+
+/** NPC dialogue bubble (E near an NPC) — speaker name + line + procedural voice. */
+function DialogueBubble({ dialogue }: { dialogue: NonNullable<HudState['dialogue']> }) {
+  const tone =
+    dialogue.kind === 'gang'
+      ? 'border-purple-400/50 text-purple-200'
+      : dialogue.kind === 'boss'
+        ? 'border-red-500/60 text-red-200'
+        : dialogue.kind === 'cop'
+          ? 'border-sky-400/50 text-sky-200'
+          : 'border-white/25 text-white/90';
+  return (
+    <div className="hyperion-dialogue absolute bottom-[132px] left-1/2 w-[440px] max-w-[86vw] -translate-x-1/2 rounded-lg border bg-black/75 px-4 py-2 backdrop-blur-[2px]">
+      <div className={`text-[10px] font-black uppercase tracking-[0.2em] ${tone}`}>{dialogue.name}</div>
+      <div className="mt-0.5 text-[12px] font-bold leading-snug text-white/90 [text-shadow:1px_1px_0_#000]">
+        “{dialogue.text}”
+      </div>
+    </div>
+  );
+}
+
+/** Boss health bar (top center, under the mission chip). */
+function BossBar({ boss }: { boss: NonNullable<HudState['boss']> }) {
+  const pct = Math.max(0, Math.min(100, (boss.hp / boss.maxHp) * 100));
+  return (
+    <div className="absolute left-1/2 top-16 w-[360px] max-w-[80vw] -translate-x-1/2">
+      <div className="mb-1 text-center text-[10px] font-black uppercase tracking-[0.24em] text-red-300 [text-shadow:1px_1px_0_#000]">
+        👑 {boss.name}
+      </div>
+      <div className="h-[10px] w-full overflow-hidden rounded-sm border border-black/70 bg-black/60">
+        <div
+          className="hyperion-bossbar h-full"
+          style={{ width: `${pct}%`, background: 'linear-gradient(90deg,#7f1d1d,#ef4444,#fca5a5)' }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** Cinematic cutscene overlay: letterbox bars + title cards + skip hint. */
+function CutsceneOverlay({ cutscene }: { cutscene: NonNullable<HudState['cutscene']> }) {
+  return (
+    <div className="pointer-events-none fixed inset-0 z-40">
+      <div className="absolute inset-x-0 top-0 h-[13vh] bg-black" />
+      <div className="absolute inset-x-0 bottom-0 h-[13vh] bg-black" />
+      <div className="absolute inset-x-0 top-[20vh] text-center">
+        <div className="text-4xl font-black italic tracking-tight text-white [text-shadow:2px_3px_0_rgba(0,0,0,0.7)]">
+          {cutscene.title}
+        </div>
+        <div className="mt-2 text-[12px] font-bold uppercase tracking-[0.34em] text-amber-300/90">
+          {cutscene.sub}
+        </div>
+        <div className="mt-6 text-[10px] font-bold uppercase tracking-[0.3em] text-white/40">
+          Space / click — skip
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export interface HudProps {
   state: HudState;
   toast: string | null;
@@ -226,11 +304,13 @@ const CONTROLS: Array<[string, string]> = [
   ['RMB', 'Place block / use item'],
   ['LMB (tank)', 'Fire the cannon'],
   ['RMB (hold) 🚀', 'Jetpack thrust (selected)'],
+  ['J', 'Creative ⇄ Survival — infinite inventory + invulnerable'],
+  ['E', 'Inventory — or talk to an NPC when close'],
+  ['RMB 🚀 RPG', 'Fire the rocket launcher'],
   ['Space ×2', 'Toggle creative flight'],
   ['Space / C', 'Fly up / down'],
   ['Shift', 'Sprint'],
   ['1–9 / Wheel', 'Select hotbar slot'],
-  ['E', 'Inventory'],
   ['F', 'Enter / exit car'],
   ['M', 'Accept / quit contract'],
   ["🎨 Drive in", "Pay'n'Spray — clear heat + repair"],
@@ -966,6 +1046,17 @@ export function Hud(props: HudProps) {
 
   return (
     <div className="pointer-events-none fixed inset-0 select-none font-mono">
+      {/* cutscene letterbox + title cards (intro flyover / boss reveal) */}
+      {state.cutscene && state.playing && <CutsceneOverlay cutscene={state.cutscene} />}
+
+      {/* creative/survival transform flash — golden burst that fades fast */}
+      {state.modeFlash > 0 && (
+        <div
+          className="hyperion-modeflash pointer-events-none fixed inset-0"
+          style={{ opacity: state.modeFlash }}
+        />
+      )}
+
       {/* damage vignette */}
       <div
         className="absolute inset-0 transition-opacity duration-200"
@@ -1017,6 +1108,13 @@ export function Hud(props: HudProps) {
 
       {/* Contract tracker (top center) */}
       {state.playing && !state.dead && state.mission && <MissionChip mission={state.mission} />}
+
+      {/* Mode chip (top-left) + boss bar (top center under mission) */}
+      {state.playing && !state.cutscene && <ModeChip mode={state.mode} />}
+      {state.playing && !state.dead && state.boss && <BossBar boss={state.boss} />}
+
+      {/* NPC dialogue bubble */}
+      {state.playing && !state.dead && state.dialogue && <DialogueBubble dialogue={state.dialogue} />}
 
       {/* Stars — GTA chaos level (top right) */}
       {state.playing && (
@@ -1076,7 +1174,7 @@ export function Hud(props: HudProps) {
       {/* Quick-hints chip (bottom right) */}
       {state.playing && !state.dead && state.depth <= 0 && (
         <div className="absolute bottom-6 right-4 rounded bg-black/45 px-2.5 py-1 text-right text-[10px] font-bold leading-relaxed tracking-wide text-white/55">
-          <div>E INVENTORY · F5 VIEW</div>
+          <div>E INVENTORY · F5 VIEW · J MODE</div>
           <div>F CAR · M CONTRACT</div>
         </div>
       )}
@@ -1114,7 +1212,7 @@ export function Hud(props: HudProps) {
                 <div
                   className="h-full rounded-full transition-[width] duration-200"
                   style={{
-                    width: `${Math.max(0, Math.min(1, state.health / 20)) * 100}%`,
+                    width: `${Math.max(0, Math.min(1, state.health / Math.max(1, state.maxHealth))) * 100}%`,
                     background:
                       state.health <= 6
                         ? 'linear-gradient(90deg,#dc2626,#f87171)'
@@ -1165,19 +1263,35 @@ export function Hud(props: HudProps) {
         <div className="pointer-events-auto absolute bottom-4 left-1/2 flex -translate-x-1/2 flex-col items-stretch">
           {/* actionbar line — creative flight tag / selected item name (MC shows it above the status rows) */}
           <div className="mb-1.5 min-h-[16px] text-center text-[11px] font-bold text-white/85 [text-shadow:1px_1px_0_#000]">
-            {state.flying ? '✦ CREATIVE FLIGHT' : itemName ? itemName : ''}
+            {state.flying
+              ? '✦ CREATIVE FLIGHT'
+              : state.mode === 'creative'
+                ? '✦ CREATIVE — infinite supplies'
+                : itemName
+                  ? itemName
+                  : ''}
           </div>
-          {/* XP bar — spans exactly the hotbar width, directly above the hearts/hunger row */}
-          <XpBar score={state.score} />
-          {/* mirrored survival row: hearts left of the center line, hunger right */}
-          <div className="mb-[3px] flex items-end justify-between px-[2px]">
-            <Hearts health={state.health} />
-            <HungerBar />
-          </div>
-          {/* hotbar — 9 sharp MC slots, no outer frame */}
+          {/* XP bar + hearts/hunger hidden in creative (MC creative has no survival stats) */}
+          {state.mode === 'survival' && (
+            <>
+              <XpBar score={state.score} />
+              {/* mirrored survival row: hearts left of the center line, hunger right */}
+              <div className="mb-[3px] flex items-end justify-between px-[2px]">
+                <Hearts health={state.health} maxHealth={state.maxHealth} />
+                <HungerBar />
+              </div>
+            </>
+          )}
+          {/* hotbar — 9 sharp MC slots, no outer frame (counts show ∞ in creative) */}
           <div className="flex gap-[2px]">
             {state.hotbar.map((s, i) => (
-              <Slot key={i} stack={s} selected={i === state.slot} onClick={() => props.onSlotClick(i)} />
+              <Slot
+                key={i}
+                stack={s}
+                selected={i === state.slot}
+                onClick={() => props.onSlotClick(i)}
+                infinite={state.mode === 'creative'}
+              />
             ))}
           </div>
         </div>

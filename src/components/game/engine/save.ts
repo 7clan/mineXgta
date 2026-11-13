@@ -29,6 +29,8 @@ export interface SaveData {
   jetFuel?: number;
   /** Session-best stunt air time in seconds — optional for v1 saves made before this field. */
   bestAir?: number;
+  /** Game mode at save time — optional for v1 saves made before this field. */
+  mode?: 'survival' | 'creative';
 }
 
 /** Append-only block-type list — indexes are persisted in saves, so new block
