@@ -81,6 +81,8 @@ export function clearSave(): void {
 
 const SKEY = 'hyperion-settings-v1';
 
+export type GraphicsPreset = 'low' | 'medium' | 'high' | 'auto';
+
 export interface Settings {
   /** Master volume 0..1. */
   volume: number;
@@ -88,6 +90,8 @@ export interface Settings {
   touch: boolean;
   /** Bloom post-processing glow (defaults on). */
   bloom?: boolean;
+  /** Graphics quality preset. 'auto' keeps the adaptive downgrade system armed. */
+  graphics?: GraphicsPreset;
 }
 
 /** Is this device touch-capable? Used as the default for the touch toggle. */
@@ -111,6 +115,10 @@ export function loadSettings(): Settings {
       volume: typeof d.volume === 'number' ? Math.min(1, Math.max(0, d.volume)) : def.volume,
       touch: typeof d.touch === 'boolean' ? d.touch : def.touch,
       bloom: typeof d.bloom === 'boolean' ? d.bloom : def.bloom,
+      graphics:
+        d.graphics === 'low' || d.graphics === 'medium' || d.graphics === 'high' || d.graphics === 'auto'
+          ? d.graphics
+          : 'auto',
     };
   } catch {
     return def;

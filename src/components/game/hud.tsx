@@ -770,6 +770,7 @@ function TouchControls({ game, state }: { game: HyperionGame; state: HudState })
 function SettingsPanel({ game, state }: { game: HyperionGame; state: HudState }) {
   const [vol, setVol] = useState(Math.round((game.volume ?? 0.8) * 100));
   const [station, setStation] = useState(game.radioStation ?? 0);
+  const [gfx, setGfx] = useState(game.graphics ?? 'auto');
   return (
     <div className="mt-3 rounded-lg bg-black/40 p-3 text-left">
       <div className="mb-2 text-[10px] font-black uppercase tracking-[0.25em] text-white/40">Settings</div>
@@ -807,6 +808,26 @@ function SettingsPanel({ game, state }: { game: HyperionGame; state: HudState })
               }`}
             >
               {i === 0 ? 'OFF' : s.name}
+            </button>
+          ))}
+        </div>
+      </div>
+      {/* Graphics quality preset */}
+      <div className="mb-2.5 flex items-center gap-2">
+        <span className="w-14 text-[11px] font-bold text-amber-300/90">Graphics</span>
+        <div className="flex flex-1 flex-wrap gap-1">
+          {(['auto', 'low', 'medium', 'high'] as const).map((p) => (
+            <button
+              key={p}
+              onClick={() => {
+                setGfx(p);
+                game.setGraphics(p);
+              }}
+              className={`rounded px-2 py-1 text-[9px] font-black uppercase tracking-wider transition ${
+                gfx === p ? 'bg-amber-500/30 text-amber-200 outline outline-1 outline-amber-400/50' : 'bg-white/8 text-white/55 hover:bg-white/15'
+              }`}
+            >
+              {p === 'auto' ? 'AUTO ✨' : p.toUpperCase()}
             </button>
           ))}
         </div>

@@ -15,13 +15,16 @@ import {
 } from './constants';
 import { DestructionSystem, DestructionEntry } from './destruction';
 import {
+  makeAsphaltNormal,
   makeAsphaltTile,
   makeFacadeTexture,
   makeFrondTexture,
   makeGrassTile,
   makeLayerTexture,
   makeRoofTexture,
+  makeSidewalkNormal,
   makeSidewalkTile,
+  makeStorefrontTexture,
   makeTrunkTexture,
 } from './textures';
 
@@ -40,6 +43,9 @@ export interface BuildingRec {
   collapsing: boolean;
   collapseT: number;
   collapsed: boolean;
+  /** Downtown district only: carve-registered storefront shell (unregistered on collapse). */
+  shellMesh?: THREE.Mesh;
+  shellEntry?: DestructionEntry;
 }
 
 /** Procedural Los Santos-style city: road grid, destructible buildings, props, strata. */
@@ -53,7 +59,11 @@ export class City {
   groundEntry: DestructionEntry | null = null;
   private scene: THREE.Scene;
   private destruction: DestructionSystem;
-  private facadeCache = new Map<string, { map: THREE.Texture; emissiveMap: THREE.Texture }>();
+  private facadeCache = new Map<string, { map: THREE.Texture; normalMap: THREE.Texture; emissiveMap: THREE.Texture }>();
+  /** Storefront shell materials (3 variants, cached + shared). */
+  private storefrontCache: THREE.MeshStandardMaterial[] = [];
+  private corniceMat: THREE.MeshStandardMaterial | null = null;
+  private corniceGeoCache = new Map<string, THREE.BufferGeometry>();
   private roofMat: THREE.MeshStandardMaterial;
   private innerMat: THREE.MeshStandardMaterial;
   private rubbleMat: THREE.MeshStandardMaterial;
@@ -80,7 +90,128 @@ export class City {
     this.buildPalms();
     this.buildStreetLights();
     this.buildHills();
+    this.buildDistrictGreenery();
     scene.add(this.group);
+  }
+
+  /** Downtown street life: broadleaf street trees, benches, waste bins along
+   *  the district sidewalks (visual dressing — no collision, like the palms). */
+  private buildDistrictGreenery(): void {
+    const rng = mulberry32(2027);
+    const trunkPos: THREE.Vector3[] = [];
+    const benchPos: Array<{ x: number; z: number; yaw: number }> = [];
+    const binPos: Array<{ x: number; z: number }> = [];
+    for (const bi of this.blockRange()) {
+      for (const bj of this.blockRange()) {
+        const dc = Math.max(Math.abs(bi + 0.5), Math.abs(bj + 0.5)) / GRID_HALF;
+        if (dc >= 0.38 || this.blockType(bi, bj) !== 'built') continue;
+        // Sidewalk mid-band ring around the block
+        const c0 = bi * BLOCK + ROAD_W / 2, c1 = (bi + 1) * BLOCK - ROAD_W / 2;
+        const d0 = bj * BLOCK + ROAD_W / 2, d1 = (bj + 1) * BLOCK - ROAD_W / 2;
+        const mid = 1.35; // inset from block edge
+        for (let t = c0 + 4; t < c1 - 3; t += 7.5) {
+          if (rng() < 0.55) trunkPos.push(new THREE.Vector3(t, SIDEWALK_H, d0 + mid));
+          if (rng() < 0.55) trunkPos.push(new THREE.Vector3(t, SIDEWALK_H, d1 - mid));
+          if (rng() < 0.3) benchPos.push({ x: t + 2, z: d0 + mid + 0.6, yaw: 0 });
+          if (rng() < 0.3) benchPos.push({ x: t + 2, z: d1 - mid - 0.6, yaw: Math.PI });
+        }
+        for (let t = d0 + 4; t < d1 - 3; t += 7.5) {
+          if (rng() < 0.55) trunkPos.push(new THREE.Vector3(c0 + mid, SIDEWALK_H, t));
+          if (rng() < 0.55) trunkPos.push(new THREE.Vector3(c1 - mid, SIDEWALK_H, t));
+          if (rng() < 0.25) binPos.push({ x: c0 + mid, z: t });
+          if (rng() < 0.25) binPos.push({ x: c1 - mid, z: t });
+        }
+      }
+    }
+    if (!trunkPos.length) return;
+
+    // --- street trees: tapered trunk + 3-blob canopy, instanced ----------------
+    const trunkGeo = new THREE.CylinderGeometry(0.14, 0.2, 2.7, 7, 3);
+    trunkGeo.translate(0, 1.35, 0);
+    const canopyGeos: THREE.BufferGeometry[] = [];
+    const blob = (dx: number, dy: number, dz: number, r: number) => {
+      const g = new THREE.IcosahedronGeometry(r, 1);
+      const p = g.attributes.position as THREE.BufferAttribute;
+      for (let i = 0; i < p.count; i++) {
+            p.setXYZ(i, p.getX(i) * (0.85 + rng() * 0.3), p.getY(i) * (0.75 + rng() * 0.25), p.getZ(i) * (0.85 + rng() * 0.3));
+          }
+          g.computeVertexNormals();
+          g.translate(dx, dy, dz);
+          return g;
+    };
+    canopyGeos.push(blob(0, 3.4, 0, 1.5), blob(0.85, 2.9, 0.35, 1.05), blob(-0.7, 3.0, -0.5, 1.0), blob(0.1, 4.15, -0.2, 0.9));
+    const canopyGeo = mergeGeometries(canopyGeos)!;
+    canopyGeos.forEach((g) => g.dispose());
+    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5c4630, roughness: 0.95 });
+    const canopyMat = new THREE.MeshStandardMaterial({ color: 0x3e6b2a, roughness: 0.88 });
+    this.disposables.push(trunkGeo, canopyGeo, trunkMat, canopyMat);
+    const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, trunkPos.length);
+    const canopies = new THREE.InstancedMesh(canopyGeo, canopyMat, trunkPos.length);
+    trunks.castShadow = canopies.castShadow = true;
+    canopies.receiveShadow = true;
+    const dummy = new THREE.Object3D();
+    const leafTint = new THREE.Color();
+    trunkPos.forEach((p, i) => {
+      dummy.position.copy(p);
+      dummy.rotation.set(0, rng() * Math.PI * 2, 0);
+      dummy.scale.setScalar(0.85 + rng() * 0.4);
+      dummy.updateMatrix();
+      trunks.setMatrixAt(i, dummy.matrix);
+      canopies.setMatrixAt(i, dummy.matrix);
+      // Per-instance canopy tint: green → yellow-green → olive variety.
+      leafTint.setHSL(0.22 + rng() * 0.09, 0.45 + rng() * 0.2, 0.24 + rng() * 0.12);
+      canopies.setColorAt(i, leafTint);
+    });
+    if (canopies.instanceColor) canopies.instanceColor.needsUpdate = true;
+    this.group.add(trunks, canopies);
+
+    // --- benches: seat + backrest + legs merged, instanced --------------------
+    if (benchPos.length) {
+      const parts: THREE.BufferGeometry[] = [];
+      const seat = new THREE.BoxGeometry(1.9, 0.09, 0.52);
+      seat.translate(0, 0.5, 0);
+      parts.push(seat);
+      const back = new THREE.BoxGeometry(1.9, 0.52, 0.08);
+      back.translate(0, 0.82, -0.24);
+      parts.push(back);
+      for (const sx of [-0.78, 0.78]) {
+        const leg = new THREE.BoxGeometry(0.09, 0.5, 0.46);
+        leg.translate(sx, 0.25, 0.02);
+        parts.push(leg);
+      }
+      const benchGeo = mergeGeometries(parts)!;
+      parts.forEach((p) => p.dispose());
+      const benchMat = new THREE.MeshStandardMaterial({ color: 0x7a5c3e, roughness: 0.85, metalness: 0.1 });
+      this.disposables.push(benchGeo, benchMat);
+      const benches = new THREE.InstancedMesh(benchGeo, benchMat, benchPos.length);
+      benches.castShadow = true;
+      benchPos.forEach((b, i) => {
+        dummy.position.set(b.x, SIDEWALK_H, b.z);
+        dummy.rotation.set(0, b.yaw, 0);
+        dummy.scale.setScalar(1);
+        dummy.updateMatrix();
+        benches.setMatrixAt(i, dummy.matrix);
+      });
+      this.group.add(benches);
+    }
+
+    // --- waste bins: cylinder + rim, instanced --------------------------------
+    if (binPos.length) {
+      const binGeo = new THREE.CylinderGeometry(0.34, 0.28, 0.85, 8, 1);
+      binGeo.translate(0, 0.42, 0);
+      const binMat = new THREE.MeshStandardMaterial({ color: 0x2e4632, roughness: 0.7, metalness: 0.25 });
+      this.disposables.push(binGeo, binMat);
+      const bins = new THREE.InstancedMesh(binGeo, binMat, binPos.length);
+      bins.castShadow = true;
+      binPos.forEach((b, i) => {
+        dummy.position.set(b.x, SIDEWALK_H, b.z);
+        dummy.rotation.set(0, rng() * Math.PI * 2, 0);
+        dummy.scale.setScalar(1);
+        dummy.updateMatrix();
+        bins.setMatrixAt(i, dummy.matrix);
+      });
+      this.group.add(bins);
+    }
   }
 
   // ------------------------------------------------------------------ ground
@@ -89,10 +220,14 @@ export class City {
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 8;
     this.disposables.push(tex);
+    // Micro-bump normal map for the asphalt (subtle grain + wheel-wear patches).
+    const gNorm = makeAsphaltNormal();
+    gNorm.repeat.set(90, 90);
+    this.disposables.push(gNorm);
     const segs = Math.floor(GROUND_CORE / 1.05);
     const geo = new THREE.PlaneGeometry(GROUND_SPAN, GROUND_SPAN, segs, segs);
     geo.rotateX(-Math.PI / 2);
-    const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.78, metalness: 0.06, envMapIntensity: 0.55 });
+    const mat = new THREE.MeshStandardMaterial({ map: tex, normalMap: gNorm, normalScale: new THREE.Vector2(0.45, 0.45), roughness: 0.85, metalness: 0.06, envMapIntensity: 0.3 });
     this.disposables.push(geo, mat);
     this.groundMat = mat;
     const mesh = new THREE.Mesh(geo, mat);
@@ -200,20 +335,20 @@ export class City {
     for (const c of this.roadCoords) {
       const v = w2p(c);
       // vertical road (along z)
-      dash(v - 0.28, 0, v - 0.28, size, 0.14, '#c9a227');
-      dash(v + 0.28, 0, v + 0.28, size, 0.14, '#c9a227');
-      ctx.fillStyle = 'rgba(220,220,220,0.8)';
-      ctx.fillRect(w2p(c - ROAD_W / 2 + 0.35), 0, 0.14 * S, size);
-      ctx.fillRect(w2p(c + ROAD_W / 2 - 0.49), 0, 0.14 * S, size);
+      dash(v - 0.3, 0, v - 0.3, size, 0.16, '#d8ae2e');
+      dash(v + 0.3, 0, v + 0.3, size, 0.16, '#d8ae2e');
+      ctx.fillStyle = 'rgba(238,238,238,0.9)';
+      ctx.fillRect(w2p(c - ROAD_W / 2 + 0.32), 0, 0.16 * S, size);
+      ctx.fillRect(w2p(c + ROAD_W / 2 - 0.48), 0, 0.16 * S, size);
       // horizontal road (along x)
-      dash(0, v - 0.28, size, v - 0.28, 0.14, '#c9a227');
-      dash(0, v + 0.28, size, v + 0.28, 0.14, '#c9a227');
-      ctx.fillRect(0, w2p(c - ROAD_W / 2 + 0.35), size, 0.14 * S);
-      ctx.fillRect(0, w2p(c + ROAD_W / 2 - 0.49), size, 0.14 * S);
+      dash(0, v - 0.3, size, v - 0.3, 0.16, '#d8ae2e');
+      dash(0, v + 0.3, size, v + 0.3, 0.16, '#d8ae2e');
+      ctx.fillRect(0, w2p(c - ROAD_W / 2 + 0.32), size, 0.16 * S);
+      ctx.fillRect(0, w2p(c + ROAD_W / 2 - 0.48), size, 0.16 * S);
     }
 
     // Crosswalks at intersections
-    ctx.fillStyle = 'rgba(235,235,235,0.85)';
+    ctx.fillStyle = 'rgba(242,242,242,0.95)';
     for (const cx of this.roadCoords) {
       for (const cz of this.roadCoords) {
         for (let i = 0; i < 6; i++) {
@@ -222,6 +357,29 @@ export class City {
           ctx.fillRect(w2p(cx + off), w2p(cz - ROAD_W / 2 - 2.1), 0.8 * S, 1.6 * S);
           ctx.fillRect(w2p(cx + ROAD_W / 2 + 0.5), w2p(cz + off), 1.6 * S, 0.8 * S);
           ctx.fillRect(w2p(cx - ROAD_W / 2 - 2.1), w2p(cz + off), 1.6 * S, 0.8 * S);
+        }
+        // stop bars on the approach lanes
+        ctx.fillStyle = 'rgba(238,238,238,0.92)';
+        ctx.fillRect(w2p(cx + 1.0), w2p(cz + ROAD_W / 2 + 2.2), 2.6 * S, 0.35 * S);
+        ctx.fillRect(w2p(cx - 3.6), w2p(cz - ROAD_W / 2 - 2.55), 2.6 * S, 0.35 * S);
+        ctx.fillRect(w2p(cx + ROAD_W / 2 + 2.2), w2p(cz - 3.6), 0.35 * S, 2.6 * S);
+        ctx.fillRect(w2p(cx - ROAD_W / 2 - 2.55), w2p(cz + 1.0), 0.35 * S, 2.6 * S);
+        ctx.fillStyle = 'rgba(235,235,235,0.85)';
+      }
+    }
+    // Manhole covers along the right-hand lane centers (skip intersections)
+    ctx.fillStyle = '#2a2a2c';
+    ctx.strokeStyle = 'rgba(90,90,92,0.9)';
+    ctx.lineWidth = Math.max(1, 0.05 * S);
+    for (const c of this.roadCoords) {
+      for (let j = -GRID_HALF; j < GRID_HALF; j++) {
+        if ((j + GRID_HALF) % 2 !== 1) continue;
+        const mid = j * BLOCK + BLOCK / 2;
+        for (const [mx, mz] of [[c + 1.9, mid], [mid, c - 1.9]] as Array<[number, number]>) {
+          ctx.beginPath();
+          ctx.arc(w2p(mx), w2p(mz), 0.55 * S, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
         }
       }
     }
@@ -258,7 +416,10 @@ export class City {
     swTex.wrapS = swTex.wrapT = THREE.RepeatWrapping;
     swTex.repeat.set(6, 6);
     this.disposables.push(swTex);
-    const slabMat = new THREE.MeshStandardMaterial({ map: swTex, roughness: 0.95 });
+    const swNorm = makeSidewalkNormal();
+    swNorm.repeat.set(6, 6);
+    this.disposables.push(swNorm);
+    const slabMat = new THREE.MeshStandardMaterial({ map: swTex, normalMap: swNorm, normalScale: new THREE.Vector2(0.8, 0.8), roughness: 0.92 });
     this.disposables.push(slabMat);
     const slabCount = GRID_HALF * 2 * GRID_HALF * 2;
     const slabs = new THREE.InstancedMesh(slabGeo, slabMat, slabCount);
@@ -281,11 +442,62 @@ export class City {
     let f = this.facadeCache.get(style);
     if (!f) {
       const made = makeFacadeTexture(style as 'concrete' | 'glass' | 'brick' | 'white', 100 + style.length * 17);
-      f = { map: made.map, emissiveMap: made.emissiveMap };
+      f = { map: made.map, normalMap: made.normalMap, emissiveMap: made.emissiveMap };
       this.facadeCache.set(style, f);
-      this.disposables.push(made.map, made.emissiveMap);
+      this.disposables.push(made.map, made.normalMap, made.emissiveMap);
     }
     return f;
+  }
+
+  /** Shared storefront shell material for a variant (dark matte top, lit fascia). */
+  private shellTopMat: THREE.MeshStandardMaterial | null = null;
+
+  private storefront(variant: number): THREE.MeshStandardMaterial {
+    if (!this.storefrontCache.length) {
+      for (let v = 0; v < 3; v++) {
+        const made = makeStorefrontTexture(v as 0 | 1 | 2);
+        const mat = new THREE.MeshStandardMaterial({
+          map: made.map,
+          normalMap: made.normalMap,
+          emissiveMap: made.emissiveMap,
+          emissive: new THREE.Color(0xffffff),
+          emissiveIntensity: 0.9,
+          roughness: 0.62,
+          metalness: 0.05,
+          envMapIntensity: 0.5,
+          side: THREE.DoubleSide,
+        });
+        this.nightMaterials.push(mat);
+        this.disposables.push(made.map, made.normalMap, made.emissiveMap, mat);
+        this.storefrontCache.push(mat);
+      }
+    }
+    return this.storefrontCache[variant % this.storefrontCache.length];
+  }
+
+  /** Hollow parapet/cornice ring geometry (cached per rounded footprint). */
+  private corniceGeo(w: number, d: number): THREE.BufferGeometry {
+    const key = `${Math.round(w * 2) / 2}|${Math.round(d * 2) / 2}`;
+    let g = this.corniceGeoCache.get(key);
+    if (!g) {
+      const parts: THREE.BufferGeometry[] = [];
+      const t = 0.32, ch = 0.42, ow = w + 0.5, od = d + 0.5;
+      for (const sz of [-1, 1]) {
+        const b = new THREE.BoxGeometry(ow, ch, t);
+        b.translate(0, ch / 2, (sz * (od - t)) / 2);
+        parts.push(b);
+      }
+      for (const sx of [-1, 1]) {
+        const b = new THREE.BoxGeometry(t, ch, od - t * 2);
+        b.translate((sx * (ow - t)) / 2, ch / 2, 0);
+        parts.push(b);
+      }
+      g = mergeGeometries(parts)!;
+      parts.forEach((p) => p.dispose());
+      this.corniceGeoCache.set(key, g);
+      this.disposables.push(g);
+    }
+    return g;
   }
 
   private placeBuildings(bi: number, bj: number): void {
@@ -320,11 +532,12 @@ export class City {
       const sr = r();
       if (dc < 0.4) style = sr < 0.5 ? 'glass' : sr < 0.8 ? 'white' : 'concrete';
       else style = sr < 0.4 ? 'concrete' : sr < 0.65 ? 'brick' : sr < 0.85 ? 'white' : 'glass';
-      this.makeBuilding(p.x, p.z, p.w, p.d, h, style);
+      // Downtown core = the upgraded "Hyperion District": storefront shells + parapets.
+      this.makeBuilding(p.x, p.z, p.w, p.d, h, style, dc < 0.35);
     }
   }
 
-  private makeBuilding(cx: number, cz: number, w: number, d: number, h: number, style: string): void {
+  private makeBuilding(cx: number, cz: number, w: number, d: number, h: number, style: string, district = false): void {
     const seg = (dim: number, cap: number) => Math.min(cap, Math.max(2, Math.round(dim / 0.85)));
     const geo = new THREE.BoxGeometry(w, h, d, seg(w, 24), seg(h, 34), seg(d, 24));
     // Scale UVs so facade tiles cover ~3m each.
@@ -338,11 +551,14 @@ export class City {
     const glassy = style === 'glass';
     const mat = new THREE.MeshStandardMaterial({
       map: f.map,
+      normalMap: f.normalMap,
+      normalScale: new THREE.Vector2(glassy ? 0.55 : 1.0, glassy ? 0.55 : 1.0),
       emissiveMap: f.emissiveMap,
       emissive: new THREE.Color(0xffd9a0),
       emissiveIntensity: 0.9,
-      roughness: glassy ? 0.18 : 0.85,
-      metalness: glassy ? 0.55 : 0.04,
+      roughness: glassy ? 0.14 : 0.82,
+      metalness: glassy ? 0.7 : 0.04,
+      envMapIntensity: glassy ? 1.4 : 0.28,
       side: THREE.DoubleSide,
     });
     this.nightMaterials.push(mat);
@@ -367,6 +583,57 @@ export class City {
 
     const group = new THREE.Group();
     group.add(mesh, roof, inner);
+
+    // --- Downtown district dressing: storefront shell + parapet cornice -------
+    let shellMesh: THREE.Mesh | undefined;
+    let shellEntry: DestructionEntry | undefined;
+    if (district && h > 10) {
+      const shellH = 4.2;
+      const sw = w + 0.24, sd = d + 0.24;
+      const shellGeo = new THREE.BoxGeometry(sw, shellH, sd, seg(sw, 10), 4, seg(sd, 10));
+      const suv = shellGeo.attributes.uv as THREE.BufferAttribute;
+      const ssu = Math.max(sw, sd) / 3;
+      for (let i = 0; i < suv.count; i++) {
+        suv.setXY(i, suv.getX(i) * ssu, suv.getY(i));
+      }
+      if (!this.corniceMat) {
+        this.corniceMat = new THREE.MeshStandardMaterial({ color: 0x9a938a, roughness: 0.8, metalness: 0.05, envMapIntensity: 0.3 });
+        this.disposables.push(this.corniceMat);
+      }
+      if (!this.shellTopMat) {
+        this.shellTopMat = new THREE.MeshStandardMaterial({ color: 0x35322e, roughness: 0.9 });
+        this.disposables.push(this.shellTopMat);
+      }
+      const topMat = this.shellTopMat;
+      this.disposables.push(shellGeo);
+      const vidx = (n: number) => Math.abs(Math.round(n)) % 3;
+      shellMesh = new THREE.Mesh(shellGeo, [
+        this.storefront(vidx(cx * 3 + cz)),
+        this.storefront(vidx(cx - cz * 2)),
+        topMat,
+        topMat,
+        this.storefront(vidx(cx * 2 + cz * 3)),
+        this.storefront(vidx(cz * 2 - cx)),
+      ]);
+      shellMesh.position.set(cx, y0 + shellH / 2, cz);
+      shellMesh.castShadow = true;
+      shellMesh.receiveShadow = true;
+      group.add(shellMesh);
+      shellEntry = this.destruction.register(shellMesh, {
+        label: 'building',
+        cell: 0.9,
+        color: 0x6e675e,
+        deform: true,
+        grant: 'cobblestone',
+      });
+
+      const cornice = new THREE.Mesh(this.corniceGeo(w, d), this.corniceMat);
+      cornice.position.set(cx, y0 + h - 0.06, cz);
+      cornice.castShadow = true;
+      cornice.receiveShadow = true;
+      group.add(cornice);
+    }
+
     this.group.add(group);
 
     const entry = this.destruction.register(mesh, {
@@ -393,6 +660,8 @@ export class City {
       collapsing: false,
       collapseT: 0,
       collapsed: false,
+      shellMesh,
+      shellEntry,
     });
   }
 
@@ -419,20 +688,20 @@ export class City {
     }
     if (!positions.length) return;
 
-    // Frond template: drooped blade, 8 copies merged around Y.
+    // Frond template: drooped blade, 11 copies merged around Y (denser crowns).
     const frondGeos: THREE.BufferGeometry[] = [];
-    for (let i = 0; i < 8; i++) {
-      const g = new THREE.PlaneGeometry(3.0, 0.85, 8, 1);
+    for (let i = 0; i < 11; i++) {
+      const g = new THREE.PlaneGeometry(3.2, 0.9, 8, 1);
       const p = g.attributes.position as THREE.BufferAttribute;
       for (let v = 0; v < p.count; v++) {
-        const x = p.getX(v) + 1.55;
-        const t = x / 3.1;
+        const x = p.getX(v) + 1.65;
+        const t = x / 3.2;
         p.setX(v, x);
-        p.setY(v, p.getY(v) - t * t * 1.5);
+        p.setY(v, p.getY(v) - t * t * 1.8);
       }
       g.computeVertexNormals();
-      g.rotateY((i / 8) * Math.PI * 2 + rng() * 0.3);
-      g.rotateZ(-0.25 - rng() * 0.35);
+      g.rotateY((i / 11) * Math.PI * 2 + rng() * 0.3);
+      g.rotateZ(-0.28 - rng() * 0.38);
       frondGeos.push(g);
     }
     const frondGeo = mergeGeometries(frondGeos)!;
@@ -600,8 +869,8 @@ export class City {
     const m = this.groundMat;
     if (!m) return;
     const k = w < 0 ? 0 : w > 1 ? 1 : w;
-    m.roughness = 0.78 - k * 0.55;
-    m.envMapIntensity = 0.55 + k * 2.6;
+    m.roughness = 0.85 - k * 0.62;
+    m.envMapIntensity = 0.3 + k * 2.4;
     m.color.setRGB(1 - k * 0.22, 1 - k * 0.22, 1 - k * 0.19);
   }
 
@@ -617,6 +886,7 @@ export class City {
     b.collapsing = true;
     b.collapseT = 0;
     this.destruction.unregister(b.mesh);
+    if (b.shellMesh && b.shellEntry) this.destruction.unregister(b.shellMesh);
     this.onCollapseStart?.(b);
   }
 

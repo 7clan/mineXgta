@@ -102,6 +102,38 @@ function makeMoonTexture(): THREE.Texture {
   return tex;
 }
 
+/** GTA-dusk sky dome shaders — shared by the sky dome and the PMREM environment
+ *  proxy sphere so reflections match the live sky. */
+export const SKY_VERT = /* glsl */ `
+  varying vec3 vPos;
+  void main() {
+    vPos = position;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+export const SKY_FRAG = /* glsl */ `
+  uniform vec3 top; uniform vec3 mid; uniform vec3 bottom; uniform vec3 horizon;
+  uniform vec3 sunDir; uniform float glow;
+  varying vec3 vPos;
+  void main() {
+    vec3 n = normalize(vPos);
+    float h = n.y;
+    vec3 col = mix(horizon, bottom, smoothstep(-0.06, 0.045, h));
+    col = mix(col, mid, smoothstep(0.03, 0.22, h));
+    col = mix(col, top, smoothstep(0.18, 0.62, h));
+    // Sun-side glow band hugging the horizon (dusk magenta/amber burn).
+    float sunAmt = pow(max(dot(n, normalize(sunDir)), 0.0), 5.0);
+    float band = 1.0 - smoothstep(0.0, 0.42, abs(h - sunDir.y * 0.55));
+    col += vec3(1.0, 0.45, 0.22) * sunAmt * band * glow * 0.85;
+    col += vec3(1.0, 0.28, 0.5) * pow(sunAmt, 2.5) * glow * 0.35 * (1.0 - smoothstep(0.0, 0.5, h));
+    // Subtle dithering to avoid banding on smooth gradients.
+    float d = fract(sin(dot(n.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    col += (d - 0.5) * 0.02;
+    gl_FragColor = vec4(col, 1.0);
+  }
+`;
+
 /** GTA-dusk sky dome (indigo→violet→pink→amber with a sun-side glow band),
  *  sun sprite, drifting clouds, night stars and a moon. */
 export function buildSky(
@@ -123,34 +155,8 @@ export function buildSky(
     depthWrite: false,
     fog: false,
     uniforms: skyUniforms,
-    vertexShader: /* glsl */ `
-      varying vec3 vPos;
-      void main() {
-        vPos = position;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: /* glsl */ `
-      uniform vec3 top; uniform vec3 mid; uniform vec3 bottom; uniform vec3 horizon;
-      uniform vec3 sunDir; uniform float glow;
-      varying vec3 vPos;
-      void main() {
-        vec3 n = normalize(vPos);
-        float h = n.y;
-        vec3 col = mix(horizon, bottom, smoothstep(-0.06, 0.045, h));
-        col = mix(col, mid, smoothstep(0.03, 0.22, h));
-        col = mix(col, top, smoothstep(0.18, 0.62, h));
-        // Sun-side glow band hugging the horizon (dusk magenta/amber burn).
-        float sunAmt = pow(max(dot(n, normalize(sunDir)), 0.0), 5.0);
-        float band = 1.0 - smoothstep(0.0, 0.42, abs(h - sunDir.y * 0.55));
-        col += vec3(1.0, 0.45, 0.22) * sunAmt * band * glow * 0.85;
-        col += vec3(1.0, 0.28, 0.5) * pow(sunAmt, 2.5) * glow * 0.35 * (1.0 - smoothstep(0.0, 0.5, h));
-        // Subtle dithering to avoid banding on smooth gradients.
-        float d = fract(sin(dot(n.xy, vec2(12.9898, 78.233))) * 43758.5453);
-        col += (d - 0.5) * 0.012;
-        gl_FragColor = vec4(col, 1.0);
-      }
-    `,
+    vertexShader: SKY_VERT,
+    fragmentShader: SKY_FRAG,
   });
   const sky = new THREE.Mesh(skyGeo, skyMat);
   sky.frustumCulled = false;
