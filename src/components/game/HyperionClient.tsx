@@ -6,6 +6,7 @@ import { HUD_INITIAL, HudState } from './engine/types';
 import { Hud } from './hud';
 import { initIcons, initUIIcons } from './engine/items';
 import { hasSave } from './engine/save';
+import { loadSkinChoice } from './engine/skin';
 
 export default function HyperionClient() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -82,6 +83,15 @@ export default function HyperionClient() {
       gameRef.current = null;
     };
   }, []);
+
+  // Restore the persisted character skin (TLauncher nickname fetch or uploaded
+  // PNG saved earlier) as soon as the engine instance exists. The stored PNG
+  // data URL restores instantly — no network needed.
+  useEffect(() => {
+    if (!game) return;
+    const choice = loadSkinChoice();
+    if (choice) void game.applySkinPng(choice.png, choice.model, choice.source, choice.name);
+  }, [game]);
 
   const handlePlay = useCallback(() => {
     const game = gameRef.current;

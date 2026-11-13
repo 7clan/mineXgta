@@ -12,11 +12,18 @@ import {
 } from './constants';
 import { Input } from './input';
 import { World } from './types';
-import { makeSteveTextures } from './textures';
+import { LoadedSkin, PartFaces, loadSkin, makeDefaultSkinCanvas } from './skin';
 
 /**
- * The player is the ONLY blocky thing in the world — a classic Minecraft Steve.
- * Walk / sprint / jump + creative flight (double-tap Space), first & third person.
+ * The player is the ONLY blocky thing in the world — a classic Minecraft
+ * character driven by the full skin format (engine/skin.ts): per-face
+ * materials from a 64×64 skin PNG, overlay layers (hat/jacket/sleeves/
+ * pants), classic 4px and slim 3px arms, legacy 64×32 skins auto-converted.
+ * Skins can be swapped at runtime with applySkin() — e.g. with the user's
+ * own TLauncher skin fetched through /api/skin.
+ *
+ * Walk / sprint / jump + creative flight (double-tap Space), first & third
+ * person. Model scale: 1px = 1/16 world unit (Steve is ~2 blocks tall).
  */
 export class Player {
   pos = new THREE.Vector3(6, 0.2, 14);
@@ -39,63 +46,134 @@ export class Player {
   private regenT = 0;
   private hurtT = 0;
   private heldMesh: THREE.Mesh | null = null;
-  private headGroup: THREE.Group;
+  private headGroup = new THREE.Group();
+  /** Current skin materials (base + overlays) — creative glow iterates these. */
   private bodyMats: THREE.MeshLambertMaterial[] = [];
   private bobT = 0;
 
+  // rig pieces that survive skin swaps
+  private headHolder = new THREE.Group(); // head + hat meshes (centered at head)
+  private bodyHolder = new THREE.Group(); // body + jacket meshes
+  private armHolders: Record<'l' | 'r', THREE.Group> = { l: new THREE.Group(), r: new THREE.Group() };
+  private legHolders: Record<'l' | 'r', THREE.Group> = { l: new THREE.Group(), r: new THREE.Group() };
+  /** All currently-installed skin meshes (removed + disposed on each applySkin). */
+  private skinMeshes: THREE.Mesh[] = [];
+  private textures: THREE.CanvasTexture[] = [];
+  private currentSkin: LoadedSkin | null = null;
+
   constructor(scene: THREE.Scene) {
-    const tex = makeSteveTextures();
-    const mkMat = (c: HTMLCanvasElement) => {
-      const t = new THREE.CanvasTexture(c);
+    const P = 1 / 16;
+
+    // Head pivot at the neck so pitch rotation swings around the right axis.
+    this.headGroup.position.set(0, 24 * P, 0);
+    this.headHolder.position.set(0, 4 * P, 0); // head center = 28px
+    this.headGroup.add(this.headHolder);
+    this.group.add(this.headGroup);
+
+    // Body center at 18px.
+    this.bodyHolder.position.set(0, 18 * P, 0);
+    this.group.add(this.bodyHolder);
+
+    // Limb pivots: shoulders at y=24px, hips at y=12px; mesh centers hang 6px below.
+    this.armHolders.l.position.set(0, -6 * P, 0);
+    this.armHolders.r.position.set(0, -6 * P, 0);
+    this.legHolders.l.position.set(0, -6 * P, 0);
+    this.legHolders.r.position.set(0, -6 * P, 0);
+
+    const mkPivot = (holder: THREE.Group, x: number, y: number): THREE.Group => {
+      const pivot = new THREE.Group();
+      pivot.position.set(x, y, 0);
+      pivot.add(holder);
+      this.group.add(pivot);
+      return pivot;
+    };
+    this.limbs = {
+      lArm: mkPivot(this.armHolders.l, -6 * P, 24 * P),
+      rArm: mkPivot(this.armHolders.r, 6 * P, 24 * P),
+      lLeg: mkPivot(this.legHolders.l, -2 * P, 12 * P),
+      rLeg: mkPivot(this.legHolders.r, 2 * P, 12 * P),
+    };
+
+    this.applySkin(loadSkin(makeDefaultSkinCanvas(), 'classic')!);
+    this.group.visible = false; // hidden in first person
+    scene.add(this.group);
+  }
+
+  /**
+   * Install a loaded skin onto the rig: per-face materials (the standard
+   * Minecraft box face order [+X,-X,+Y,-Y,+Z,-Z] = left/right/top/bottom/
+   * front/back of the character), overlay layers slightly inflated, slim
+   * arms narrow the shoulder pivots. Old materials + textures are disposed.
+   */
+  applySkin(skin: LoadedSkin): void {
+    const P = 1 / 16;
+    for (const m of this.skinMeshes) {
+      m.parent?.remove(m);
+      m.geometry.dispose();
+    }
+    this.skinMeshes = [];
+    for (const t of this.textures) t.dispose();
+    for (const m of this.bodyMats) m.dispose();
+    this.textures = [];
+    this.bodyMats = [];
+    this.currentSkin = skin;
+
+    const mkMat = (face: HTMLCanvasElement, overlay: boolean): THREE.MeshLambertMaterial => {
+      const t = new THREE.CanvasTexture(face);
       t.magFilter = THREE.NearestFilter;
       t.minFilter = THREE.NearestFilter;
       t.colorSpace = THREE.SRGBColorSpace;
+      t.generateMipmaps = false;
       const m = new THREE.MeshLambertMaterial({ map: t });
+      if (overlay) m.alphaTest = 0.5; // crisp cutout overlay pixels
+      this.textures.push(t);
       this.bodyMats.push(m);
       return m;
     };
-    const headSide = mkMat(tex.headSide);
-    const headTop = mkMat(tex.headTop);
-    const headFront = mkMat(tex.headFront);
-    const bodyMat = mkMat(tex.body);
-    const armMat = mkMat(tex.arm);
-    const legMat = mkMat(tex.leg);
-
-    const P = 1 / 16; // pixel scale: Steve is ~2 blocks tall => 32px
-    const box = (w: number, h: number, d: number) => new THREE.BoxGeometry(w * P, h * P, d * P);
-
-    // Head (8x8x8 px) with face on -Z? We'll orient forward = +Z like vehicles... Steve faces where camera looks; use +Z forward.
-    const headMats = [headSide, headSide, headTop, headTop, headFront, headSide];
-    const head = new THREE.Mesh(box(8, 8, 8), headMats);
-    head.position.y = 28 * P;
-    head.castShadow = true;
-    this.headGroup = new THREE.Group();
-    this.headGroup.add(head);
-
-    // Body (8x12x4)
-    const body = new THREE.Mesh(box(8, 12, 4), bodyMat);
-    body.position.y = 18 * P;
-    body.castShadow = true;
-
-    // Arms (4x12x4) pivot at shoulder
-    const mkLimb = (m: THREE.Material, px: number, py: number) => {
-      const pivot = new THREE.Group();
-      pivot.position.set(px, py, 0);
-      const mesh = new THREE.Mesh(box(4, 12, 4), m);
-      mesh.position.y = -6 * P;
+    /** BoxGeometry material order [+X,-X,+Y,-Y,+Z,-Z] maps to the character's left/right/top/bottom/front/back. */
+    const mats6 = (p: PartFaces, overlay = false): THREE.Material[] => [
+      mkMat(p.left, overlay),
+      mkMat(p.right, overlay),
+      mkMat(p.top, overlay),
+      mkMat(p.bottom, overlay),
+      mkMat(p.front, overlay),
+      mkMat(p.back, overlay),
+    ];
+    const box = (w: number, h: number, d: number): THREE.BoxGeometry => new THREE.BoxGeometry(w * P, h * P, d * P);
+    const addMesh = (parent: THREE.Object3D, geo: THREE.BoxGeometry, mats: THREE.Material[]): THREE.Mesh => {
+      const mesh = new THREE.Mesh(geo, mats);
       mesh.castShadow = true;
-      pivot.add(mesh);
-      return pivot;
+      parent.add(mesh);
+      this.skinMeshes.push(mesh);
+      return mesh;
     };
-    const lArm = mkLimb(armMat, -6 * P, 24 * P);
-    const rArm = mkLimb(armMat, 6 * P, 24 * P);
-    const lLeg = mkLimb(legMat, -2 * P, 12 * P);
-    const rLeg = mkLimb(legMat, 2 * P, 12 * P);
 
-    this.group.add(this.headGroup, body, lArm, rArm, lLeg, rLeg);
-    this.limbs = { lArm, rArm, lLeg, rLeg };
-    this.group.visible = false; // hidden in first person
-    scene.add(this.group);
+    const f = skin.parts;
+    // Head + hat (hat inflated 0.5px per side).
+    addMesh(this.headHolder, box(8, 8, 8), mats6(f.head));
+    if (f.hat) addMesh(this.headHolder, box(9, 9, 9), mats6(f.hat, true));
+    // Body + jacket (0.25px per side).
+    addMesh(this.bodyHolder, box(8, 12, 4), mats6(f.body));
+    if (f.jacket) addMesh(this.bodyHolder, box(8.5, 12.5, 4.5), mats6(f.jacket, true));
+    // Arms + sleeves. Slim arms are 3px wide and sit 0.5px closer in.
+    const aw = skin.armW;
+    const ax = 4 + aw / 2; // arm inner edge hugs the body half-width (4px)
+    this.limbs.lArm.position.x = -ax * P;
+    this.limbs.rArm.position.x = ax * P;
+    addMesh(this.armHolders.r, box(aw, 12, 4), mats6(f.armR));
+    if (f.sleeveR) addMesh(this.armHolders.r, box(aw + 0.5, 12.5, 4.5), mats6(f.sleeveR, true));
+    addMesh(this.armHolders.l, box(aw, 12, 4), mats6(f.armL));
+    if (f.sleeveL) addMesh(this.armHolders.l, box(aw + 0.5, 12.5, 4.5), mats6(f.sleeveL, true));
+    // Legs + pants.
+    addMesh(this.legHolders.r, box(4, 12, 4), mats6(f.legR));
+    if (f.pantsR) addMesh(this.legHolders.r, box(4.5, 12.5, 4.5), mats6(f.pantsR, true));
+    addMesh(this.legHolders.l, box(4, 12, 4), mats6(f.legL));
+    if (f.pantsL) addMesh(this.legHolders.l, box(4.5, 12.5, 4.5), mats6(f.pantsL, true));
+  }
+
+  /** The currently-installed skin (used by the HUD preview + status line). */
+  get skin(): LoadedSkin | null {
+    return this.currentSkin;
   }
 
   setHeldItem(color: number | null): void {
@@ -114,7 +192,7 @@ export class Player {
     this.limbs.rArm.add(this.heldMesh);
   }
 
-  /** Creative-mode visual: warm golden emissive glow on the whole Steve body. */
+  /** Creative-mode visual: warm golden emissive glow on the whole body (base + overlays). */
   setCreativeGlow(on: boolean): void {
     for (const m of this.bodyMats) {
       if (on) {

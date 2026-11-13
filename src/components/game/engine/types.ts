@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { SkinSource } from './skin';
 
 /** Shared types for the Hyperion engine. Avoids circular imports between actor modules. */
 
@@ -152,6 +153,8 @@ export interface HudState {
   airBest: number;
   /** Landing pop: fires once per landing (key increments) with the scored jump. */
   airPop: { sec: number; score: number; record: boolean; key: number } | null;
+  /** Live character skin info (inventory skin picker + status line). */
+  skin: { source: SkinSource; name: string | null; model: 'classic' | 'slim' };
 }
 
 export const HUD_INITIAL: HudState = {
@@ -199,6 +202,7 @@ export const HUD_INITIAL: HudState = {
   air: 0,
   airBest: 0,
   airPop: null,
+  skin: { source: 'default', name: null, model: 'classic' },
 };
 
 /**

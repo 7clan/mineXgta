@@ -49,6 +49,7 @@ import { ITEMS, makeBlockMaterial, makeTNTMaterials } from './items';
 import { AimHit, HudState, ItemId, ItemStack, PlaceableId, World } from './types';
 import { makeCloudTexture, makeSunSprite } from './textures';
 import { buildCityProps, type CityProps } from './props';
+import { imageFromDataUrl, loadSkin, makeDefaultSkinCanvas, type SkinSource } from './skin';
 
 export interface GameCallbacks {
   onState: (s: HudState) => void;
@@ -233,6 +234,13 @@ export class HyperionGame implements World {
   private slot = 0;
   private hotbar: (ItemStack | null)[] = new Array(9).fill(null);
   private inventory: (ItemStack | null)[] = new Array(18).fill(null);
+
+  /** Live skin status (drives the inventory's skin picker UI). */
+  skinInfo: { source: SkinSource; name: string | null; model: 'classic' | 'slim' } = {
+    source: 'default',
+    name: null,
+    model: 'classic',
+  };
 
   private heat = 0;
   private stars = 0;
@@ -703,6 +711,36 @@ export class HyperionGame implements World {
     const inv = this.inventory[invIndex];
     this.inventory[invIndex] = this.hotbar[this.slot];
     this.hotbar[this.slot] = inv;
+  }
+
+  /**
+   * Install a character skin from a PNG data URL — a TLauncher fetch or a
+   * local file upload. Returns false when the image is not a valid skin.
+   */
+  async applySkinPng(
+    png: string,
+    model: 'classic' | 'slim' | 'auto',
+    source: SkinSource,
+    name: string | null
+  ): Promise<boolean> {
+    try {
+      const img = await imageFromDataUrl(png);
+      const skin = loadSkin(img, model);
+      if (!skin) return false;
+      this.player.applySkin(skin);
+      this.player.setCreativeGlow(this.player.creative); // glow survives skin swaps
+      this.skinInfo = { source, name, model: skin.model };
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Back to the original Hyperion default skin. */
+  resetSkin(): void {
+    this.player.applySkin(loadSkin(makeDefaultSkinCanvas(), 'classic')!);
+    this.player.setCreativeGlow(this.player.creative);
+    this.skinInfo = { source: 'default', name: null, model: 'classic' };
   }
 
   // ------------------------------------------------------------------ World impl
@@ -3465,6 +3503,7 @@ export class HyperionGame implements World {
       })(),
       airBest: this.bestAir,
       airPop: this.airPop,
+      skin: this.skinInfo,
     };
     this.cb.onState(state);
     this.drawMinimap();
