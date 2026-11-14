@@ -6,6 +6,7 @@ import {
   GROUND_CORE,
   GROUND_SPAN,
   GRID_HALF,
+  LANE_OFF,
   LAYER_GAP,
   LAYER_SPAN,
   ROAD_W,
@@ -30,6 +31,44 @@ import {
 
 export type BlockType = 'built' | 'park' | 'lot';
 
+// ---------------------------------------------------------------- districts
+/** Los Santos district ids — the map zoning mirrored off the GTA V level
+ *  layout (downtown core + angled neighborhood ring). */
+export type DistrictId =
+  | 'downtown' | 'hollywood' | 'koreatown' | 'scentral' | 'venice'
+  | 'warehouse' | 'sunset' | 'silverlake' | 'marina';
+
+export interface DistrictMeta {
+  id: DistrictId;
+  label: string;
+  styles: Array<'concrete' | 'glass' | 'brick' | 'white' | 'stucco'>;
+  hMin: number;
+  hVar: number;
+  /** Probability a block edge row gets a palm line. */
+  palms: number;
+  /** Storefront shell + parapet dressing (retail strips). */
+  retail: boolean;
+}
+
+const DISTRICTS: Record<DistrictId, DistrictMeta> = {
+  downtown: { id: 'downtown', label: 'Downtown', styles: ['glass', 'glass', 'white', 'concrete'], hMin: 24, hVar: 44, palms: 0.12, retail: true },
+  hollywood: { id: 'hollywood', label: 'Hollywood', styles: ['stucco', 'brick', 'white', 'concrete'], hMin: 10, hVar: 13, palms: 0.45, retail: true },
+  koreatown: { id: 'koreatown', label: 'Koreatown', styles: ['stucco', 'stucco', 'brick', 'white'], hMin: 9, hVar: 11, palms: 0.25, retail: true },
+  warehouse: { id: 'warehouse', label: 'Warehouse District', styles: ['concrete', 'concrete', 'brick'], hMin: 5, hVar: 8, palms: 0.06, retail: false },
+  scentral: { id: 'scentral', label: 'South Central', styles: ['stucco', 'concrete', 'brick', 'stucco'], hMin: 5, hVar: 7, palms: 0.16, retail: false },
+  marina: { id: 'marina', label: 'Marina', styles: ['white', 'stucco', 'white'], hMin: 6, hVar: 6, palms: 0.5, retail: false },
+  venice: { id: 'venice', label: 'Venice', styles: ['stucco', 'white', 'stucco'], hMin: 4, hVar: 5, palms: 0.62, retail: false },
+  silverlake: { id: 'silverlake', label: 'Silver Lake', styles: ['white', 'stucco', 'concrete'], hMin: 7, hVar: 9, palms: 0.32, retail: false },
+  sunset: { id: 'sunset', label: 'Sunset', styles: ['stucco', 'white', 'brick', 'concrete'], hMin: 8, hVar: 10, palms: 0.42, retail: true },
+};
+
+// Ring sector lookup, counterclockwise from west (-x) with -z as north:
+// [W, NW, N, NE, E, SE, S, SW]
+const RING_SECTORS: DistrictMeta[] = [
+  DISTRICTS.venice, DISTRICTS.sunset, DISTRICTS.hollywood, DISTRICTS.silverlake,
+  DISTRICTS.koreatown, DISTRICTS.warehouse, DISTRICTS.scentral, DISTRICTS.marina,
+];
+
 export interface BuildingRec {
   group: THREE.Group;
   mesh: THREE.Mesh;
@@ -48,7 +87,8 @@ export interface BuildingRec {
   shellEntry?: DestructionEntry;
 }
 
-/** Procedural Los Santos-style city: road grid, destructible buildings, props, strata. */
+/** Procedural Los Santos-style city: road grid, district zoning (downtown glass
+ *  core + neighborhood ring), destructible buildings, props, strata. */
 export class City {
   group = new THREE.Group();
   buildings: BuildingRec[] = [];
@@ -56,6 +96,7 @@ export class City {
   parkCenters: THREE.Vector3[] = [];
   roadCoords: number[] = [];
   blockTypes = new Map<string, BlockType>();
+  private districtCache = new Map<string, DistrictMeta>();
   groundEntry: DestructionEntry | null = null;
   private scene: THREE.Scene;
   private destruction: DestructionSystem;
@@ -142,8 +183,8 @@ export class City {
     canopyGeos.push(blob(0, 3.4, 0, 1.5), blob(0.85, 2.9, 0.35, 1.05), blob(-0.7, 3.0, -0.5, 1.0), blob(0.1, 4.15, -0.2, 0.9));
     const canopyGeo = mergeGeometries(canopyGeos)!;
     canopyGeos.forEach((g) => g.dispose());
-    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5c4630, roughness: 0.95 });
-    const canopyMat = new THREE.MeshStandardMaterial({ color: 0x3e6b2a, roughness: 0.88 });
+    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6a543a, roughness: 0.95 });
+    const canopyMat = new THREE.MeshStandardMaterial({ color: 0x4a5a2e, roughness: 0.88 });
     this.disposables.push(trunkGeo, canopyGeo, trunkMat, canopyMat);
     const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, trunkPos.length);
     const canopies = new THREE.InstancedMesh(canopyGeo, canopyMat, trunkPos.length);
@@ -158,8 +199,8 @@ export class City {
       dummy.updateMatrix();
       trunks.setMatrixAt(i, dummy.matrix);
       canopies.setMatrixAt(i, dummy.matrix);
-      // Per-instance canopy tint: green → yellow-green → olive variety.
-      leafTint.setHSL(0.22 + rng() * 0.09, 0.45 + rng() * 0.2, 0.24 + rng() * 0.12);
+      // Per-instance canopy tint: sun-washed LA green → olive → dry khaki variety.
+      leafTint.setHSL(0.19 + rng() * 0.1, 0.34 + rng() * 0.22, 0.26 + rng() * 0.13);
       canopies.setColorAt(i, leafTint);
     });
     if (canopies.instanceColor) canopies.instanceColor.needsUpdate = true;
@@ -243,10 +284,10 @@ export class City {
       layerY: 0,
       layerSpan: GROUND_SPAN,
     });
-    // Outer skirt beyond the destructible ground.
+    // Outer skirt beyond the destructible ground — dry LA basin scrub.
     const skirtGeo = new THREE.PlaneGeometry(3200, 3200);
     skirtGeo.rotateX(-Math.PI / 2);
-    const skirtMat = new THREE.MeshStandardMaterial({ color: 0x54703c, roughness: 1 });
+    const skirtMat = new THREE.MeshStandardMaterial({ color: 0x7c7248, roughness: 1 });
     this.disposables.push(skirtGeo, skirtMat);
     const skirt = new THREE.Mesh(skirtGeo, skirtMat);
     skirt.position.y = -0.35;
@@ -321,7 +362,7 @@ export class City {
       ctx.fillRect(0, w2p(c - 1.6), size, 3.2 * S);
     }
 
-    // Lane markings: double yellow center + white edges
+    // Lane markings: double yellow center + white edges + dashed lane lines
     const dash = (x1: number, y1: number, x2: number, y2: number, width: number, color: string) => {
       ctx.strokeStyle = color;
       ctx.lineWidth = width * S;
@@ -340,11 +381,16 @@ export class City {
       ctx.fillStyle = 'rgba(238,238,238,0.9)';
       ctx.fillRect(w2p(c - ROAD_W / 2 + 0.32), 0, 0.16 * S, size);
       ctx.fillRect(w2p(c + ROAD_W / 2 - 0.48), 0, 0.16 * S, size);
+      // LA avenue lane dashes between center and edge lines (traffic lanes)
+      dash(v - LANE_OFF, 0, v - LANE_OFF, size, 0.14, 'rgba(226,224,216,0.62)');
+      dash(v + LANE_OFF, 0, v + LANE_OFF, size, 0.14, 'rgba(226,224,216,0.62)');
       // horizontal road (along x)
       dash(0, v - 0.3, size, v - 0.3, 0.16, '#d8ae2e');
       dash(0, v + 0.3, size, v + 0.3, 0.16, '#d8ae2e');
       ctx.fillRect(0, w2p(c - ROAD_W / 2 + 0.32), size, 0.16 * S);
       ctx.fillRect(0, w2p(c + ROAD_W / 2 - 0.48), size, 0.16 * S);
+      dash(0, v - LANE_OFF, size, v - LANE_OFF, 0.14, 'rgba(226,224,216,0.62)');
+      dash(0, v + LANE_OFF, size, v + LANE_OFF, 0.14, 'rgba(226,224,216,0.62)');
     }
 
     // Crosswalks at intersections
@@ -441,12 +487,32 @@ export class City {
   private facade(style: string) {
     let f = this.facadeCache.get(style);
     if (!f) {
-      const made = makeFacadeTexture(style as 'concrete' | 'glass' | 'brick' | 'white', 100 + style.length * 17);
+      const seed = ({ concrete: 11, glass: 23, brick: 37, white: 41, stucco: 53 } as Record<string, number>)[style] ?? 7;
+      const made = makeFacadeTexture(style as 'concrete' | 'glass' | 'brick' | 'white' | 'stucco', seed * 97 + 13);
       f = { map: made.map, normalMap: made.normalMap, emissiveMap: made.emissiveMap };
       this.facadeCache.set(style, f);
       this.disposables.push(made.map, made.normalMap, made.emissiveMap);
     }
     return f;
+  }
+
+  /** District lookup by block indices: chebyshev core = downtown, else an
+   *  angle sector of the neighborhood ring (LA-flavored zoning). */
+  districtAt(bi: number, bj: number): DistrictMeta {
+    const key = `${bi},${bj}`;
+    const hit = this.districtCache.get(key);
+    if (hit) return hit;
+    const dc = Math.max(Math.abs(bi + 0.5), Math.abs(bj + 0.5)) / GRID_HALF;
+    let d: DistrictMeta;
+    if (dc < 0.34) {
+      d = DISTRICTS.downtown;
+    } else {
+      const ang = Math.atan2(bj, bi); // -pi..pi
+      const sector = Math.floor(((ang + Math.PI) / (Math.PI / 4))) % 8;
+      d = RING_SECTORS[sector] ?? DISTRICTS.scentral;
+    }
+    this.districtCache.set(key, d);
+    return d;
   }
 
   /** Shared storefront shell material for a variant (dark matte top, lit fascia). */
@@ -526,14 +592,13 @@ export class City {
       plots.push({ x: x0 + span / 2, z: z0 + span / 2, w, d });
     }
     for (const p of plots) {
-      const base = 8 + (1 - dc) * 40;
-      const h = Math.max(7, base * (0.65 + r() * 0.75));
-      let style: 'concrete' | 'glass' | 'brick' | 'white';
-      const sr = r();
-      if (dc < 0.4) style = sr < 0.5 ? 'glass' : sr < 0.8 ? 'white' : 'concrete';
-      else style = sr < 0.4 ? 'concrete' : sr < 0.65 ? 'brick' : sr < 0.85 ? 'white' : 'glass';
-      // Downtown core = the upgraded "Hyperion District": storefront shells + parapets.
-      this.makeBuilding(p.x, p.z, p.w, p.d, h, style, dc < 0.35);
+      const d = this.districtAt(bi, bj);
+      // Downtown towers keep a proximity boost; the ring is flat LA sprawl.
+      const coreBoost = d.id === 'downtown' ? (1 - dc) * 30 : 0;
+      const h = Math.max(4.5, d.hMin + coreBoost + r() * d.hVar);
+      const style = d.styles[Math.floor(r() * d.styles.length)] ?? 'stucco';
+      // Retail strips (downtown core + boulevard districts) get the shells.
+      this.makeBuilding(p.x, p.z, p.w, p.d, h, style, d.retail);
     }
   }
 
@@ -677,11 +742,19 @@ export class City {
         );
       }
     }
+    // Palm-lined block edges — density follows the district (Venice/Marina
+    // boulevards vs. sparse Downtown/Warehouse).
     for (const bi of this.blockRange()) {
       for (const bj of this.blockRange()) {
-        if (rng() < 0.3) {
+        const p = this.districtAt(bi, bj).palms;
+        if (rng() < p) {
           positions.push(
             new THREE.Vector3(bi * BLOCK + BLOCK / 2 + (rng() - 0.5) * 18, SIDEWALK_H, bj * BLOCK + ROAD_W / 2 + 1.3)
+          );
+        }
+        if (rng() < p * 0.7) {
+          positions.push(
+            new THREE.Vector3(bi * BLOCK + ROAD_W / 2 + 1.3, SIDEWALK_H, bj * BLOCK + BLOCK / 2 + (rng() - 0.5) * 18)
           );
         }
       }
@@ -793,7 +866,8 @@ export class City {
 
   private buildHills(): void {
     const rng = mulberry32(4242);
-    const mat = new THREE.MeshStandardMaterial({ color: 0x4c5a3a, roughness: 1 });
+    // Dry golden basin hills (GTA Vinewood-style scrubland, not lush green).
+    const mat = new THREE.MeshStandardMaterial({ color: 0x8f7f4a, roughness: 1 });
     const geo = new THREE.SphereGeometry(1, 10, 7);
     this.disposables.push(mat, geo);
     for (let i = 0; i < 10; i++) {
@@ -804,6 +878,63 @@ export class City {
       m.scale.set(180 + rng() * 160, 60 + rng() * 90, 180 + rng() * 160);
       this.group.add(m);
     }
+    this.buildHillsideSign();
+  }
+
+  /** HYPERION hillside sign — white block letters on the north ridge,
+   *  the LA-landmark silhouette of the map (game's own name, not a copy). */
+  private buildHillsideSign(): void {
+    const CELL = 2.0; // m per pixel cell of the 5x7 letter grid (14m tall letters)
+    const THICK = 0.6;
+    // 5x7 bitmap letters: H Y P E R I O N
+    const GLYPHS: string[][] = [
+      ['10001', '10001', '11111', '10001', '10001', '10001', '10001'],
+      ['10001', '10001', '10001', '01110', '00100', '00100', '00100'],
+      ['11110', '10001', '10001', '11110', '10000', '10000', '10000'],
+      ['11111', '10000', '10000', '11110', '10000', '10000', '11111'],
+      ['11110', '10001', '10001', '11110', '10100', '10010', '10001'],
+      ['11111', '00100', '00100', '00100', '00100', '00100', '11111'],
+      ['01110', '10001', '10001', '10001', '10001', '10001', '01110'],
+      ['10001', '11001', '11001', '10101', '10011', '10011', '10001'],
+    ];
+    const parts: THREE.BufferGeometry[] = [];
+    let cursor = 0;
+    const advance = 5 * CELL + 2.4; // letter width + spacing
+    for (const rows of GLYPHS) {
+      for (let ry = 0; ry < rows.length; ry++) {
+        const row = rows[ry] ?? '';
+        for (let rx = 0; rx < row.length; rx++) {
+          if (row[rx] !== '1') continue;
+          const b = new THREE.BoxGeometry(CELL, CELL, THICK);
+          b.translate(cursor + rx * CELL, (rows.length - 1 - ry) * CELL, 0);
+          parts.push(b);
+        }
+      }
+      cursor += advance;
+    }
+    const signGeo = mergeGeometries(parts)!;
+    parts.forEach((p) => p.dispose());
+    const signMat = new THREE.MeshStandardMaterial({
+      color: 0xf4f0e6,
+      roughness: 0.55,
+    });
+    this.disposables.push(signGeo, signMat);
+    // Dark hillside backing plate — gives the white letters contrast against
+    // the bright haze sky (the landmark reads like white-on-shadowed-terrain).
+    const backGeo = new THREE.BoxGeometry(cursor + 6, 7 * CELL + 3, 0.5);
+    const backMat = new THREE.MeshStandardMaterial({ color: 0x33302a, roughness: 1 });
+    this.disposables.push(backGeo, backMat);
+    const signGrp = new THREE.Group();
+    const back = new THREE.Mesh(backGeo, backMat);
+    back.position.set(cursor / 2, 3.5 * CELL, -1.15);
+    signGrp.add(back);
+    const sign = new THREE.Mesh(signGeo, signMat);
+    signGrp.add(sign);
+    // Center the row on the north ridge, leaning back into the slope. The glyph
+    // grid faces +z (toward the city) — no yaw flip, or it reads mirrored.
+    signGrp.position.set(-cursor / 2, 44, -655);
+    signGrp.rotation.x = -0.26; // recline onto the hill
+    this.group.add(signGrp);
   }
 
   // ------------------------------------------------------------------ queries

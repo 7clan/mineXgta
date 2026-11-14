@@ -167,9 +167,11 @@ function aoShadow(g: CanvasRenderingContext2D, x: number, y: number, w: number, 
  * Procedural 3m x 3m facade tile (256px): color map with baked AO, normal map
  * from a height canvas (recessed windows, proud slabs/sills — pops under raking
  * golden-hour light), and an emissive map of lit windows. The tile repeats over
- * a whole building; `seed` varies the look per building.
+ * a whole building; `seed` varies the look per building. The five styles are the
+ * Los Santos material set: beige downtown concrete, teal LA glass, muted brown
+ * brick, warm-white modern panels and tan low-rise stucco.
  */
-export function makeFacadeTexture(style: 'concrete' | 'glass' | 'brick' | 'white', seed: number): FacadeStyle {
+export function makeFacadeTexture(style: 'concrete' | 'glass' | 'brick' | 'white' | 'stucco', seed: number): FacadeStyle {
   const S = 256;
   const rnd = mulberry32(seed);
   const c = makeCanvas(S, S), ec = makeCanvas(S, S), hc = makeCanvas(S, S);
@@ -195,8 +197,8 @@ export function makeFacadeTexture(style: 'concrete' | 'glass' | 'brick' | 'white
   };
 
   if (style === 'concrete') {
-    vGrad(g, 0, 0, S, S, '#bab2a4', '#a39b8d');
-    speckle(g, rnd, S, S, 1500, ['#c4bcae', '#aaa294', '#948c7e', '#beb6a8', '#a8a091']);
+    vGrad(g, 0, 0, S, S, '#b8ac96', '#a89c86'); // sun-baked beige concrete
+    speckle(g, rnd, S, S, 1500, ['#c2b6a0', '#9e927c', '#928672', '#bab19b', '#a4988f']);
     // Floor slab band (proud) + shadow gap (recessed) at the tile top.
     px(g, 0, 0, S, 8, '#cbc4b6'); px(g, 0, 8, S, 6, '#8b8375');
     px(hg, 0, 0, S, 8, H_RAISE); px(hg, 0, 8, S, 6, H_RECESS);
@@ -211,30 +213,34 @@ export function makeFacadeTexture(style: 'concrete' | 'glass' | 'brick' | 'white
     px(g, wx + ww / 2 - 2, wy, 4, wh, '#46525e'); // center mullion
     px(g, wx, wy + wh / 2 - 2, ww, 4, '#46525e');
     px(hg, wx + ww / 2 - 2, wy, 4, wh, '#606060');
-    // Sill (proud) with its own cast shadow.
-    px(g, wx - 14, wy + wh + 10, ww + 28, 10, '#cfc8ba');
-    px(g, wx - 14, wy + wh + 20, ww + 28, 5, '#877f72');
+    // Sill (proud) with its own cast shadow + LA water-stain streaks below.
+    px(g, wx - 14, wy + wh + 10, ww + 28, 10, '#cfc4a8');
+    px(g, wx - 14, wy + wh + 20, ww + 28, 5, '#877c68');
     px(hg, wx - 14, wy + wh + 10, ww + 28, 10, H_RAISE);
     aoShadow(g, wx - 10, wy + wh + 20, ww + 20, 16, 0.22);
+    g.globalAlpha = 0.16;
+    for (let sx = wx - 8; sx < wx + ww; sx += 34) px(g, sx, wy + wh + 35, 5, 42, '#6a5f4d');
+    g.globalAlpha = 1;
     lit(wx + 4, wy + 4, ww / 2 - 8, wh / 2 - 8, 0.4);
     lit(wx + ww / 2 + 4, wy + 4, ww / 2 - 8, wh / 2 - 8, 0.3);
     lit(wx + 4, wy + wh / 2 + 4, ww / 2 - 8, wh / 2 - 8, 0.35);
     lit(wx + ww / 2 + 4, wy + wh / 2 + 4, ww / 2 - 8, wh / 2 - 8, 0.4);
   } else if (style === 'glass') {
-    px(g, 0, 0, S, S, '#22262c'); // anodized mullion base
+    px(g, 0, 0, S, S, '#232830'); // anodized mullion base
     px(hg, 0, 0, S, S, H_RAISE);
     const panes: Array<[number, number]> = [[8, 8], [136, 8], [8, 136], [136, 136]];
-    const tints = ['#44566a', '#3d5266', '#4a5d72', '#415468'];
+    // LA glass: teal-green reflective tints under the smog sky.
+    const tints = ['#3f5a62', '#47626a', '#527079', '#3c565e'];
     panes.forEach(([x, y], i) => {
       const w = 112, h = 112;
       glassPane(x, y, w, h, tints[(rnd() * tints.length) | 0] ?? tints[i % tints.length]);
-      // sky sheen band across the top of each pane
-      g.globalAlpha = 0.13; px(g, x, y, w, 16, '#9fb4c8'); g.globalAlpha = 1;
+      // warm smog-sky sheen band across the top of each pane (LA haze reflection)
+      g.globalAlpha = 0.16; px(g, x, y, w, 26, '#d8b088'); g.globalAlpha = 1;
       // thin transom line
       px(g, x, y + h * 0.42, w, 3, '#2c3238');
       px(hg, x, y + h * 0.42, w, 3, '#6a6a6a');
       // per-pane edge highlight (left/top lighter, right/bottom darker)
-      px(g, x, y, w, 2, '#0c0e11'); px(g, x, y, 2, h, '#5c7086');
+      px(g, x, y, w, 2, '#0c0e11'); px(g, x, y, 2, h, '#5c7886');
       lit(x + 5, y + 5, w - 10, h * 0.42 - 10, 0.2);
       lit(x + 5, y + h * 0.42 + 6, w - 10, h * 0.58 - 12, 0.24);
     });
@@ -243,9 +249,9 @@ export function makeFacadeTexture(style: 'concrete' | 'glass' | 'brick' | 'white
       px(g, mx + 2, my + 2, 3, 3, '#3a4148');
     }
   } else if (style === 'brick') {
-    px(g, 0, 0, S, S, '#6a564a'); // mortar
+    px(g, 0, 0, S, S, '#6e5a4c'); // mortar
     px(hg, 0, 0, S, S, H_RECESS);
-    const pal = ['#9a4a31', '#8b4229', '#a4523a', '#7f3c27', '#96503a', '#8f4630'];
+    const pal = ['#8a4a36', '#7a422e', '#94543c', '#6e3a2a', '#8f503a', '#834630'];
     for (let row = 0; row < 16; row++) {
       const y = row * 16, off = (row % 2) * 16;
       for (let x = -32; x < S; x += 32) {
@@ -272,10 +278,10 @@ export function makeFacadeTexture(style: 'concrete' | 'glass' | 'brick' | 'white
     aoShadow(g, wx - 8, wy + wh + 17, ww + 16, 14, 0.2);
     lit(wx + 4, wy + 4, ww / 2 - 8, wh - 8, 0.42);
     lit(wx + ww / 2 + 4, wy + 4, ww / 2 - 8, wh - 8, 0.38);
-  } else { // white — modern panel with a shaded window band + louver row
-    vGrad(g, 0, 0, S, S, '#efefe9', '#dededa');
-    for (let x = 0; x < S; x += 64) px(g, x, 0, 2, S, '#cfcfca'); // panel seams
-    for (let y = 0; y < S; y += 128) px(g, 0, y, S, 2, '#d2d2cd');
+  } else if (style === 'white') { // warm stucco modern panel with a shaded window band + louver row
+    vGrad(g, 0, 0, S, S, '#ece5d2', '#dcd4c0');
+    for (let x = 0; x < S; x += 64) px(g, x, 0, 2, S, '#cfc7b2'); // panel seams
+    for (let y = 0; y < S; y += 128) px(g, 0, y, S, 2, '#d4ccb8');
     px(hg, 0, 0, S, S, H_WALL);
     for (let x = 0; x < S; x += 64) px(hg, x, 0, 2, S, H_RECESS);
     // Louver row (sun shades) above the window band
@@ -297,69 +303,125 @@ export function makeFacadeTexture(style: 'concrete' | 'glass' | 'brick' | 'white
     for (let x = bx; x < bx + bw; x += 22) lit(x + 3, by + 3, 15, bh - 6, 0.3);
     // Base shadow gradient for depth
     aoShadow(g, 0, S - 20, S, 20, 0.1);
+  } else { // stucco — tan LA strip-mall wall: parapet cap, AC + downspout,
+    // punched windows with pop-out frames, a painted sign band remnant.
+    vGrad(g, 0, 0, S, S, '#c2a078', '#b89768');
+    speckle(g, rnd, S, S, 1800, ['#ccab82', '#b5926a', '#d4b48c', '#ad8c66', '#c4a274']);
+    // Parapet cap (proud) + gravel-stop edge + grime shadow
+    px(g, 0, 0, S, 10, '#d4ba90'); px(g, 0, 10, S, 5, '#9c8054');
+    px(hg, 0, 0, S, 10, H_RAISE); px(hg, 0, 10, S, 5, H_RECESS);
+    aoShadow(g, 0, 15, S, 18, 0.14);
+    // Faded painted sign band remnant (ghost sign)
+    g.globalAlpha = 0.20; px(g, 12, 26, S - 24, 20, '#e8d9b4'); g.globalAlpha = 1;
+    for (let i = 0; i < 4; i++) px(g, 22 + i * 52, 32, 12 + ((rnd() * 26) | 0), 9, 'rgba(120,96,60,0.5)');
+    // Two punched windows with pop-out stucco frames
+    for (const wx0 of [36, 148] as Array<number>) {
+      const wy0 = 78, ww0 = 72, wh0 = 118;
+      px(g, wx0 - 9, wy0 - 9, ww0 + 18, wh0 + 18, '#d4b48c'); // pop-out surround
+      px(hg, wx0 - 9, wy0 - 9, ww0 + 18, wh0 + 18, H_RAISE);
+      glassPane(wx0, wy0, ww0, wh0, '#5d6c78');
+      aoShadow(g, wx0, wy0, ww0, 16, 0.26);
+      px(g, wx0 + ww0 / 2 - 2, wy0, 4, wh0, '#46525e'); // mullion
+      px(hg, wx0 + ww0 / 2 - 2, wy0, 4, wh0, '#606060');
+      px(g, wx0 - 12, wy0 + wh0 + 10, ww0 + 24, 8, '#d4b48c'); // stucco sill
+      px(hg, wx0 - 12, wy0 + wh0 + 10, ww0 + 24, 8, H_RAISE);
+      aoShadow(g, wx0 - 9, wy0 + wh0 + 18, ww0 + 18, 12, 0.16);
+      lit(wx0 + 4, wy0 + 4, ww0 / 2 - 8, wh0 / 2 - 8, 0.3);
+      lit(wx0 + ww0 / 2 + 4, wy0 + wh0 / 2 + 4, ww0 / 2 - 8, wh0 / 2 - 8, 0.25);
+    }
+    // Wall-mounted AC unit + downspout (street furniture shadows)
+    if (rnd() < 0.6) {
+      const ax = 20 + ((rnd() * 30) | 0), ay = 116 + ((rnd() * 60) | 0);
+      px(g, ax, ay, 26, 18, '#9a948a'); px(g, ax + 2, ay + 2, 22, 8, '#b0aaa0');
+      px(hg, ax, ay, 26, 18, H_RAISE); aoShadow(g, ax, ay + 18, 26, 10, 0.22);
+    }
+    const dx = rnd() < 0.5 ? 4 : S - 9;
+    px(g, dx, 15, 5, S - 20, '#a08858'); px(hg, dx, 15, 5, S - 20, H_RECESS);
+    // Ground grime line
+    aoShadow(g, 0, S - 26, S, 26, 0.2);
   }
   heightNoise(hg, rnd, S, S, 260, ['#767676', '#8a8a8a']);
   return { map: toTexture(c), normalMap: heightToNormal(hc, 2.1), emissiveMap: toTexture(ec) };
 }
 
-/** Gravel/tar roof tile: dark gray noise, lighter worn patches, occasional vent. */
+/** Gravel/tar roof tile: warm sun-bleached gray noise, worn patches, vents. */
 export function makeRoofTexture(): THREE.CanvasTexture {
   const S = 128;
   const rnd = mulberry32(0x5eed);
   const c = makeCanvas(S, S), g = ctx2d(c);
-  px(g, 0, 0, S, S, '#3a3a3d');
-  speckle(g, rnd, S, S, 2400, ['#434345', '#313134', '#2b2b2e', '#4a4a4c', '#37373a']);
-  for (let i = 0; i < 7; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 8 + rnd() * 16, 'rgba(78,78,80,0.35)');
-  for (let i = 0; i < 5; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 6 + rnd() * 12, 'rgba(32,32,34,0.4)');
+  px(g, 0, 0, S, S, '#443f39');
+  speckle(g, rnd, S, S, 2400, ['#4d4841', '#3a352f', '#332f29', '#524c45', '#3f3a34']);
+  for (let i = 0; i < 7; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 8 + rnd() * 16, 'rgba(92,86,76,0.35)'); // sun-bleached
+  for (let i = 0; i < 5; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 6 + rnd() * 12, 'rgba(38,34,29,0.4)'); // tar patches
   if (rnd() < 0.75) { // metal vent, kept away from tile edges
     const vx = 20 + ((rnd() * (S - 48)) | 0), vy = 20 + ((rnd() * (S - 48)) | 0);
-    px(g, vx, vy, 12, 12, '#565659');
-    px(g, vx + 1, vy + 1, 10, 5, '#6a6a6e'); px(g, vx, vy + 12, 12, 2, '#262628');
+    px(g, vx, vy, 12, 12, '#5c5750');
+    px(g, vx + 1, vy + 1, 10, 5, '#6e6860'); px(g, vx, vy + 12, 12, 2, '#2b2824');
   }
   return toTexture(c);
 }
 
-/** Seamless dark asphalt tile (raw canvas; the city compositor drawImages it). */
+/** Seamless LA asphalt tile: warm sun-bleached gray-brown base, aggregate
+ *  speckle, faded worn wheel paths, dark tar-patch seams and oil stains —
+ *  the patched, sun-baked LA street look (raw canvas; the city compositor
+ *  drawImages it). */
 export function makeAsphaltTile(): HTMLCanvasElement {
   const S = 256;
   const rnd = mulberry32(0xa5fa);
   const c = makeCanvas(S, S), g = ctx2d(c);
-  px(g, 0, 0, S, S, '#3d3d40');
-  speckle(g, rnd, S, S, 5200, ['#464649', '#37373a', '#4d4d50', '#404043', '#333336']);
-  for (let i = 0; i < 6; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 14 + rnd() * 26, 'rgba(66,66,69,0.30)');
-  for (let i = 0; i < 4; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 10 + rnd() * 18, 'rgba(40,40,43,0.35)');
+  px(g, 0, 0, S, S, '#565049');
+  speckle(g, rnd, S, S, 5200, ['#5f5851', '#4d473f', '#665e54', '#514b44', '#464039']);
+  for (let i = 0; i < 6; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 14 + rnd() * 26, 'rgba(112,104,92,0.26)'); // sun-faded
+  for (let i = 0; i < 4; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 10 + rnd() * 18, 'rgba(43,38,33,0.32)');
+  // Tar-patch repair seams (LA street patchwork) + oil stains.
+  for (let i = 0; i < 4; i++) {
+    const x0 = rnd() * S, y0 = rnd() * S;
+    const pts: Array<[number, number]> = [];
+    for (let k = 0; k < 5; k++) pts.push([x0 + (rnd() - 0.5) * 100, y0 + (rnd() - 0.5) * 100]);
+    wrapStroke(g, S, pts, 'rgba(33,29,25,0.42)', 6 + rnd() * 8);
+  }
+  for (let i = 0; i < 3; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 6 + rnd() * 10, 'rgba(24,22,20,0.30)');
   return c;
 }
 
-/** Light-gray concrete sidewalk slabs, darker seams every 64px (raw canvas). */
+/** Sun-bleached warm concrete sidewalk slabs: expansion joints every 64px,
+ *  curb-grime edges, hairline cracks, gum specks (raw canvas). */
 export function makeSidewalkTile(): HTMLCanvasElement {
   const S = 256;
   const rnd = mulberry32(0x5ab1);
   const c = makeCanvas(S, S), g = ctx2d(c);
-  px(g, 0, 0, S, S, '#b7b5ae');
+  px(g, 0, 0, S, S, '#c5beb0');
   for (let i = 0; i < 4; i++)
     for (let j = 0; j < 4; j++) {
       g.globalAlpha = 0.05 + rnd() * 0.05;
-      px(g, i * 64, j * 64, 64, 64, rnd() < 0.5 ? '#ffffff' : '#6f6d66');
+      px(g, i * 64, j * 64, 64, 64, rnd() < 0.5 ? '#fdfaf0' : '#6f6a5e');
       g.globalAlpha = 1;
     }
-  speckle(g, rnd, S, S, 2600, ['#c4c2bb', '#a9a7a0', '#bdbbb4', '#a19f98']);
-  for (let k = 0; k < S; k += 64) { // seams at 0 cover both tiled edges
-    px(g, k, 0, 2, S, '#8b897f'); px(g, 0, k, S, 2, '#8b897f');
+  speckle(g, rnd, S, S, 2600, ['#cfc8ba', '#b3ac9e', '#c6bfb1', '#a9a294']);
+  // Gum specks + hairline cracks
+  for (let i = 0; i < 26; i++) px(g, (rnd() * S) | 0, (rnd() * S) | 0, 2, 2, rnd() < 0.5 ? '#8a8274' : '#736c5e');
+  for (let i = 0; i < 3; i++) {
+    const x0 = rnd() * S, y0 = rnd() * S;
+    wrapStroke(g, S, [[x0, y0], [x0 + (rnd() - 0.5) * 70, y0 + (rnd() - 0.5) * 70], [x0 + (rnd() - 0.5) * 110, y0 + (rnd() - 0.5) * 110]], 'rgba(107,100,88,0.5)', 1.2);
+  }
+  for (let k = 0; k < S; k += 64) { // expansion joints at 0 cover both tiled edges
+    px(g, k, 0, 2, S, '#8f887a'); px(g, 0, k, S, 2, '#8f887a');
   }
   return c;
 }
 
-/** Mid-green grass noise with darker/lighter patches (raw canvas). */
+/** Dry LA turf: olive-khaki base with dry yellow blades, sparse green
+ *  patches and bald dirt spots — the sun-baked Los Angeles ground (raw canvas). */
 export function makeGrassTile(): HTMLCanvasElement {
   const S = 256;
   const rnd = mulberry32(0x6ea5);
   const c = makeCanvas(S, S), g = ctx2d(c);
-  px(g, 0, 0, S, S, '#4e7a34');
-  speckle(g, rnd, S, S, 5000, ['#578a3a', '#466e2e', '#619448', '#3f6329', '#528036', '#5d9a3f']);
-  for (let i = 0; i < 8; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 16 + rnd() * 30, 'rgba(38,66,24,0.30)');
-  for (let i = 0; i < 8; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 14 + rnd() * 26, 'rgba(96,142,58,0.28)');
-  for (let i = 0; i < 500; i++) px(g, (rnd() * S) | 0, (rnd() * S) | 0, 1, 2, '#6ea84a'); // blades
+  px(g, 0, 0, S, S, '#7a7444');
+  speckle(g, rnd, S, S, 5000, ['#847c4a', '#6e6838', '#8f8150', '#5f6634', '#7c7040', '#93864a']);
+  for (let i = 0; i < 8; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 16 + rnd() * 30, 'rgba(96,88,44,0.30)'); // dry patches
+  for (let i = 0; i < 5; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 14 + rnd() * 22, 'rgba(90,96,44,0.24)'); // greener spots
+  for (let i = 0; i < 5; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 10 + rnd() * 18, 'rgba(122,100,58,0.30)'); // bald dirt
+  for (let i = 0; i < 420; i++) px(g, (rnd() * S) | 0, (rnd() * S) | 0, 1, 2, rnd() < 0.7 ? '#a89254' : '#6f7a3c'); // blades
   return c;
 }
 
@@ -375,9 +437,12 @@ export function makeStorefrontTexture(variant: 0 | 1 | 2): FacadeStyle {
   px(eg, 0, 0, W, H, '#000000');
   px(hg, 0, 0, W, H, H_WALL);
   const THEMES = [
-    { paint: '#274a38', trim: '#c9a86a', neon: '72,229,255', awnA: '#7a2020', awnB: '#e8e0cc' },
-    { paint: '#5a2430', trim: '#d9c9a8', neon: '255,120,200', awnA: '#1f3a5a', awnB: '#e8e0cc' },
-    { paint: '#2e2a26', trim: '#b8a888', neon: '190,255,110', awnA: '#3a5a1f', awnB: '#e8e0cc' },
+    // LA strip-mall retail: tan stucco + forest-green canvas awning, green neon.
+    { paint: '#b89a76', trim: '#8a7355', neon: '190,255,110', awnA: '#4a5a40', awnB: '#e8e0cc' },
+    // Terracotta stucco + charcoal canvas awning, pink neon.
+    { paint: '#a35d44', trim: '#7a4a34', neon: '255,120,200', awnA: '#3a3430', awnB: '#e8e0cc' },
+    // Gray stucco + oxide-red canvas awning, cyan neon.
+    { paint: '#8f8a7a', trim: '#6a655a', neon: '72,229,255', awnA: '#7a2020', awnB: '#e8e0cc' },
   ][variant];
   const L = 26, R = W - 26; // pilaster inner edges
 
@@ -401,11 +466,11 @@ export function makeStorefrontTexture(variant: 0 | 1 | 2): FacadeStyle {
     const gw = 12 + ((rnd() * 20) | 0);
     g.fillRect(L + 24 + i * 38, 28, gw, 10);
   }
-  // Awning (strongly proud) with scalloped bottom + stripes
+  // Canvas awning (solid colour + subtle weave stripe, scalloped valance).
   const awY = 62, awH = 34;
   for (let x = L; x < R; x += 24) {
-    px(g, x, awY, 12, awH, THEMES.awnA);
-    px(g, x + 12, awY, 12, awH, THEMES.awnB);
+    px(g, x, awY, 19, awH, THEMES.awnA);
+    px(g, x + 19, awY, 5, awH, THEMES.awnB);
   }
   for (let x = L; x < R; x += 16) { // scallops
     g.fillStyle = 'rgba(0,0,0,0.28)';

@@ -81,23 +81,29 @@ const DIALOG: Record<Persona, string[]> = {
 };
 
 const CIV_NAMES = ['Marco', 'Lena', 'Dante', 'Nina', 'Otis', 'Rosa', 'Vic', 'Pam', 'Cleo', 'Ray', 'Ivy', 'Sal'];
+const FEM_NAMES = ['Maya', 'Carmen', 'Ava', 'Josie', 'Kim', 'Dana', 'Nia', 'Elena', 'Bianca', 'Sofia'];
 const GANG_NAMES = ['Tyrell', 'Marcus', 'Dre', 'Big Tone', 'Slim', 'Vince', 'Kwame', 'Pockets', 'Rico', 'Fat Dean'];
 
 // ---------------------------------------------------------------- shared pools
-const SKIN_TONES = [0xe8b48c, 0xc68b59, 0x9c6644, 0x6f4a2a, 0xd9a06b, 0x8d5a3a];
+// GTA V ped wardrobe: LA sun-washed, muted, denim-heavy — no saturated colors.
+const SKIN_TONES = [0xf0c8a8, 0xd9a06b, 0xc68b59, 0xa06a44, 0x7a4a2a, 0x5a3620];
 const SHIRT_COLORS = [
-  0xb34a3a, 0x3a6b58, 0xc9b458, 0x74589a, 0x53687a, 0x8a5a3a, 0x2f4858, 0x9a3a52,
-  0xd9d3c8, 0x4a4a52, 0x6b8e4e, 0xc96a2a,
+  0x8a4a3a, 0x5a708a, 0x8a8a78, 0x6a6a52, 0xd8d0c0, 0x3a3a3a,
+  0x9a8a5a, 0x7a5a4a, 0x4a6a5a, 0xb0a890, 0x9a4a52, 0x5a7a8a,
 ];
-const PANTS_COLORS = [0x3a4a66, 0x2e3848, 0x8a7a5a, 0x24242a, 0x4a4a48, 0x5a4632, 0x3d5245];
-const SHOE_COLORS = [0xe8e8e8, 0x1a1a1a, 0x5a3a22];
-const HAIR_COLORS = [0x241a12, 0x3a2a1a, 0x5a3a20, 0x9a9a9a, 0xc9a45a];
-const JACKET_COLORS = [0x2a2e38, 0x4a3626, 0x1e3a2a, 0x5a2a2a];
+const PANTS_COLORS = [0x4a5872, 0x3a4458, 0x6a7a8a, 0x23262a, 0xa89678, 0x5a4a3a, 0x8a8274];
+const SHOE_COLORS = [0xd8d4c8, 0x1a1a1a, 0x6a4a2a];
+const HAIR_COLORS = [0x1a1410, 0x2e221a, 0x4a3422, 0x8a8a8a, 0xc9a45a];
+const JACKET_COLORS = [0x2e3440, 0x4a3626, 0x38424a, 0x5a5a52, 0x6a3a3a];
 
 type OutfitKind = 'tee' | 'tank' | 'shirtless' | 'suit' | 'hoodie' | 'vest' | 'jacket';
 const OUTFIT_POOL: OutfitKind[] = [
-  'tee', 'tee', 'tee', 'tee', 'tank', 'tank', 'shirtless', 'suit', 'suit',
-  'hoodie', 'hoodie', 'vest', 'jacket', 'jacket',
+  'tee', 'tee', 'tee', 'tee', 'tee', 'tank', 'tank', 'shirtless', 'suit',
+  'hoodie', 'hoodie', 'hoodie', 'vest', 'jacket', 'jacket', 'jacket',
+];
+/** Female civilians: LA casual — no shirtless, rarer suits. */
+const FEMALE_OUTFIT_POOL: OutfitKind[] = [
+  'tee', 'tee', 'tee', 'tank', 'tank', 'hoodie', 'hoodie', 'jacket', 'vest', 'suit',
 ];
 
 /**
@@ -411,6 +417,9 @@ export class NPCs {
     const hairMat = this.pick(this.pools.hair);
     let shirtMat = this.pick(this.pools.shirt);
 
+    // ---- GTA V ped mix: female civilians get their own wardrobe + build.
+    const female = persona === 'civ' && this.rng() < 0.46;
+
     // ---- persona wardrobe overrides
     if (persona === 'gang') {
       // Crew colors: purple jackets vs green hoodies + bandana caps.
@@ -421,8 +430,8 @@ export class NPCs {
       shirtMat = new THREE.MeshStandardMaterial({ color: 0x7a1220, roughness: 0.55, envMapIntensity: 0.6 });
     }
 
-    // ---- outfit archetype
-    const kind = this.pick(OUTFIT_POOL);
+    // ---- outfit archetype (LA casual: tees and hoodies over suits)
+    const kind = female ? this.pick(FEMALE_OUTFIT_POOL) : this.pick(OUTFIT_POOL);
     let torsoMat = shirtMat;
     let upperMat = shirtMat; // sleeve material
     let foreMat = plainSkin; // forearm skin unless long sleeve
@@ -455,14 +464,17 @@ export class NPCs {
     }
 
     const group = new THREE.Group();
-    // ---- core body
+    // ---- core body (female peds: narrower waist + shoulders, slightly shorter)
     const torso = new THREE.Mesh(G.torso, torsoMat);
     torso.position.y = 1.2;
+    if (female) torso.scale.set(0.87, 0.96, 0.92);
     torso.castShadow = true;
     const pelvis = new THREE.Mesh(G.pelvis, pantsMat);
     pelvis.position.y = 0.9;
     const neck = new THREE.Mesh(G.neck, plainSkin);
     neck.position.y = 1.46;
+    const shoulderX = female ? 0.192 : 0.222;
+    const hipX = female ? 0.084 : 0.095;
 
     // ---- head: plain skin sphere + face decal plane on the forward side (-z)
     const headGrp = new THREE.Group();
@@ -477,8 +489,9 @@ export class NPCs {
     headGrp.add(face);
 
     const hairRoll = persona === 'boss' ? 0.9 : this.rng();
-    const hairStyle: 'bald' | 'buzz' | 'afro' | 'long' | 'cap' =
-      hairRoll < 0.08 ? 'bald' : hairRoll < 0.42 ? 'buzz' : hairRoll < 0.6 ? 'afro' : hairRoll < 0.82 ? 'long' : 'cap';
+    const hairStyle: 'bald' | 'buzz' | 'afro' | 'long' | 'cap' = female
+      ? hairRoll < 0.62 ? 'long' : hairRoll < 0.76 ? 'buzz' : hairRoll < 0.88 ? 'cap' : 'afro'
+      : hairRoll < 0.08 ? 'bald' : hairRoll < 0.42 ? 'buzz' : hairRoll < 0.6 ? 'afro' : hairRoll < 0.82 ? 'long' : 'cap';
     if (hairStyle === 'buzz') {
       const h = new THREE.Mesh(G.hairBuzz, hairMat);
       h.position.y = 0.012;
@@ -510,7 +523,7 @@ export class NPCs {
     // ---- arms (shoulder pivot -> upper arm -> elbow pivot -> forearm+hand)
     const mkArm = (side: -1 | 1): { shoulder: THREE.Group; elbow: THREE.Group } => {
       const shoulder = new THREE.Group();
-      shoulder.position.set(side * 0.222, 1.385, 0);
+      shoulder.position.set(side * shoulderX, 1.385, 0);
       const upper = new THREE.Mesh(G.upperArm, sleeve === 'none' ? plainSkin : upperMat);
       upper.position.y = -0.15;
       if (sleeve !== 'none') upper.castShadow = true;
@@ -533,7 +546,7 @@ export class NPCs {
     // ---- legs (hip pivot -> thigh -> knee pivot -> shin+shoe)
     const mkLeg = (side: -1 | 1): { hip: THREE.Group; knee: THREE.Group } => {
       const hip = new THREE.Group();
-      hip.position.set(side * 0.095, 0.86, 0);
+      hip.position.set(side * hipX, 0.86, 0);
       const thigh = new THREE.Mesh(G.thigh, pantsMat);
       thigh.position.y = -0.2;
       thigh.castShadow = true;
@@ -597,7 +610,7 @@ export class NPCs {
     group.userData.hasPhone = hasPhone;
 
     group.add(torso, pelvis, neck, headGrp, lArm.shoulder, rArm.shoulder, lLeg.hip, rLeg.hip);
-    group.scale.setScalar(0.92 + this.rng() * 0.16);
+    group.scale.setScalar(female ? 0.85 + this.rng() * 0.12 : 0.92 + this.rng() * 0.16);
 
     const npc: NPC = {
       group,
@@ -629,7 +642,9 @@ export class NPCs {
         ? 'REY "THE HAMMER" DIAZ'
         : persona === 'gang'
           ? (GANG_NAMES[Math.floor(this.rng() * GANG_NAMES.length)] ?? 'Crew')
-          : (CIV_NAMES[Math.floor(this.rng() * CIV_NAMES.length)] ?? 'Ped'),
+          : female
+            ? (FEM_NAMES[Math.floor(this.rng() * FEM_NAMES.length)] ?? 'Ped')
+            : (CIV_NAMES[Math.floor(this.rng() * CIV_NAMES.length)] ?? 'Ped'),
       cross: null,
       chatPartner: null,
       dialogT: 0,

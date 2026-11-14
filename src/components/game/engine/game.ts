@@ -79,13 +79,14 @@ const GOLDEN_MID = new THREE.Color(0xd9a06b);
 const GOLDEN_BOTTOM = new THREE.Color(0xffc37e);
 const GOLDEN_HORIZON = new THREE.Color(0xff9a4a);
 const GOLDEN_FOG = new THREE.Color(0xe0bd94);
-// Realistic blue daytime sky (the old "day" set was permanently sunset-warm,
-// which flattened the day/night contrast — golden hour is now its own phase).
+// Realistic blue daytime sky — the old "day" set was permanently sunset-warm,
+// which flattened the day/night contrast — golden hour is now its own phase.
+// Daytime fog/horizon run warm-milky: LA smog haze instead of cool blue.
 const DAY_TOP = new THREE.Color(0x3a6fb5);
 const DAY_MID = new THREE.Color(0x84a9d6);
-const DAY_BOTTOM = new THREE.Color(0xc9dcf0);
-const DAY_HORIZON = new THREE.Color(0xe9f1f6);
-const DAY_FOG = new THREE.Color(0xd3e0ea);
+const DAY_BOTTOM = new THREE.Color(0xd6dcd0);
+const DAY_HORIZON = new THREE.Color(0xf0e8d4);
+const DAY_FOG = new THREE.Color(0xd8d4c2);
 const DAY_SUN = new THREE.Color(0xfff1d8);
 // Overcast/rain palette.
 const GRAY_TOP = new THREE.Color(0x4a5258);
@@ -99,7 +100,7 @@ const CLOUD_DUSK = new THREE.Color(0xffa8c0);
 const CLOUD_NIGHT = new THREE.Color(0x2c3352);
 // Hemisphere sky/ground tints.
 const HEMI_DAY_SKY = new THREE.Color(0xcfe0f2);
-const HEMI_DAY_GND = new THREE.Color(0x8a7a5a);
+const HEMI_DAY_GND = new THREE.Color(0x8a7448);
 const HEMI_GOLDEN_SKY = new THREE.Color(0xffd9a8);
 const HEMI_GOLDEN_GND = new THREE.Color(0x8a6a4a);
 const HEMI_DUSK_SKY = new THREE.Color(0xa678c8);
