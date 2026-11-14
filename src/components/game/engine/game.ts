@@ -132,8 +132,10 @@ const GradeShader = {
     vignette: { value: 0.24 },
     /** Golden-hour warmth 0..1 — driven by updateDayNight, fades to 0 at night. */
     warmth: { value: 0 },
-    /** Film grain amount (luma-weighted so shadows stay clean). */
-    grain: { value: 0.03 },
+    /** Film grain amount (luma-weighted so shadows stay clean). Lightened for
+     *  the raw-materials port: heavy grain was burying the photographic texture
+     *  detail — a hint of film character stays without flattening the photos. */
+    grain: { value: 0.012 },
     /** Seconds — animates the grain. */
     time: { value: 0 },
     /** Radial chromatic aberration strength. */

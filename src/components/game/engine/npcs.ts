@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { BLOCK, ROAD_W, SIDEWALK_H, mulberry32 } from './constants';
+import { rawMapTexture } from './textures';
 import { World } from './types';
 
 /**
@@ -169,6 +170,7 @@ export class NPCs {
   private scene: THREE.Scene;
   private rng = mulberry32(2024);
   private geoCache: THREE.BufferGeometry[] = [];
+  private rawTexCache: THREE.Texture[] = [];
   /** Gang/boss combat callback: game draws the tracer, applies damage + audio. */
   onShoot?: (from: THREE.Vector3, to: THREE.Vector3, dmg: number, far: number) => void;
   /** Boss died — game pays the reward. */
@@ -220,8 +222,19 @@ export class NPCs {
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
-    const std = (color: number, roughness = 0.82): THREE.MeshStandardMaterial =>
-      new THREE.MeshStandardMaterial({ color, roughness });
+    // RAW wardrobe fabrics — one shared real fabric texture per clothing slot
+    // (cotton jersey / denim / garment leather / boot leather), multiplied by
+    // each wardrobe color: the outfit palette stays, the surface becomes real
+    // photographed cloth. The files are zoom-cropped so the weave resolves at
+    // ped distance (see scripts/prep_npc_fabrics.py); 1x1 keeps loops ~6px.
+    // Missing files fall back to flat colors.
+    const shirtTex = rawMapTexture('npc_shirt_diff');
+    const pantsTex = rawMapTexture('npc_pants_diff');
+    const jacketTex = rawMapTexture('npc_jacket_diff');
+    const shoeTex = rawMapTexture('npc_shoe_diff');
+    for (const t of [shirtTex, pantsTex, jacketTex, shoeTex]) if (t) this.rawTexCache.push(t);
+    const std = (color: number, roughness = 0.82, tex: THREE.Texture | null = null): THREE.MeshStandardMaterial =>
+      tex ? new THREE.MeshStandardMaterial({ color, roughness, map: tex }) : new THREE.MeshStandardMaterial({ color, roughness });
     this.pools = {
       skin: SKIN_TONES.map((c) => std(c, 0.72)),
       faceDecal: [0, 1, 2, 3, 4, 5].map(
@@ -233,11 +246,11 @@ export class NPCs {
             depthWrite: false,
           }),
       ),
-      shirt: SHIRT_COLORS.map((c) => std(c, 0.88)),
-      pants: PANTS_COLORS.map((c) => std(c, 0.9)),
-      shoe: SHOE_COLORS.map((c) => std(c, 0.6)),
+      shirt: SHIRT_COLORS.map((c) => std(c, 0.88, shirtTex)),
+      pants: PANTS_COLORS.map((c) => std(c, 0.9, pantsTex)),
+      shoe: SHOE_COLORS.map((c) => std(c, 0.6, shoeTex)),
       hair: HAIR_COLORS.map((c) => std(c, 0.95)),
-      jacket: JACKET_COLORS.map((c) => std(c, 0.85)),
+      jacket: JACKET_COLORS.map((c) => std(c, 0.85, jacketTex)),
       white: std(0xe8e6e0, 0.85),
       tie: std(0x7a2020, 0.7),
       vest: std(0xe8701a, 0.85),
@@ -1049,5 +1062,6 @@ export class NPCs {
       if (Array.isArray(p)) for (const m of p) m.dispose();
       else p.dispose();
     }
+    for (const t of this.rawTexCache) t.dispose();
   }
 }

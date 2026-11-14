@@ -27,6 +27,7 @@ import {
   makeSidewalkTile,
   makeStorefrontTexture,
   makeTrunkTexture,
+  rawMapTexture,
 } from './textures';
 
 export type BlockType = 'built' | 'park' | 'lot';
@@ -41,7 +42,7 @@ export type DistrictId =
 export interface DistrictMeta {
   id: DistrictId;
   label: string;
-  styles: Array<'concrete' | 'glass' | 'brick' | 'white' | 'stucco'>;
+  styles: Array<'concrete' | 'glass' | 'brick' | 'white' | 'stucco' | 'metal'>;
   hMin: number;
   hVar: number;
   /** Probability a block edge row gets a palm line. */
@@ -54,7 +55,7 @@ const DISTRICTS: Record<DistrictId, DistrictMeta> = {
   downtown: { id: 'downtown', label: 'Downtown', styles: ['glass', 'glass', 'white', 'concrete'], hMin: 24, hVar: 44, palms: 0.12, retail: true },
   hollywood: { id: 'hollywood', label: 'Hollywood', styles: ['stucco', 'brick', 'white', 'concrete'], hMin: 10, hVar: 13, palms: 0.45, retail: true },
   koreatown: { id: 'koreatown', label: 'Koreatown', styles: ['stucco', 'stucco', 'brick', 'white'], hMin: 9, hVar: 11, palms: 0.25, retail: true },
-  warehouse: { id: 'warehouse', label: 'Warehouse District', styles: ['concrete', 'concrete', 'brick'], hMin: 5, hVar: 8, palms: 0.06, retail: false },
+  warehouse: { id: 'warehouse', label: 'Warehouse District', styles: ['metal', 'metal', 'concrete', 'brick'], hMin: 5, hVar: 8, palms: 0.06, retail: false },
   scentral: { id: 'scentral', label: 'South Central', styles: ['stucco', 'concrete', 'brick', 'stucco'], hMin: 5, hVar: 7, palms: 0.16, retail: false },
   marina: { id: 'marina', label: 'Marina', styles: ['white', 'stucco', 'white'], hMin: 6, hVar: 6, palms: 0.5, retail: false },
   venice: { id: 'venice', label: 'Venice', styles: ['stucco', 'white', 'stucco'], hMin: 4, hVar: 5, palms: 0.62, retail: false },
@@ -261,14 +262,17 @@ export class City {
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 8;
     this.disposables.push(tex);
-    // Micro-bump normal map for the asphalt (subtle grain + wheel-wear patches).
+    // RAW real asphalt relief (nor_gl) + roughness map, both tiled like the
+    // procedural micro-bump they replace (90 tiles across the ground span).
     const gNorm = makeAsphaltNormal();
     gNorm.repeat.set(90, 90);
     this.disposables.push(gNorm);
+    const gRough = rawMapTexture('asphalt_rough', 90, 90);
+    if (gRough) this.disposables.push(gRough);
     const segs = Math.floor(GROUND_CORE / 1.05);
     const geo = new THREE.PlaneGeometry(GROUND_SPAN, GROUND_SPAN, segs, segs);
     geo.rotateX(-Math.PI / 2);
-    const mat = new THREE.MeshStandardMaterial({ map: tex, normalMap: gNorm, normalScale: new THREE.Vector2(0.45, 0.45), roughness: 0.85, metalness: 0.06, envMapIntensity: 0.3 });
+    const mat = new THREE.MeshStandardMaterial({ map: tex, normalMap: gNorm, normalScale: new THREE.Vector2(0.45, 0.45), roughness: 0.85, roughnessMap: gRough ?? undefined, metalness: 0.06, envMapIntensity: 0.3 });
     this.disposables.push(geo, mat);
     this.groundMat = mat;
     const mesh = new THREE.Mesh(geo, mat);
@@ -487,8 +491,8 @@ export class City {
   private facade(style: string) {
     let f = this.facadeCache.get(style);
     if (!f) {
-      const seed = ({ concrete: 11, glass: 23, brick: 37, white: 41, stucco: 53 } as Record<string, number>)[style] ?? 7;
-      const made = makeFacadeTexture(style as 'concrete' | 'glass' | 'brick' | 'white' | 'stucco', seed * 97 + 13);
+      const seed = ({ concrete: 11, glass: 23, brick: 37, white: 41, stucco: 53, metal: 67 } as Record<string, number>)[style] ?? 7;
+      const made = makeFacadeTexture(style as 'concrete' | 'glass' | 'brick' | 'white' | 'stucco' | 'metal', seed * 97 + 13);
       f = { map: made.map, normalMap: made.normalMap, emissiveMap: made.emissiveMap };
       this.facadeCache.set(style, f);
       this.disposables.push(made.map, made.normalMap, made.emissiveMap);
@@ -617,7 +621,7 @@ export class City {
     const mat = new THREE.MeshStandardMaterial({
       map: f.map,
       normalMap: f.normalMap,
-      normalScale: new THREE.Vector2(glassy ? 0.55 : 1.0, glassy ? 0.55 : 1.0),
+      normalScale: new THREE.Vector2(glassy ? 0.55 : 0.62, glassy ? 0.55 : 0.62),
       emissiveMap: f.emissiveMap,
       emissive: new THREE.Color(0xffd9a0),
       emissiveIntensity: 0.9,
@@ -866,8 +870,11 @@ export class City {
 
   private buildHills(): void {
     const rng = mulberry32(4242);
-    // Dry golden basin hills (GTA Vinewood-style scrubland, not lush green).
-    const mat = new THREE.MeshStandardMaterial({ color: 0x8f7f4a, roughness: 1 });
+    // Dry golden basin hills — RAW dry-mud photo skin over the scrub-shape
+    // spheres (procedural flat tint stays the offline fallback).
+    const hillsRaw = rawMapTexture('hills_diff', 10, 4);
+    if (hillsRaw) this.disposables.push(hillsRaw);
+    const mat = new THREE.MeshStandardMaterial(hillsRaw ? { map: hillsRaw, color: 0xd9c9a8, roughness: 1 } : { color: 0x8f7f4a, roughness: 1 });
     const geo = new THREE.SphereGeometry(1, 10, 7);
     this.disposables.push(mat, geo);
     for (let i = 0; i < 10; i++) {

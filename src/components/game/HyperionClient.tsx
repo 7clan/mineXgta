@@ -7,6 +7,7 @@ import { Hud } from './hud';
 import { initIcons, initUIIcons } from './engine/items';
 import { hasSave } from './engine/save';
 import { loadSkinChoice } from './engine/skin';
+import { loadRawMaterialTextures } from './engine/textures';
 
 export default function HyperionClient() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -38,7 +39,13 @@ export default function HyperionClient() {
     // Let the loading UI paint before the heavy city generation blocks the main thread.
     const t = setTimeout(() => {
       if (disposed) return;
-      try {
+      void (async () => {
+        // RAW photographic materials must be resident before the city builds —
+        // the texture makers consume them synchronously at construction time.
+        // Missing files are non-fatal: the engine boots its procedural set.
+        try { await loadRawMaterialTextures(); } catch { /* procedural set */ }
+        if (disposed) return;
+        try {
         const game = new HyperionGame(canvas, {
           onState: (s) => setState(s),
           onToast: (msg) => {
@@ -69,10 +76,11 @@ export default function HyperionClient() {
         (window as unknown as { __hyperion?: HyperionGame }).__hyperion = game;
         game.start();
         setLoading(false);
-      } catch (err) {
-        setFatal(err instanceof Error ? err.message : String(err));
-        setLoading(false);
-      }
+        } catch (err) {
+          setFatal(err instanceof Error ? err.message : String(err));
+          setLoading(false);
+        }
+      })();
     }, 60);
 
     return () => {

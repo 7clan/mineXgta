@@ -7,6 +7,103 @@
  */
 import * as THREE from 'three';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// RAW photographic material registry (gta-clone raw-materials port).
+// Real CC0 photo/PBR files (Poly Haven) live in /public/textures/raw and are
+// loaded once at boot (loadRawMaterialTextures) BEFORE the city builds. Every
+// maker below prefers its raw slot and falls back to the procedural canvas
+// path when the file is missing or failed to load — the engine must always
+// boot, offline included.
+const RAW: Map<string, THREE.Texture> = new Map();
+
+interface RawDef { slot: string; file: string; srgb: boolean }
+
+const RAW_DEFS: RawDef[] = [
+  { slot: 'asphalt_diff', file: 'asphalt_diff.jpg', srgb: true },
+  { slot: 'asphalt_nor', file: 'asphalt_nor.jpg', srgb: false },
+  { slot: 'asphalt_rough', file: 'asphalt_rough.jpg', srgb: false },
+  { slot: 'sidewalk_diff', file: 'sidewalk_diff.jpg', srgb: true },
+  { slot: 'sidewalk_nor', file: 'sidewalk_nor.jpg', srgb: false },
+  { slot: 'facade_concrete_diff', file: 'facade_concrete_diff.jpg', srgb: true },
+  { slot: 'facade_concrete_nor', file: 'facade_concrete_nor.jpg', srgb: false },
+  { slot: 'facade_white_diff', file: 'facade_white_diff.jpg', srgb: true },
+  { slot: 'facade_white_nor', file: 'facade_white_nor.jpg', srgb: false },
+  { slot: 'facade_brick_diff', file: 'facade_brick_diff.jpg', srgb: true },
+  { slot: 'facade_brick_nor', file: 'facade_brick_nor.jpg', srgb: false },
+  { slot: 'facade_stucco_diff', file: 'facade_stucco_diff.jpg', srgb: true },
+  { slot: 'facade_stucco_nor', file: 'facade_stucco_nor.jpg', srgb: false },
+  { slot: 'facade_metal_diff', file: 'facade_metal_diff.jpg', srgb: true },
+  { slot: 'facade_metal_nor', file: 'facade_metal_nor.jpg', srgb: false },
+  { slot: 'roof_diff', file: 'roof_diff.jpg', srgb: true },
+  { slot: 'roof_nor', file: 'roof_nor.jpg', srgb: false },
+  { slot: 'grass_diff', file: 'grass_diff.jpg', srgb: true },
+  { slot: 'grass_nor', file: 'grass_nor.jpg', srgb: false },
+  { slot: 'strata_dirt_diff', file: 'strata_dirt_diff.jpg', srgb: true },
+  { slot: 'strata_dirt_nor', file: 'strata_dirt_nor.jpg', srgb: false },
+  { slot: 'strata_stone_diff', file: 'strata_stone_diff.jpg', srgb: true },
+  { slot: 'strata_stone_nor', file: 'strata_stone_nor.jpg', srgb: false },
+  { slot: 'hills_diff', file: 'hills_diff.jpg', srgb: true },
+  { slot: 'hills_nor', file: 'hills_nor.jpg', srgb: false },
+  { slot: 'trunk_diff', file: 'trunk_diff.jpg', srgb: true },
+  { slot: 'trunk_nor', file: 'trunk_nor.jpg', srgb: false },
+  { slot: 'npc_shirt_diff', file: 'npc_shirt_diff.jpg', srgb: true },
+  { slot: 'npc_pants_diff', file: 'npc_pants_diff.jpg', srgb: true },
+  { slot: 'npc_jacket_diff', file: 'npc_jacket_diff.jpg', srgb: true },
+  { slot: 'npc_shoe_diff', file: 'npc_shoe_diff.jpg', srgb: true },
+];
+
+let rawLoadPromise: Promise<void> | null = null;
+
+/** Preload every raw material file. Idempotent; safe to call repeatedly.
+ *  Never rejects — a failed file leaves its slot empty (procedural fallback).
+ *  Resolves after `timeoutMs` even if the network stalls, so boot can't hang. */
+export function loadRawMaterialTextures(timeoutMs = 12000): Promise<void> {
+  if (!rawLoadPromise) {
+    rawLoadPromise = (async () => {
+      const loader = new THREE.TextureLoader();
+      await Promise.all(RAW_DEFS.map(async (d) => {
+        try {
+          const t = await loader.loadAsync(`/textures/raw/${d.file}`);
+          t.wrapS = t.wrapT = THREE.RepeatWrapping;
+          t.colorSpace = d.srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+          t.anisotropy = 8;
+          RAW.set(d.slot, t);
+        } catch {
+          /* absent → procedural fallback */
+        }
+      }));
+    })();
+  }
+  return Promise.race([rawLoadPromise, new Promise<void>((res) => setTimeout(res, timeoutMs))]);
+}
+
+/** Clone a raw texture with repeat settings (the caller owns/disposes the clone). */
+export function rawMapTexture(slot: string, rx = 1, ry = 1): THREE.Texture | null {
+  const t = RAW.get(slot);
+  if (!t) return null;
+  const c = t.clone();
+  c.wrapS = c.wrapT = THREE.RepeatWrapping;
+  c.repeat.set(rx, ry);
+  c.needsUpdate = true;
+  return c;
+}
+
+/** Draw a raw photo full-bleed onto a canvas. Only whole-image draws and
+ *  90°-rotation/flips are used so the tile stays seamless. Returns false when
+ *  the slot is absent — the caller then paints its procedural fallback. */
+function rawIntoCanvas(g: CanvasRenderingContext2D, w: number, h: number, slot: string, rot = 0, flip = false): boolean {
+  const t = RAW.get(slot);
+  if (!t || !t.image) return false;
+  g.save();
+  g.translate(w / 2, h / 2);
+  if (rot) g.rotate((rot * Math.PI) / 180);
+  if (flip) g.scale(-1, 1);
+  g.translate(-w / 2, -h / 2);
+  g.drawImage(t.image as CanvasImageSource, 0, 0, w, h);
+  g.restore();
+  return true;
+}
+
 type RNG = () => number;
 
 /** Deterministic seeded RNG (mulberry32). */
@@ -147,9 +244,9 @@ function pixelTexture(c: HTMLCanvasElement): THREE.CanvasTexture {
 
 /** Facade material set: color map (AO baked in), normal map, emissive map of lit windows. */
 export interface FacadeStyle {
-  map: THREE.CanvasTexture;
-  normalMap: THREE.CanvasTexture;
-  emissiveMap: THREE.CanvasTexture;
+  map: THREE.Texture;
+  normalMap: THREE.Texture;
+  emissiveMap: THREE.Texture;
 }
 
 /** Height levels used by the facade normal maps (grayscale strings). */
@@ -171,7 +268,7 @@ function aoShadow(g: CanvasRenderingContext2D, x: number, y: number, w: number, 
  * Los Santos material set: beige downtown concrete, teal LA glass, muted brown
  * brick, warm-white modern panels and tan low-rise stucco.
  */
-export function makeFacadeTexture(style: 'concrete' | 'glass' | 'brick' | 'white' | 'stucco', seed: number): FacadeStyle {
+export function makeFacadeTexture(style: 'concrete' | 'glass' | 'brick' | 'white' | 'stucco' | 'metal', seed: number): FacadeStyle {
   const S = 256;
   const rnd = mulberry32(seed);
   const c = makeCanvas(S, S), ec = makeCanvas(S, S), hc = makeCanvas(S, S);
@@ -197,8 +294,11 @@ export function makeFacadeTexture(style: 'concrete' | 'glass' | 'brick' | 'white
   };
 
   if (style === 'concrete') {
-    vGrad(g, 0, 0, S, S, '#b8ac96', '#a89c86'); // sun-baked beige concrete
-    speckle(g, rnd, S, S, 1500, ['#c2b6a0', '#9e927c', '#928672', '#bab19b', '#a4988f']);
+    // RAW: real sun-baked concrete photo base; procedural keeps the fallback.
+    if (!rawIntoCanvas(g, S, S, 'facade_concrete_diff', (seed % 4) * 90, (seed % 7) % 2 === 0)) {
+      vGrad(g, 0, 0, S, S, '#b8ac96', '#a89c86'); // sun-baked beige concrete
+      speckle(g, rnd, S, S, 1500, ['#c2b6a0', '#9e927c', '#928672', '#bab19b', '#a4988f']);
+    }
     // Floor slab band (proud) + shadow gap (recessed) at the tile top.
     px(g, 0, 0, S, 8, '#cbc4b6'); px(g, 0, 8, S, 6, '#8b8375');
     px(hg, 0, 0, S, 8, H_RAISE); px(hg, 0, 8, S, 6, H_RECESS);
@@ -249,20 +349,22 @@ export function makeFacadeTexture(style: 'concrete' | 'glass' | 'brick' | 'white
       px(g, mx + 2, my + 2, 3, 3, '#3a4148');
     }
   } else if (style === 'brick') {
-    px(g, 0, 0, S, S, '#6e5a4c'); // mortar
-    px(hg, 0, 0, S, S, H_RECESS);
-    const pal = ['#8a4a36', '#7a422e', '#94543c', '#6e3a2a', '#8f503a', '#834630'];
-    for (let row = 0; row < 16; row++) {
-      const y = row * 16, off = (row % 2) * 16;
-      for (let x = -32; x < S; x += 32) {
-        const col = pal[(rnd() * pal.length) | 0];
-        px(g, x + off + 2, y + 2, 28, 12, col);
-        px(g, x + off + 2, y + 2, 28, 2, 'rgba(255,255,255,0.07)'); // top-of-brick light
-        px(g, x + off + 2, y + 11, 28, 3, 'rgba(0,0,0,0.18)'); // bottom shadow
-        px(hg, x + off + 2, y + 2, 28, 12, rnd() < 0.5 ? '#8c8c8c' : '#828282');
+    if (!rawIntoCanvas(g, S, S, 'facade_brick_diff', (seed % 4) * 90)) {
+      px(g, 0, 0, S, S, '#6e5a4c'); // mortar
+      px(hg, 0, 0, S, S, H_RECESS);
+      const pal = ['#8a4a36', '#7a422e', '#94543c', '#6e3a2a', '#8f503a', '#834630'];
+      for (let row = 0; row < 16; row++) {
+        const y = row * 16, off = (row % 2) * 16;
+        for (let x = -32; x < S; x += 32) {
+          const col = pal[(rnd() * pal.length) | 0];
+          px(g, x + off + 2, y + 2, 28, 12, col);
+          px(g, x + off + 2, y + 2, 28, 2, 'rgba(255,255,255,0.07)'); // top-of-brick light
+          px(g, x + off + 2, y + 11, 28, 3, 'rgba(0,0,0,0.18)'); // bottom shadow
+          px(hg, x + off + 2, y + 2, 28, 12, rnd() < 0.5 ? '#8c8c8c' : '#828282');
+        }
       }
+      speckle(g, rnd, S, S, 700, ['#83402c', '#a5573e', '#6e564a']);
     }
-    speckle(g, rnd, S, S, 700, ['#83402c', '#a5573e', '#6e564a']);
     const wx = 84, wy = 68, ww = 88, wh = 120; // smaller window, light stone frame
     px(g, wx - 8, wy - 8, ww + 16, wh + 16, '#d5cebe'); // stone surround
     px(hg, wx - 8, wy - 8, ww + 16, wh + 16, H_RAISE);
@@ -279,7 +381,7 @@ export function makeFacadeTexture(style: 'concrete' | 'glass' | 'brick' | 'white
     lit(wx + 4, wy + 4, ww / 2 - 8, wh - 8, 0.42);
     lit(wx + ww / 2 + 4, wy + 4, ww / 2 - 8, wh - 8, 0.38);
   } else if (style === 'white') { // warm stucco modern panel with a shaded window band + louver row
-    vGrad(g, 0, 0, S, S, '#ece5d2', '#dcd4c0');
+    if (!rawIntoCanvas(g, S, S, 'facade_white_diff', (seed % 4) * 90)) vGrad(g, 0, 0, S, S, '#ece5d2', '#dcd4c0');
     for (let x = 0; x < S; x += 64) px(g, x, 0, 2, S, '#cfc7b2'); // panel seams
     for (let y = 0; y < S; y += 128) px(g, 0, y, S, 2, '#d4ccb8');
     px(hg, 0, 0, S, S, H_WALL);
@@ -303,10 +405,36 @@ export function makeFacadeTexture(style: 'concrete' | 'glass' | 'brick' | 'white
     for (let x = bx; x < bx + bw; x += 22) lit(x + 3, by + 3, 15, bh - 6, 0.3);
     // Base shadow gradient for depth
     aoShadow(g, 0, S - 20, S, 20, 0.1);
+  } else if (style === 'metal') { // RAW corrugated steel warehouse skin — the
+    // industrial district facade: sheet-metal photo base, ridge shadow lines,
+    // a clerestory window row + roll-up loading dock.
+    if (!rawIntoCanvas(g, S, S, 'facade_metal_diff', (seed % 4) * 90)) {
+      vGrad(g, 0, 0, S, S, '#8b8f93', '#6e7276');
+      speckle(g, rnd, S, S, 900, ['#93989c', '#5f6468', '#7b7f83', '#575b5f']);
+    }
+    // Corrugation ridge shading (structure over the photo)
+    for (let x = 0; x < S; x += 32) {
+      px(g, x, 0, 3, S, 'rgba(0,0,0,0.20)'); px(g, x + 3, 0, 2, S, 'rgba(255,255,255,0.08)');
+      px(hg, x, 0, 3, S, '#8a8a8a');
+    }
+    // Clerestory window row up high (recessed, mesh grille)
+    for (let x = 24; x < S - 24; x += 56) {
+      px(g, x, 34, 40, 24, '#242a30'); px(hg, x, 34, 40, 24, H_GLASS);
+      g.globalAlpha = 0.35; px(g, x, 40, 40, 12, '#586870'); g.globalAlpha = 1;
+      lit(x + 4, 38, 32, 16, 0.22);
+    }
+    // Roll-up loading dock door at the base
+    const dX = 96, dY = S - 118;
+    px(g, dX, dY, 64, 116, '#394046');
+    for (let y = dY + 6; y < dY + 110; y += 12) px(g, dX + 4, y, 56, 7, 'rgba(255,255,255,0.06)');
+    px(hg, dX, dY, 64, 116, H_RECESS);
+    aoShadow(g, dX, dY, 64, 14, 0.24);
   } else { // stucco — tan LA strip-mall wall: parapet cap, AC + downspout,
     // punched windows with pop-out frames, a painted sign band remnant.
-    vGrad(g, 0, 0, S, S, '#c2a078', '#b89768');
-    speckle(g, rnd, S, S, 1800, ['#ccab82', '#b5926a', '#d4b48c', '#ad8c66', '#c4a274']);
+    if (!rawIntoCanvas(g, S, S, 'facade_stucco_diff', (seed % 4) * 90)) {
+      vGrad(g, 0, 0, S, S, '#c2a078', '#b89768');
+      speckle(g, rnd, S, S, 1800, ['#ccab82', '#b5926a', '#d4b48c', '#ad8c66', '#c4a274']);
+    }
     // Parapet cap (proud) + gravel-stop edge + grime shadow
     px(g, 0, 0, S, 10, '#d4ba90'); px(g, 0, 10, S, 5, '#9c8054');
     px(hg, 0, 0, S, 10, H_RAISE); px(hg, 0, 10, S, 5, H_RECESS);
@@ -341,17 +469,23 @@ export function makeFacadeTexture(style: 'concrete' | 'glass' | 'brick' | 'white
     aoShadow(g, 0, S - 26, S, 26, 0.2);
   }
   heightNoise(hg, rnd, S, S, 260, ['#767676', '#8a8a8a']);
-  return { map: toTexture(c), normalMap: heightToNormal(hc, 2.1), emissiveMap: toTexture(ec) };
+  // RAW normal: the photo's own relief (real brick/stucco/concrete bumps);
+  // procedural height→normal remains the fallback for every style without a file.
+  const rawNor = style === 'glass' ? null : rawMapTexture(`facade_${style}_nor`);
+  return { map: toTexture(c), normalMap: rawNor ?? heightToNormal(hc, 2.1), emissiveMap: toTexture(ec) };
 }
 
-/** Gravel/tar roof tile: warm sun-bleached gray noise, worn patches, vents. */
+/** Gravel/tar roof tile: real sun-bleached gravel photo (raw), tar patches, vents.
+ *  Procedural paint remains the offline fallback. */
 export function makeRoofTexture(): THREE.CanvasTexture {
   const S = 128;
   const rnd = mulberry32(0x5eed);
   const c = makeCanvas(S, S), g = ctx2d(c);
-  px(g, 0, 0, S, S, '#443f39');
-  speckle(g, rnd, S, S, 2400, ['#4d4841', '#3a352f', '#332f29', '#524c45', '#3f3a34']);
-  for (let i = 0; i < 7; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 8 + rnd() * 16, 'rgba(92,86,76,0.35)'); // sun-bleached
+  if (!rawIntoCanvas(g, S, S, 'roof_diff', ((rnd() * 4) | 0) * 90)) {
+    px(g, 0, 0, S, S, '#443f39');
+    speckle(g, rnd, S, S, 2400, ['#4d4841', '#3a352f', '#332f29', '#524c45', '#3f3a34']);
+    for (let i = 0; i < 7; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 8 + rnd() * 16, 'rgba(92,86,76,0.35)'); // sun-faded
+  }
   for (let i = 0; i < 5; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 6 + rnd() * 12, 'rgba(38,34,29,0.4)'); // tar patches
   if (rnd() < 0.75) { // metal vent, kept away from tile edges
     const vx = 20 + ((rnd() * (S - 48)) | 0), vy = 20 + ((rnd() * (S - 48)) | 0);
@@ -369,10 +503,16 @@ export function makeAsphaltTile(): HTMLCanvasElement {
   const S = 256;
   const rnd = mulberry32(0xa5fa);
   const c = makeCanvas(S, S), g = ctx2d(c);
-  px(g, 0, 0, S, S, '#565049');
-  speckle(g, rnd, S, S, 5200, ['#5f5851', '#4d473f', '#665e54', '#514b44', '#464039']);
-  for (let i = 0; i < 6; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 14 + rnd() * 26, 'rgba(112,104,92,0.26)'); // sun-faded
-  for (let i = 0; i < 4; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 10 + rnd() * 18, 'rgba(43,38,33,0.32)');
+  // RAW: the real photographic asphalt is the base; the authored patchwork
+  // (tar seams, oil, wear) is drawn over it for the LA street character.
+  if (!rawIntoCanvas(g, S, S, 'asphalt_diff')) {
+    px(g, 0, 0, S, S, '#565049');
+    speckle(g, rnd, S, S, 5200, ['#5f5851', '#4d473f', '#665e54', '#514b44', '#464039']);
+    for (let i = 0; i < 6; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 14 + rnd() * 26, 'rgba(112,104,92,0.26)'); // sun-faded
+    for (let i = 0; i < 4; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 10 + rnd() * 18, 'rgba(43,38,33,0.32)');
+  } else {
+    for (let i = 0; i < 2; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 10 + rnd() * 18, 'rgba(43,38,33,0.30)'); // worn dark patches
+  }
   // Tar-patch repair seams (LA street patchwork) + oil stains.
   for (let i = 0; i < 4; i++) {
     const x0 = rnd() * S, y0 = rnd() * S;
@@ -390,14 +530,16 @@ export function makeSidewalkTile(): HTMLCanvasElement {
   const S = 256;
   const rnd = mulberry32(0x5ab1);
   const c = makeCanvas(S, S), g = ctx2d(c);
-  px(g, 0, 0, S, S, '#c5beb0');
-  for (let i = 0; i < 4; i++)
-    for (let j = 0; j < 4; j++) {
-      g.globalAlpha = 0.05 + rnd() * 0.05;
-      px(g, i * 64, j * 64, 64, 64, rnd() < 0.5 ? '#fdfaf0' : '#6f6a5e');
-      g.globalAlpha = 1;
-    }
-  speckle(g, rnd, S, S, 2600, ['#cfc8ba', '#b3ac9e', '#c6bfb1', '#a9a294']);
+  if (!rawIntoCanvas(g, S, S, 'sidewalk_diff')) {
+    px(g, 0, 0, S, S, '#c5beb0');
+    for (let i = 0; i < 4; i++)
+      for (let j = 0; j < 4; j++) {
+        g.globalAlpha = 0.05 + rnd() * 0.05;
+        px(g, i * 64, j * 64, 64, 64, rnd() < 0.5 ? '#fdfaf0' : '#6f6a5e');
+        g.globalAlpha = 1;
+      }
+    speckle(g, rnd, S, S, 2600, ['#cfc8ba', '#b3ac9e', '#c6bfb1', '#a9a294']);
+  }
   // Gum specks + hairline cracks
   for (let i = 0; i < 26; i++) px(g, (rnd() * S) | 0, (rnd() * S) | 0, 2, 2, rnd() < 0.5 ? '#8a8274' : '#736c5e');
   for (let i = 0; i < 3; i++) {
@@ -416,11 +558,17 @@ export function makeGrassTile(): HTMLCanvasElement {
   const S = 256;
   const rnd = mulberry32(0x6ea5);
   const c = makeCanvas(S, S), g = ctx2d(c);
-  px(g, 0, 0, S, S, '#7a7444');
-  speckle(g, rnd, S, S, 5000, ['#847c4a', '#6e6838', '#8f8150', '#5f6634', '#7c7040', '#93864a']);
-  for (let i = 0; i < 8; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 16 + rnd() * 30, 'rgba(96,88,44,0.30)'); // dry patches
-  for (let i = 0; i < 5; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 14 + rnd() * 22, 'rgba(90,96,44,0.24)'); // greener spots
-  for (let i = 0; i < 5; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 10 + rnd() * 18, 'rgba(122,100,58,0.30)'); // bald dirt
+  if (!rawIntoCanvas(g, S, S, 'grass_diff')) {
+    px(g, 0, 0, S, S, '#7a7444');
+    speckle(g, rnd, S, S, 5000, ['#847c4a', '#6e6838', '#8f8150', '#5f6634', '#7c7040', '#93864a']);
+    for (let i = 0; i < 8; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 16 + rnd() * 30, 'rgba(96,88,44,0.30)'); // dry patches
+    for (let i = 0; i < 5; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 14 + rnd() * 22, 'rgba(90,96,44,0.24)'); // greener spots
+    for (let i = 0; i < 5; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 10 + rnd() * 18, 'rgba(122,100,58,0.30)'); // bald dirt
+  } else {
+    // Sun-bake the photo toward the dry LA turf grade + bald dirt spots.
+    g.fillStyle = 'rgba(155,125,55,0.15)'; g.fillRect(0, 0, S, S);
+    for (let i = 0; i < 5; i++) wrapBlob(g, S, rnd() * S, rnd() * S, 10 + rnd() * 18, 'rgba(122,100,58,0.30)');
+  }
   for (let i = 0; i < 420; i++) px(g, (rnd() * S) | 0, (rnd() * S) | 0, 1, 2, rnd() < 0.7 ? '#a89254' : '#6f7a3c'); // blades
   return c;
 }
@@ -525,8 +673,10 @@ export function makeStorefrontTexture(variant: 0 | 1 | 2): FacadeStyle {
   return { map: toTexture(c), normalMap: heightToNormal(hc, 2.3), emissiveMap: toTexture(ec) };
 }
 
-/** Subtle seamless asphalt micro-bump normal map (wheel wear, patches). */
-export function makeAsphaltNormal(): THREE.CanvasTexture {
+/** Real asphalt normal relief (raw file) with the procedural micro-bump fallback. */
+export function makeAsphaltNormal(): THREE.Texture {
+  const raw = rawMapTexture('asphalt_nor');
+  if (raw) return raw;
   const S = 256;
   const rnd = mulberry32(0x3a57);
   const hc = makeCanvas(S, S), hg = ctx2d(hc);
@@ -536,8 +686,10 @@ export function makeAsphaltNormal(): THREE.CanvasTexture {
   return heightToNormal(hc, 1.15);
 }
 
-/** Sidewalk slab-seam normal map (matches the 256px 4x4 slab tile). */
-export function makeSidewalkNormal(): THREE.CanvasTexture {
+/** Real concrete normal relief (raw file) with the procedural slab-seam fallback. */
+export function makeSidewalkNormal(): THREE.Texture {
+  const raw = rawMapTexture('sidewalk_nor');
+  if (raw) return raw;
   const S = 256;
   const rnd = mulberry32(0x5ab2);
   const hc = makeCanvas(S, S), hg = ctx2d(hc);
@@ -552,8 +704,14 @@ export function makeSidewalkNormal(): THREE.CanvasTexture {
   return heightToNormal(hc, 1.7);
 }
 
-/** 256px seamless underground strata texture (dirt/stone/deepslate/bedrock). */
-export function makeLayerTexture(kind: 'dirt' | 'stone' | 'deepslate' | 'bedrock', seed: number): THREE.CanvasTexture {
+/** 256px seamless underground strata texture — dirt and stone use the real raw
+ *  photo files; deepslate and bedrock stay procedural. */
+export function makeLayerTexture(kind: 'dirt' | 'stone' | 'deepslate' | 'bedrock', seed: number): THREE.Texture {
+  const rawSlot = kind === 'dirt' ? 'strata_dirt_diff' : kind === 'stone' ? 'strata_stone_diff' : null;
+  if (rawSlot) {
+    const raw = rawMapTexture(rawSlot);
+    if (raw) return raw;
+  }
   const S = 256;
   const rnd = mulberry32(seed);
   const c = makeCanvas(S, S), g = ctx2d(c);
@@ -770,23 +928,25 @@ export function makeFrondTexture(): THREE.CanvasTexture {
   return toTexture(c, false);
 }
 
-/** 64x128 palm trunk: brown bark, horizontal ring segments, fiber noise. */
+/** 64x128 palm trunk — real bark photo base (raw), procedural ring fallback. */
 export function makeTrunkTexture(): THREE.CanvasTexture {
   const W = 64, H = 128;
   const rnd = mulberry32(0x7babe);
   const c = makeCanvas(W, H), g = ctx2d(c);
-  px(g, 0, 0, W, H, '#8a6a4a');
-  for (let y = 4; y < H - 4; y += 9 + ((rnd() * 8) | 0)) {
-    const h = 2 + ((rnd() * 2) | 0);
-    for (let x = 0; x < W; x += 8) // wavy ring segments
-      px(g, x, y + ((rnd() * 2) | 0), 8, h, '#5f4630');
-    px(g, 0, y + h, W, 1, 'rgba(255,232,196,0.16)');
+  if (!rawIntoCanvas(g, W, H, 'trunk_diff')) {
+    px(g, 0, 0, W, H, '#8a6a4a');
+    for (let y = 4; y < H - 4; y += 9 + ((rnd() * 8) | 0)) {
+      const h = 2 + ((rnd() * 2) | 0);
+      for (let x = 0; x < W; x += 8) // wavy ring segments
+        px(g, x, y + ((rnd() * 2) | 0), 8, h, '#5f4630');
+      px(g, 0, y + h, W, 1, 'rgba(255,232,196,0.16)');
+    }
+    for (let i = 0; i < 110; i++) { // vertical fiber streaks
+      g.fillStyle = rnd() < 0.5 ? 'rgba(58,42,26,0.22)' : 'rgba(214,182,140,0.18)';
+      g.fillRect((rnd() * W) | 0, (rnd() * H) | 0, 1, 3 + ((rnd() * 16) | 0));
+    }
+    speckle(g, rnd, W, H, 500, ['#7d5d3f', '#94744f', '#6e5236']);
   }
-  for (let i = 0; i < 110; i++) { // vertical fiber streaks
-    g.fillStyle = rnd() < 0.5 ? 'rgba(58,42,26,0.22)' : 'rgba(214,182,140,0.18)';
-    g.fillRect((rnd() * W) | 0, (rnd() * H) | 0, 1, 3 + ((rnd() * 16) | 0));
-  }
-  speckle(g, rnd, W, H, 500, ['#7d5d3f', '#94744f', '#6e5236']);
   return toTexture(c);
 }
 

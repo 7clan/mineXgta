@@ -472,3 +472,54 @@ Stage Summary:
 - The map now reads as a district-zoned, sun-baked Los Santos (glass downtown core, stucco strip-mall ring, palm-lined Venice/Marina, warehouse belt, dry golden hills with the HYPERION landmark sign) with LA-smog daytime grading and GTA V-styled mixed pedestrians — while Steve, destruction, building and all gameplay are untouched.
 - Preview-rollback report: the sandbox recycles processes between messages; the dev server was restarted fresh from current HEAD (skin system fb47b9b + this port) — verified live with screenshots, 0 console errors. If an old frame ever shows again, a hard refresh is the fix.
 - Not done on purpose: no actual Rockstar .rpf asset extraction (copyright + 20 GB scale) — the port is procedural, driven by the branch's committed map/ped metadata and its proof captures.
+
+## Session: gta-clone raw-materials port (feature/gta-raw-materials)
+
+Branch `feature/gta-raw-materials` off the completed merge `d56621f` (the interrupted
+b4e9b7a/1d5dbf3 merge was finished, cleaned of workspace junk, and force-pushed onto
+`feature/cinematic-graphics-overhaul` first).
+
+User direction correction: the Los Santos port was NOT to be a stylized procedural
+re-creation — the map materials/textures/NPCs should be RAW asset files, not drawn in
+our style. Verified ground truth about the source: the gta-clone repo contains NO
+extractable asset files by design (mirror README: "binaries are gitignored") — what it
+holds is proxy/mirror tooling + manifests pointing at 19.51 GB of Rockstar GTA V
+.rpf/.awc data on the upstream site, streamed through a WASM port of the real GTA V
+engine. Those cannot be extracted/redistributed (Rockstar IP, and RPF7/WASM-engine
+formats are incompatible with the Three.js engine anyway) — see commit notes.
+
+So the raw materials are real photographic CC0 files (Poly Haven), downloaded as
+actual image assets into `public/textures/raw/` (31 files, 26 MB: diff/nor/rough
+sets), loaded at boot via `loadRawMaterialTextures()` BEFORE the city builds, and
+consumed by the same makers with per-slot procedural fallback (engine always boots):
+
+- textures.ts: RAW registry + loader + `rawMapTexture`/`rawIntoCanvas` helpers.
+  makeFacadeTexture (concrete/brick/white/stucco photo bases under the window
+  architecture, raw nor_gl normals; NEW 'metal' corrugated-iron style for the
+  warehouse district), makeRoofTexture (gravel photo + tar/vents), makeAsphaltTile/
+  makeSidewalkTile/makeGrassTile (photo bases, authored patchwork/joints/dry-wash on
+  top), makeAsphaltNormal/makeSidewalkNormal (raw relief), makeLayerTexture (dirt/
+  stone strata photos), makeTrunkTexture (bark photo).
+- city.ts: warehouse styles now ['metal','metal','concrete','brick']; ground gains
+  the real asphalt roughness map; hills skinned with the dry-mud photo; facade
+  normalScale tempered 0.62 for photo normals.
+- npcs.ts: every shirt/pants/jacket/shoe pool material now carries a real fabric
+  texture (cotton jersey / denim / garment leather / boot leather) tinted by the
+  existing wardrobe palette; fabrics zoom-cropped (scripts/prep_npc_fabrics.py) so
+  the weave resolves at ped scale.
+- game.ts: film grain 0.03 -> 0.012 (heavy grain was flattening the photo detail).
+- HyperionClient.tsx: boot awaits the raw-material preload (timeout-guarded).
+
+UNCHANGED (mandate): blocky Steve player + skin system + backpack, micro-voxel
+destruction, digging/building, vehicles, missions, gangs/boss/dialogue, save system.
+
+QA (agent-browser + VLM): fresh boots fetch all 31 raw files (200), 0 console errors,
+tsc/lint clean. VLM verdicts: ground materials PASS (photographic asphalt aggregate,
+jointed concrete sidewalk, grass), warehouse corrugated metal + brick PASS, close
+stucco/storefront walls PASS (photographic grain), Venice stucco reads photo-tinted
+at distance. NPC fabrics verified on every clothing material programmatically
+(12 shirts/7 pants/5 jackets/3 shoes, 1024px maps); visually the weave is subtle at
+ped scale — like real cloth at 1.7 m — rather than cartoon-obvious.
+
+Screenshots: download/raw-materials-qa/ (boot, downtown, facade closeup, warehouse
+metal, Venice stucco, NPC fabric, ground textures).
