@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import {
   EYE_HEIGHT,
   FLY_SPEED,
@@ -13,6 +14,7 @@ import {
 import { Input } from './input';
 import { World } from './types';
 import { LoadedSkin, PartFaces, loadSkin, makeDefaultSkinCanvas } from './skin';
+import { makeBackpackTextures } from './textures';
 
 /**
  * The player is the ONLY blocky thing in the world — a classic Minecraft
@@ -48,7 +50,7 @@ export class Player {
   private heldMesh: THREE.Mesh | null = null;
   private headGroup = new THREE.Group();
   /** Current skin materials (base + overlays) — creative glow iterates these. */
-  private bodyMats: THREE.MeshLambertMaterial[] = [];
+  private bodyMats: THREE.MeshStandardMaterial[] = [];
   private bobT = 0;
 
   // rig pieces that survive skin swaps
@@ -95,8 +97,66 @@ export class Player {
     };
 
     this.applySkin(loadSkin(makeDefaultSkinCanvas(), 'classic')!);
+    this.buildBackpack();
     this.group.visible = false; // hidden in first person
     scene.add(this.group);
+  }
+
+  /** PBR backpack (procedural woven-canvas maps + normal/roughness), strapped
+   *  to the back: main pack + flap + side pockets + shoulder straps with steel
+   *  buckles + bedroll cinched across the top. -Z is the model's back. */
+  private buildBackpack(): void {
+    const texs = makeBackpackTextures();
+    const fabric = new THREE.MeshStandardMaterial({
+      map: texs.map,
+      normalMap: texs.normalMap,
+      roughnessMap: texs.roughnessMap,
+      metalness: 0,
+      envMapIntensity: 0.55,
+    });
+    fabric.normalScale.set(0.9, 0.9);
+    const nylon = new THREE.MeshStandardMaterial({ color: 0x241f1d, roughness: 0.58, metalness: 0.05, envMapIntensity: 0.6 });
+    const steel = new THREE.MeshStandardMaterial({ color: 0x8a8f96, roughness: 0.3, metalness: 0.95, envMapIntensity: 1.2 });
+    const roll = new THREE.MeshStandardMaterial({ color: 0x8f7c5c, roughness: 0.94, metalness: 0, envMapIntensity: 0.3 });
+    const add = (mesh: THREE.Mesh): THREE.Mesh => {
+      mesh.castShadow = true;
+      this.group.add(mesh);
+      return mesh;
+    };
+
+    // Main pack panel against the back.
+    const pack = add(new THREE.Mesh(new RoundedBoxGeometry(0.34, 0.44, 0.16, 3, 0.035), fabric));
+    pack.position.set(0, 1.16, -0.21);
+    // Flap wrapping the top rear.
+    const flap = add(new THREE.Mesh(new RoundedBoxGeometry(0.36, 0.14, 0.06, 2, 0.025), fabric));
+    flap.position.set(0, 1.35, -0.18);
+    flap.rotation.x = -0.45;
+    // Side pockets.
+    for (const sx of [-1, 1]) {
+      const pocket = add(new THREE.Mesh(new RoundedBoxGeometry(0.07, 0.17, 0.1, 2, 0.015), fabric));
+      pocket.position.set(sx * 0.22, 1.1, -0.21);
+    }
+    // Shoulder straps on the chest (+Z), shoulder pads, steel buckles.
+    for (const sx of [-1, 1]) {
+      const strap = add(new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.46, 0.028), nylon));
+      strap.position.set(sx * 0.11, 1.12, 0.15);
+      const pad = add(new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.11, 0.06), nylon));
+      pad.position.set(sx * 0.11, 1.42, 0.03);
+      pad.rotation.x = 0.35;
+      const buckle = add(new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.024), steel));
+      buckle.position.set(sx * 0.11, 0.96, 0.165);
+    }
+    // Bedroll cinched across the top with two nylon wraps.
+    const bed = add(new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.4, 12), roll));
+    bed.rotation.z = Math.PI / 2;
+    bed.position.set(0, 1.43, -0.16);
+    for (const sx of [-1, 1]) {
+      const ring = add(new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.115, 0.115), nylon));
+      ring.position.set(sx * 0.09, 1.43, -0.16);
+    }
+    // Grab handle.
+    const handle = add(new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.022, 0.03), nylon));
+    handle.position.set(0, 1.39, -0.12);
   }
 
   /**
@@ -118,13 +178,13 @@ export class Player {
     this.bodyMats = [];
     this.currentSkin = skin;
 
-    const mkMat = (face: HTMLCanvasElement, overlay: boolean): THREE.MeshLambertMaterial => {
+    const mkMat = (face: HTMLCanvasElement, overlay: boolean): THREE.MeshStandardMaterial => {
       const t = new THREE.CanvasTexture(face);
       t.magFilter = THREE.NearestFilter;
       t.minFilter = THREE.NearestFilter;
       t.colorSpace = THREE.SRGBColorSpace;
       t.generateMipmaps = false;
-      const m = new THREE.MeshLambertMaterial({ map: t });
+      const m = new THREE.MeshStandardMaterial({ map: t, roughness: 0.72, metalness: 0, envMapIntensity: 0.45 });
       if (overlay) m.alphaTest = 0.5; // crisp cutout overlay pixels
       this.textures.push(t);
       this.bodyMats.push(m);
@@ -185,7 +245,7 @@ export class Player {
     }
     if (color === null) return;
     const geo = new THREE.BoxGeometry(0.22, 0.22, 0.34);
-    const mat = new THREE.MeshLambertMaterial({ color });
+    const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.1, envMapIntensity: 0.7 });
     this.heldMesh = new THREE.Mesh(geo, mat);
     this.heldMesh.position.set(0, -0.62, 0.1);
     this.heldMesh.rotation.x = 0.5;
