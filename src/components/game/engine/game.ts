@@ -121,13 +121,23 @@ const DEBRIS_COLORS: Record<string, number> = {
   planks: 0xa9844f,
 };
 
-/** Cinematic color grade: GTA-style S-curve + saturation + warm highlights + vignette. */
+/** Cinematic color grade v2: GTA-style S-curve + saturation + day-aware
+ *  teal-orange split tone + soft vignette + animated film grain + subtle radial
+ *  chromatic aberration. */
 const GradeShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
     contrast: { value: 1.07 },
     saturation: { value: 1.13 },
     vignette: { value: 0.24 },
+    /** Golden-hour warmth 0..1 — driven by updateDayNight, fades to 0 at night. */
+    warmth: { value: 0 },
+    /** Film grain amount (luma-weighted so shadows stay clean). */
+    grain: { value: 0.03 },
+    /** Seconds — animates the grain. */
+    time: { value: 0 },
+    /** Radial chromatic aberration strength. */
+    aberration: { value: 0.0009 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -141,21 +151,38 @@ const GradeShader = {
     uniform float contrast;
     uniform float saturation;
     uniform float vignette;
+    uniform float warmth;
+    uniform float grain;
+    uniform float time;
+    uniform float aberration;
     varying vec2 vUv;
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+    }
     void main() {
-      vec3 c = texture2D(tDiffuse, vUv).rgb;
+      // Subtle radial chromatic aberration (grows toward the frame edges).
+      vec2 d = vUv - 0.5;
+      float r2 = dot(d, d);
+      vec2 off = d * r2 * aberration * 6.0;
+      vec3 c;
+      c.r = texture2D(tDiffuse, vUv - off).r;
+      c.g = texture2D(tDiffuse, vUv).g;
+      c.b = texture2D(tDiffuse, vUv + off).b;
       // S-curve contrast around midtones (HDR-safe: no clamp — values above 1.0
       // keep rolling into the ACES pass for natural highlight roll-off).
       c = (c - 0.5) * contrast + 0.5;
       float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
       c = mix(vec3(l), c, saturation);
-      // Warm highlights / cool shadows (teal-orange grade).
-      c = mix(c, c * vec3(1.045, 1.005, 0.955), l);
-      c = mix(c, c * vec3(0.97, 1.0, 1.05), (1.0 - l) * 0.5);
-      // Vignette.
-      vec2 d = vUv - 0.5;
-      float v = 1.0 - dot(d, d) * vignette * 2.1;
-      c *= clamp(v, 0.0, 1.0);
+      // Warm highlights / cool shadows (teal-orange grade); warmth deepens the
+      // golden-hour split while the sun is low and releases it at night.
+      c = mix(c, c * vec3(1.045 + 0.05 * warmth, 1.005, 0.955 - 0.045 * warmth), l);
+      c = mix(c, c * vec3(0.97 - 0.02 * warmth, 1.0, 1.05 + 0.03 * warmth), (1.0 - l) * (0.5 + 0.25 * warmth));
+      // Soft cinematic vignette.
+      float v = 1.0 - smoothstep(0.12, 0.85, r2 * 2.0) * vignette;
+      c *= v;
+      // Animated luma-weighted film grain.
+      float g = (hash(vUv * 997.0 + fract(time * 7.13) * 43.7) - 0.5) * grain * (1.0 - l * 0.55);
+      c += g;
       gl_FragColor = vec4(c, 1.0);
     }
   `,
@@ -290,6 +317,8 @@ export class HyperionGame implements World {
   private props: CityProps | null = null;
   private composer: EffectComposer | null = null;
   private bloomPass: UnrealBloomPass | null = null;
+  /** Grade pass reference — drives the animated grain + day-aware warmth. */
+  private gradePass: ShaderPass | null = null;
   private bloomOn = true;
   private policeTimer = 0;
   private sirenOn = false;
@@ -562,7 +591,9 @@ export class HyperionGame implements World {
     const bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.55, 0.6, 1.05);
     composer.addPass(bloom);
     this.bloomPass = bloom;
-    composer.addPass(new ShaderPass(GradeShader));
+    const grade = new ShaderPass(GradeShader);
+    composer.addPass(grade);
+    this.gradePass = grade;
     composer.addPass(new OutputPass());
     composer.setSize(w, h);
     this.composer = composer;
@@ -583,6 +614,7 @@ export class HyperionGame implements World {
       this.composer?.dispose();
       this.composer = null;
       this.bloomPass = null;
+      this.gradePass = null;
     }
   }
 
@@ -1492,6 +1524,7 @@ export class HyperionGame implements World {
     this.updateCamera(dt);
     this.updateHudEmit(dt);
     this.props?.update(this.clock.elapsedTime, this.nightF);
+    if (this.gradePass) this.gradePass.uniforms.time.value = this.clock.elapsedTime;
     if (this.composer) this.composer.render();
     else this.renderer.render(this.scene, this.camera);
     this.input.endFrame();
@@ -3213,6 +3246,8 @@ export class HyperionGame implements World {
     this.scene.environmentIntensity = 0.5 + golden * 0.12 - night * 0.38;
     // Phase-tuned exposure: slightly lifted golden/dusk/night reads.
     this.renderer.toneMappingExposure = 1.02 + golden * 0.1 + dusk * 0.05 + night * 0.13;
+    // Day-aware grade: golden warmth while the sun is low, none at night.
+    if (this.gradePass) this.gradePass.uniforms.warmth.value = Math.max(0, Math.min(1, dusk * 0.9 + golden * 0.75) - night);
 
     if (this.skyUniforms) {
       const u = this.skyUniforms;
@@ -3231,7 +3266,7 @@ export class HyperionGame implements World {
     if (this.sunSprite) {
       const dir = this.sunSprite.position.set(sx, Math.max(sy, 6) + 40, -60).normalize();
       this.sunSprite.position.copy(dir).multiplyScalar(960);
-      (this.sunSprite.material as THREE.SpriteMaterial).opacity = Math.max(0, Math.min(1, day * 3.2 + dusk * 0.45));
+      (this.sunSprite.material as THREE.SpriteMaterial).opacity = Math.max(0, Math.min(1, day * 3.2 + dusk * 0.45 + golden * 0.4));
     }
     // Clouds: white by day, amber at golden hour, pink at dusk, blue-grey at night.
     const cloudMat = this.scene.userData.cloudMat as THREE.SpriteMaterial | undefined;
@@ -3814,6 +3849,7 @@ export class HyperionGame implements World {
     this.composer?.dispose();
     this.composer = null;
     this.bloomPass = null;
+    this.gradePass = null;
     if (this.heli) {
       this.heli.dispose(this.scene);
       this.heli = null;

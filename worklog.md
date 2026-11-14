@@ -438,6 +438,21 @@ Stage Summary:
 - Remaining known quirks: NPC pistols are small (hard to see at distance); boss re-spawns on each new 4★ crossing after a death (intentional repeatable encounter); cutscene skip listens only for Space/E/click; gang members never flee (they always fight).
 
 ---
+Task ID: hyperion-rescue-1 (2026-11-14)
+Agent: Z.ai Code (main)
+Task: Preview regression incident — restore newest build on :3000; reconcile diverged trees (live workspace vs repo clone); graft the golden-hour v2 + backpack phase work onto the synced base
+
+Work Log:
+- INCIDENT: the preview (gateway → port 3000) had been re-pointed from the live workspace to the freshly cloned repo working dir, which sat at b2f678e — missing ALL post-push work (cinematic HDR overhaul, expansion, skin system). User reported "preview went back to an older version".
+- RECONCILIATION: the in-progress golden-hour patch (built against the old base) was preserved as WIP commit b13909d, then the full live-workspace state was ported into the repo on the feature branch (466be89: 14 engine/UI files + new engine/skin.ts + /api/skin TLauncher proxy).
+- GRAFTED the WIP patch's unique wins onto the newer base: GradeShader v2 (day-aware teal-orange warmth, animated luma-weighted film grain, radial chromatic aberration, soft smoothstep vignette) wired through a gradePass reference (time per frame, warmth per cycle, nulled on bloom-off/dispose); SKY_FRAG HDR sun disc (2.4/1.9/1.35 core feeding bloom) + pow-18 warm aureole + violet counter-glow + tonemapping/colorspace includes (no-op under the composer, correct on the bloom-off direct path); additive-blended sun sprite; PBR player materials; procedural PBR backpack (woven-canvas maps, flap, side pockets, straps + steel buckles, bedroll) via textures.ts makeBackpackTextures — attached to the rig root so it survives skin swaps.
+- Dev server for :3000 now runs detached (double-fork + setsid) from the repo clone; plain nohup/background starts get reaped at tool-call boundaries (the original system auto dev server behind dev.log had been killed by the earlier port hijack).
+- QA: tsc 0 errors (src), lint clean, engine boots with ZERO console errors; rig child count 20 (backpack installed); pixel analysis: warm 0.63, bright px 0.12 (2x pre-graft — sun disc feeding bloom), ~48k khaki backpack pixels at frame center.
+
+Stage Summary:
+- Preview restored to the newest build, and the repo feature branch now carries the complete state: cinematic HDR pipeline, golden hour with HDR sun disc + filmic grade v2, full expansion (creative/gangs/boss/RPG/voice/cutscenes), skin system, character backpack. Workspace and repo trees are back in sync (single source of truth: the repo clone).
+- Known quirks: headless QA cannot re-aim the camera via player.pitch (engine-owned); the sky shader's tonemap/colorspace includes only fire on the direct (bloom-off) render path.
+
 Task ID: los-santos-1 (2026-11-14)
 Agent: Z.ai Code (main)
 Task: Port the GTA V Los Santos map materials/textures + NPC look from the 7clan/gta-clone pressure/desktop mirror branches into this game (user: "only change map material texture and npcs — the original character and everything else stays")
