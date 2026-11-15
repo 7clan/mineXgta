@@ -295,11 +295,14 @@ export function buildCityProps(scene: THREE.Scene, city: City): CityProps {
   });
 
   // ---- 3. Traffic lights at major intersections --------------------------
-  const step = 3;
   const crossings: Array<{ x: number; z: number }> = [];
-  for (let ix = -GRID_HALF; ix <= GRID_HALF; ix += step) {
-    for (let iz = -GRID_HALF; iz <= GRID_HALF; iz += step) {
-      crossings.push({ x: city.roadCoords[ix + GRID_HALF], z: city.roadCoords[iz + GRID_HALF] });
+  const RX = city.roadCoords;
+  const RZ = city.roadCoordsZ;
+  const stepX = Math.max(1, Math.floor(RX.length / 4));
+  const stepZ = Math.max(1, Math.floor(RZ.length / 4));
+  for (let ix = 0; ix < RX.length; ix += stepX) {
+    for (let iz = 0; iz < RZ.length; iz += stepZ) {
+      crossings.push({ x: RX[ix], z: RZ[iz] });
     }
   }
   // Pole + arm + housing, merged into one instanced geometry. The arm reaches
@@ -387,7 +390,7 @@ export function buildCityProps(scene: THREE.Scene, city: City): CityProps {
   for (const rx of [roadA, roadB]) {
     let prev: { x: number; z: number } | null = null;
     for (let z = -CITY_EDGE; z <= CITY_EDGE; z += 34) {
-      if (city.roadCoords.some((c) => Math.abs(z - c) < 6)) continue; // skip intersections
+      if (city.roadCoordsZ.some((c) => Math.abs(z - c) < 6)) continue; // skip intersections
       const spot = { x: rx + ROAD_W / 2 + 1.1, z };
       wireSpots.push(spot);
       if (prev) {
@@ -420,6 +423,7 @@ export function buildCityProps(scene: THREE.Scene, city: City): CityProps {
 
   // ---- 5. Neon shop signs on street-facing facades ------------------------
   const roadList = city.roadCoords;
+  const roadListZ = city.roadCoordsZ;
   const candidates: Array<{ b: BuildingRec; side: 0 | 1 | 2 | 3 }> = [];
   for (const b of city.buildings) {
     if (b.h < 7 || b.collapsed) continue;
@@ -427,8 +431,8 @@ export function buildCityProps(scene: THREE.Scene, city: City): CityProps {
     const faces: Array<[number, 0 | 1 | 2 | 3]> = [
       [faceRoadDist(b.aabb.min.x, roadList), 0],
       [faceRoadDist(b.aabb.max.x, roadList), 1],
-      [faceRoadDist(b.aabb.min.z, roadList), 2],
-      [faceRoadDist(b.aabb.max.z, roadList), 3],
+      [faceRoadDist(b.aabb.min.z, roadListZ), 2],
+      [faceRoadDist(b.aabb.max.z, roadListZ), 3],
     ];
     faces.sort((a, c) => a[0] - c[0]);
     if (faces[0][0] < 2.4) candidates.push({ b, side: faces[0][1] });
@@ -553,5 +557,5 @@ function faceRoadDist(v: number, roadCoords: number[]): number {
   return best;
 }
 
-/** City edge for props (roads span ±GRID_HALF*BLOCK). */
-const CITY_EDGE = GRID_HALF * BLOCK;
+/** City edge for props (real lattice window span). */
+const CITY_EDGE = 270;

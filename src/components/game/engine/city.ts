@@ -24,6 +24,8 @@ import {
   makeSidewalkTile,
   makeTrunkTexture,
 } from './textures';
+import { GtaSource } from './gtaSource';
+import { buildRealLattice, RealBlock, RealLattice } from './gtaMap';
 
 export type BlockType = 'built' | 'park' | 'lot';
 
@@ -42,13 +44,24 @@ export interface BuildingRec {
   collapsed: boolean;
 }
 
-/** Procedural Los Santos-style city: road grid, destructible buildings, props, strata. */
+/**
+ * Los Santos built from the REAL GTA V source data (feature/gta-source-port):
+ * the street lattice, block extents, park gap and water come from the actual
+ * game's paths.ipl / water.xml as downloaded from the GTA clone source; the
+ * material set is the real GTA V texture dictionary extraction. Buildings,
+ * props and destruction remain the engine's own (fully preserved gameplay).
+ */
 export class City {
   group = new THREE.Group();
   buildings: BuildingRec[] = [];
   parkingLots: THREE.Vector3[] = [];
   parkCenters: THREE.Vector3[] = [];
+  /** Real N-S street centerlines (x axis, game coords). */
   roadCoords: number[] = [];
+  /** Real E-W street centerlines (z axis, game coords). */
+  roadCoordsZ: number[] = [];
+  /** Real water quads in the window (ocean/river planes). */
+  waterQuads: { x0: number; x1: number; z0: number; z1: number; y: number }[] = [];
   blockTypes = new Map<string, BlockType>();
   groundEntry: DestructionEntry | null = null;
   private scene: THREE.Scene;
@@ -67,10 +80,32 @@ export class City {
   onCollapseDust?: (pos: THREE.Vector3, radius: number) => void;
   onCollapsed?: (b: BuildingRec) => void;
 
-  constructor(scene: THREE.Scene, destruction: DestructionSystem) {
+  private lattice: RealLattice;
+  private realBlocks: RealBlock[];
+  /** GTA V real textures (null-safe — procedural fallback when offline). */
+  private gta: GtaSource;
+  private cityHalf: number;
+
+  constructor(scene: THREE.Scene, destruction: DestructionSystem, gta: GtaSource) {
     this.scene = scene;
     this.destruction = destruction;
-    for (let k = -GRID_HALF; k <= GRID_HALF; k++) this.roadCoords.push(k * BLOCK);
+    this.gta = gta;
+    this.lattice = buildRealLattice(gta.roads, gta.water);
+    this.realBlocks = this.lattice.blocks;
+    this.roadCoords = this.lattice.streetsX.slice();
+    this.roadCoordsZ = this.lattice.streetsY.slice();
+    this.waterQuads = this.lattice.water;
+    this.cityHalf = Math.max(CITY_HALF, this.lattice.half);
+    for (const b of this.realBlocks) {
+      // register real block kinds into the legacy query interface
+      this.blockTypes.set(`${b.bi},${b.bj}`, b.kind);
+      if (b.kind === 'park') {
+        this.parkCenters.push(new THREE.Vector3((b.x0 + b.x1) / 2, 0, (b.z0 + b.z1) / 2));
+      }
+      if (b.kind === 'lot') {
+        this.parkingLots.push(new THREE.Vector3((b.x0 + b.x1) / 2, 0, (b.z0 + b.z1) / 2));
+      }
+    }
     this.roofMat = new THREE.MeshStandardMaterial({ map: makeRoofTexture(), roughness: 0.95 });
     this.innerMat = new THREE.MeshStandardMaterial({ color: 0x161311, roughness: 1, side: THREE.BackSide });
     this.rubbleMat = new THREE.MeshStandardMaterial({ color: 0x6f6a63, roughness: 1 });
@@ -85,14 +120,28 @@ export class City {
 
   // ------------------------------------------------------------------ ground
   private buildGround(): void {
-    const tex = new THREE.CanvasTexture(this.compositeGroundCanvas(2048));
+    const cv = this.compositeGroundCanvas(2048);
+    const tex = new THREE.CanvasTexture(cv);
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 8;
     this.disposables.push(tex);
     const segs = Math.floor(GROUND_CORE / 1.05);
     const geo = new THREE.PlaneGeometry(GROUND_SPAN, GROUND_SPAN, segs, segs);
     geo.rotateX(-Math.PI / 2);
-    const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.78, metalness: 0.06, envMapIntensity: 0.55 });
+    // Real GTA V detail maps multiply over the painted base when present.
+    const detail = this.gta.tex.concreteNoise ?? this.gta.tex.concreteSmooth ?? null;
+    const mat = new THREE.MeshStandardMaterial({
+      map: tex,
+      roughness: 0.78, metalness: 0.06, envMapIntensity: 0.55,
+      ...(detail
+        ? { roughnessMap: (() => {
+            const d = detail.clone();
+            d.wrapS = d.wrapT = THREE.RepeatWrapping;
+            d.repeat.set(GROUND_SPAN / 8, GROUND_SPAN / 8);
+            return d;
+          })() }
+        : {}),
+    });
     this.disposables.push(geo, mat);
     this.groundMat = mat;
     const mesh = new THREE.Mesh(geo, mat);
@@ -108,17 +157,37 @@ export class City {
       layerY: 0,
       layerSpan: GROUND_SPAN,
     });
+    // Real GTA V water quads — actual ocean/river planes from water.xml.
+    for (const w of this.waterQuads) {
+      const ww = w.x1 - w.x0, wd = w.z1 - w.z0;
+      const wGeo = new THREE.PlaneGeometry(ww, wd);
+      wGeo.rotateX(-Math.PI / 2);
+      const wMat = new THREE.MeshStandardMaterial({
+        color: 0x1e4d66, roughness: 0.12, metalness: 0.4,
+        transparent: true, opacity: 0.88,
+      });
+      this.disposables.push(wGeo, wMat);
+      const wMesh = new THREE.Mesh(wGeo, wMat);
+      wMesh.position.set((w.x0 + w.x1) / 2, w.y + 0.06, (w.z0 + w.z1) / 2);
+      this.group.add(wMesh);
+    }
     // Outer skirt beyond the destructible ground.
     const skirtGeo = new THREE.PlaneGeometry(3200, 3200);
     skirtGeo.rotateX(-Math.PI / 2);
-    const skirtMat = new THREE.MeshStandardMaterial({ color: 0x54703c, roughness: 1 });
+    const skirtTexImg = this.gta.tex.grass;
+    const skirtMat = new THREE.MeshStandardMaterial(
+      skirtTexImg
+        ? { map: skirtTexImg, roughness: 1 }
+        : { color: 0x54703c, roughness: 1 }
+    );
+    if (skirtTexImg) skirtTexImg.repeat.set(90, 90);
     this.disposables.push(skirtGeo, skirtMat);
     const skirt = new THREE.Mesh(skirtGeo, skirtMat);
     skirt.position.y = -0.35;
     this.group.add(skirt);
   }
 
-  /** Compose the full city ground texture (grass, sidewalks, roads, markings). */
+  /** Compose the city ground over the REAL street lattice + real water. */
   private compositeGroundCanvas(size: number): HTMLCanvasElement {
     const cv = document.createElement('canvas');
     cv.width = size;
@@ -126,10 +195,19 @@ export class City {
     const ctx = cv.getContext('2d')!;
     const S = size / GROUND_SPAN; // px per meter
     const w2p = (m: number) => (m + GROUND_SPAN / 2) * S; // world -> px
+    const RX = this.roadCoords; // real N-S streets
+    const RZ = this.roadCoordsZ; // real E-W streets
 
-    // Grass base
-    ctx.fillStyle = ctx.createPattern(makeGrassTile(), 'repeat')!;
-    ctx.fillRect(0, 0, size, size);
+    // Grass base — real GTA V grass texture tiled when available.
+    const realGrass = this.gta.tex.grass;
+    if (realGrass && (realGrass.image as HTMLImageElement | undefined)?.width) {
+      const pat = ctx.createPattern(realGrass.image as CanvasImageSource, 'repeat')!;
+      ctx.fillStyle = pat;
+      ctx.fillRect(0, 0, size, size);
+    } else {
+      ctx.fillStyle = ctx.createPattern(makeGrassTile(), 'repeat')!;
+      ctx.fillRect(0, 0, size, size);
+    }
     // subtle grass variation
     const rng = mulberry32(7);
     for (let i = 0; i < 900; i++) {
@@ -140,53 +218,84 @@ export class City {
       ctx.fill();
     }
 
-    // Sidewalk bands inside every block
+    // Real water quads — painted before roads so streets overlay banks.
+    for (const w of this.waterQuads) {
+      const gr = ctx.createLinearGradient(0, w2p(w.z0), 0, w2p(w.z1));
+      gr.addColorStop(0, '#1b455c');
+      gr.addColorStop(0.5, '#215873');
+      gr.addColorStop(1, '#1b455c');
+      ctx.fillStyle = gr;
+      ctx.fillRect(w2p(w.x0), w2p(w.z0), (w.x1 - w.x0) * S, (w.z1 - w.z0) * S);
+    }
+
+    // Sidewalk bands inside every real block
     const sw = ctx.createPattern(makeSidewalkTile(), 'repeat')!;
     ctx.fillStyle = sw;
-    for (const bi of this.blockRange()) {
-      for (const bj of this.blockRange()) {
-        const x0 = w2p(bi * BLOCK + ROAD_W / 2);
-        const z0 = w2p(bj * BLOCK + ROAD_W / 2);
-        const s = BLOCK - ROAD_W;
-        ctx.fillRect(x0, z0, s * S, s * S);
+    for (const b of this.realBlocks) {
+      const x0 = w2p(b.x0 + ROAD_W / 2);
+      const z0 = w2p(b.z0 + ROAD_W / 2);
+      const s = (b.x1 - b.x0 - ROAD_W) * S;
+      const d = (b.z1 - b.z0 - ROAD_W) * S;
+      ctx.fillRect(x0, z0, s, d);
+    }
+
+    // Parking lots on real lot blocks
+    ctx.fillStyle = ctx.createPattern(makeAsphaltTile(), 'repeat')!;
+    for (const b of this.realBlocks) {
+      if (b.kind !== 'lot') continue;
+      const x0 = w2p(b.x0 + ROAD_W / 2 + SIDEWALK_W);
+      const z0 = w2p(b.z0 + ROAD_W / 2 + SIDEWALK_W);
+      const s = b.x1 - b.x0 - ROAD_W - SIDEWALK_W * 2;
+      const d = b.z1 - b.z0 - ROAD_W - SIDEWALK_W * 2;
+      ctx.fillRect(x0, z0, s * S, d * S);
+      ctx.strokeStyle = 'rgba(230,230,230,0.75)';
+      ctx.lineWidth = Math.max(1, 0.12 * S);
+      const stalls = Math.max(3, Math.min(9, Math.floor(s / 4.5)));
+      for (let m = 1; m < stalls; m++) {
+        ctx.beginPath();
+        ctx.moveTo(x0 + (s * m / stalls) * S, z0 + 2 * S);
+        ctx.lineTo(x0 + (s * m / stalls) * S, z0 + d * S - 2 * S);
+        ctx.stroke();
       }
     }
 
-    // Parking lots
-    ctx.fillStyle = ctx.createPattern(makeAsphaltTile(), 'repeat')!;
-    for (const bi of this.blockRange()) {
-      for (const bj of this.blockRange()) {
-        if (this.blockType(bi, bj) !== 'lot') continue;
-        const x0 = w2p(bi * BLOCK + ROAD_W / 2 + SIDEWALK_W);
-        const z0 = w2p(bj * BLOCK + ROAD_W / 2 + SIDEWALK_W);
-        const s = BLOCK - ROAD_W - SIDEWALK_W * 2;
-        ctx.fillRect(x0, z0, s * S, s * S);
-        // stalls
-        ctx.strokeStyle = 'rgba(230,230,230,0.75)';
-        ctx.lineWidth = Math.max(1, 0.12 * S);
-        for (let m = 1; m < 5; m++) {
-          ctx.beginPath();
-          ctx.moveTo(x0 + (s * m * S) / 5, z0 + 2 * S);
-          ctx.lineTo(x0 + (s * m * S) / 5, z0 + s * S - 2 * S);
-          ctx.stroke();
-        }
+    // Real park blocks — the actual Legion Square gap gets grass + paths.
+    for (const b of this.realBlocks) {
+      if (b.kind !== 'park') continue;
+      const x0 = w2p(b.x0 + ROAD_W / 2 + SIDEWALK_W);
+      const z0 = w2p(b.z0 + ROAD_W / 2 + SIDEWALK_W);
+      const s = b.x1 - b.x0 - ROAD_W - SIDEWALK_W * 2;
+      const d = b.z1 - b.z0 - ROAD_W - SIDEWALK_W * 2;
+      const parkGrass = this.gta.tex.grass;
+      if (parkGrass && (parkGrass.image as HTMLImageElement | undefined)?.width) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x0, z0, s * S, d * S);
+        ctx.clip();
+        ctx.fillStyle = ctx.createPattern(parkGrass.image as CanvasImageSource, 'repeat')!;
+        ctx.fillRect(x0, z0, s * S, d * S);
+        ctx.restore();
+      } else {
+        ctx.fillStyle = ctx.createPattern(makeGrassTile(), 'repeat')!;
+        ctx.fillRect(x0, z0, s * S, d * S);
       }
+      // plaza paths
+      ctx.fillStyle = 'rgba(196,186,168,0.85)';
+      const cx = x0 + (s * S) / 2, cz = z0 + (d * S) / 2;
+      ctx.fillRect(cx - 0.9 * S, z0, 1.8 * S, d * S);
+      ctx.fillRect(x0, cz - 0.9 * S, s * S, 1.8 * S);
     }
 
-    // Roads
+    // Roads — painted along the REAL street centerlines.
     ctx.fillStyle = ctx.createPattern(makeAsphaltTile(), 'repeat')!;
-    for (const c of this.roadCoords) {
-      ctx.fillRect(w2p(c - ROAD_W / 2), 0, ROAD_W * S, size);
-      ctx.fillRect(0, w2p(c - ROAD_W / 2), size, ROAD_W * S);
-    }
+    for (const c of RX) ctx.fillRect(w2p(c - ROAD_W / 2), 0, ROAD_W * S, size);
+    for (const c of RZ) ctx.fillRect(0, w2p(c - ROAD_W / 2), size, ROAD_W * S);
     // Road wear streaks
     ctx.fillStyle = 'rgba(0,0,0,0.08)';
-    for (const c of this.roadCoords) {
-      ctx.fillRect(w2p(c - 1.6), 0, 3.2 * S, size);
-      ctx.fillRect(0, w2p(c - 1.6), size, 3.2 * S);
-    }
+    for (const c of RX) ctx.fillRect(w2p(c - 1.6), 0, 3.2 * S, size);
+    for (const c of RZ) ctx.fillRect(0, w2p(c - 1.6), size, 3.2 * S);
 
-    // Lane markings: double yellow center + white edges
+    // Lane markings: double yellow center + white edges along real streets
     const dash = (x1: number, y1: number, x2: number, y2: number, width: number, color: string) => {
       ctx.strokeStyle = color;
       ctx.lineWidth = width * S;
@@ -197,25 +306,27 @@ export class City {
       ctx.stroke();
       ctx.setLineDash([]);
     };
-    for (const c of this.roadCoords) {
+    for (const c of RX) {
       const v = w2p(c);
-      // vertical road (along z)
       dash(v - 0.28, 0, v - 0.28, size, 0.14, '#c9a227');
       dash(v + 0.28, 0, v + 0.28, size, 0.14, '#c9a227');
       ctx.fillStyle = 'rgba(220,220,220,0.8)';
       ctx.fillRect(w2p(c - ROAD_W / 2 + 0.35), 0, 0.14 * S, size);
       ctx.fillRect(w2p(c + ROAD_W / 2 - 0.49), 0, 0.14 * S, size);
-      // horizontal road (along x)
+    }
+    for (const c of RZ) {
+      const v = w2p(c);
       dash(0, v - 0.28, size, v - 0.28, 0.14, '#c9a227');
       dash(0, v + 0.28, size, v + 0.28, 0.14, '#c9a227');
+      ctx.fillStyle = 'rgba(220,220,220,0.8)';
       ctx.fillRect(0, w2p(c - ROAD_W / 2 + 0.35), size, 0.14 * S);
       ctx.fillRect(0, w2p(c + ROAD_W / 2 - 0.49), size, 0.14 * S);
     }
 
-    // Crosswalks at intersections
+    // Crosswalks at REAL street intersections
     ctx.fillStyle = 'rgba(235,235,235,0.85)';
-    for (const cx of this.roadCoords) {
-      for (const cz of this.roadCoords) {
+    for (const cx of RX) {
+      for (const cz of RZ) {
         for (let i = 0; i < 6; i++) {
           const off = -3.4 + i * 1.36;
           ctx.fillRect(w2p(cx + off), w2p(cz + ROAD_W / 2 + 0.5), 0.8 * S, 1.6 * S);
@@ -234,47 +345,67 @@ export class City {
     return out;
   }
 
+  /** Real block kind (bi/bj index the real street-gap lattice). */
   blockType(bi: number, bj: number): BlockType {
-    const key = `${bi},${bj}`;
-    const t = this.blockTypes.get(key);
+    const t = this.blockTypes.get(`${bi},${bj}`);
     if (t) return t;
-    const r = this.rng();
-    const dc = Math.max(Math.abs(bi + 0.5), Math.abs(bj + 0.5)) / GRID_HALF;
-    let type: BlockType = 'built';
-    if (r < 0.08 && dc > 0.3) type = 'park';
-    else if (r < 0.16 && dc > 0.2) type = 'lot';
-    this.blockTypes.set(key, type);
-    if (type === 'park') this.parkCenters.push(new THREE.Vector3(bi * BLOCK + BLOCK / 2, 0, bj * BLOCK + BLOCK / 2));
-    if (type === 'lot') this.parkingLots.push(new THREE.Vector3(bi * BLOCK + BLOCK / 2, 0, bj * BLOCK + BLOCK / 2));
-    return type;
+    return 'built';
+  }
+
+  /** Real-block lookup for a world position (used by NPC/traffic queries). */
+  realBlockAt(x: number, z: number): RealBlock | null {
+    for (const b of this.realBlocks) {
+      if (x >= b.x0 && x <= b.x1 && z >= b.z0 && z <= b.z1) return b;
+    }
+    return null;
+  }
+
+  /** Public read access to the real block lattice (minimap, spawners). */
+  realBlocksPublic(): RealBlock[] {
+    return this.realBlocks;
   }
 
   // ------------------------------------------------------------------ blocks
   private buildBlocks(): void {
-    const slabGeo = new THREE.BoxGeometry(BLOCK - ROAD_W, SIDEWALK_H, BLOCK - ROAD_W);
-    this.disposables.push(slabGeo);
-    const swTex = new THREE.CanvasTexture(makeSidewalkTile());
-    swTex.colorSpace = THREE.SRGBColorSpace;
-    swTex.wrapS = swTex.wrapT = THREE.RepeatWrapping;
-    swTex.repeat.set(6, 6);
-    this.disposables.push(swTex);
-    const slabMat = new THREE.MeshStandardMaterial({ map: swTex, roughness: 0.95 });
-    this.disposables.push(slabMat);
-    const slabCount = GRID_HALF * 2 * GRID_HALF * 2;
-    const slabs = new THREE.InstancedMesh(slabGeo, slabMat, slabCount);
-    slabs.receiveShadow = true;
-    const dummy = new THREE.Object3D();
-    let n = 0;
-    for (const bi of this.blockRange()) {
-      for (const bj of this.blockRange()) {
-        dummy.position.set(bi * BLOCK + BLOCK / 2, SIDEWALK_H / 2, bj * BLOCK + BLOCK / 2);
-        dummy.updateMatrix();
-        slabs.setMatrixAt(n++, dummy.matrix);
-        if (this.blockType(bi, bj) !== 'built') continue;
-        this.placeBuildings(bi, bj);
+    // Sidewalk slabs with real GTA V concrete detail when available.
+    const swMatTexBase = this.gta.tex.concreteNoise ?? this.gta.tex.concreteSmooth ?? null;
+    const slabMats: THREE.MeshStandardMaterial[] = [];
+    const mkSlabMat = () => {
+      const m = new THREE.MeshStandardMaterial({ roughness: 0.95 });
+      if (swMatTexBase) {
+        const t = swMatTexBase.clone();
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        t.repeat.set(6, 6);
+        m.map = t;
+      } else {
+        const t = new THREE.CanvasTexture(makeSidewalkTile());
+        t.colorSpace = THREE.SRGBColorSpace;
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        t.repeat.set(6, 6);
+        m.map = t;
       }
+      slabMats.push(m);
+      this.disposables.push(m);
+      return m;
+    };
+    const defaultSlabMat = mkSlabMat();
+    const geos: THREE.BufferGeometry[] = [];
+    const mats: THREE.MeshStandardMaterial[] = [];
+    for (const b of this.realBlocks) {
+      const w = b.x1 - b.x0 - ROAD_W;
+      const d = b.z1 - b.z0 - ROAD_W;
+      if (w < 6 || d < 6) continue;
+      const geo = new THREE.BoxGeometry(w, SIDEWALK_H, d);
+      geos.push(geo);
+      this.disposables.push(geo);
+      mats.push(defaultSlabMat);
+      const mesh = new THREE.Mesh(geo, defaultSlabMat);
+      mesh.position.set((b.x0 + b.x1) / 2, SIDEWALK_H / 2, (b.z0 + b.z1) / 2);
+      mesh.receiveShadow = true;
+      this.group.add(mesh);
+      if (b.kind === 'built') this.placeBuildings(b);
     }
-    this.group.add(slabs);
+    void geos; void mats; void mkSlabMat;
   }
 
   private facade(style: string) {
@@ -288,34 +419,58 @@ export class City {
     return f;
   }
 
-  private placeBuildings(bi: number, bj: number): void {
+  /** Real GTA V facade detail overlay: LA stucco / crusty concrete tiles
+   *  multiply over the procedural window architecture (photographic look). */
+  private facadeDetail(style: string): THREE.Texture | null {
+    const t =
+      style === 'white' || style === 'concrete'
+        ? this.gta.tex.stucco ?? this.gta.tex.concreteSmooth
+        : style === 'brick'
+          ? this.gta.tex.crusty ?? this.gta.tex.concreteNoise
+          : null;
+    if (!t) return null;
+    const c = t.clone();
+    c.wrapS = c.wrapT = THREE.RepeatWrapping;
+    c.repeat.set(3, 3);
+    return c;
+  }
+
+  private placeBuildings(b: RealBlock): void {
     const r = this.rng;
-    const x0 = bi * BLOCK + ROAD_W / 2 + SIDEWALK_W + 0.4;
-    const z0 = bj * BLOCK + ROAD_W / 2 + SIDEWALK_W + 0.4;
-    const span = BLOCK - ROAD_W - SIDEWALK_W * 2 - 0.8;
-    const dc = Math.max(Math.abs(bi + 0.5), Math.abs(bj + 0.5)) / GRID_HALF;
-    const two = r() < 0.45;
+    // Small real blocks (alley-fronted) get a slimmer sidewalk carve so the
+    // dense downtown fabric still fills in.
+    const inset = Math.min(SIDEWALK_W, Math.max(0.7, (Math.min(b.x1 - b.x0, b.z1 - b.z0) - ROAD_W) * 0.08));
+    const x0 = b.x0 + ROAD_W / 2 + inset + 0.35;
+    const z0 = b.z0 + ROAD_W / 2 + inset + 0.35;
+    const spanX = b.x1 - b.x0 - ROAD_W - inset * 2 - 0.7;
+    const spanZ = b.z1 - b.z0 - ROAD_W - inset * 2 - 0.7;
+    const span = Math.min(spanX, spanZ);
+    if (span < 3.5) return; // true alleys stay open
+    const dc = Math.max(Math.abs(x0), Math.abs(z0)) / this.cityHalf;
+    const two = r() < 0.45 && span > 14;
     const plots: Array<{ x: number; z: number; w: number; d: number }> = [];
     if (two) {
       const vertical = r() < 0.5;
-      const w = vertical ? span * 0.46 : span * (0.75 + r() * 0.2);
-      const d = vertical ? span * (0.75 + r() * 0.2) : span * 0.46;
-      const gap = span - (vertical ? w * 2 : d * 2);
+      const w = vertical ? spanX * 0.46 : spanX * (0.75 + r() * 0.2);
+      const d = vertical ? spanZ * (0.75 + r() * 0.2) : spanZ * 0.46;
       if (vertical) {
-        plots.push({ x: x0 + w / 2, z: z0 + d / 2, w, d });
-        plots.push({ x: x0 + w * 1.5 + gap, z: z0 + d / 2, w, d });
+        plots.push({ x: x0 + w / 2, z: z0 + spanZ / 2, w, d });
+        plots.push({ x: x0 + w * 1.5 + (spanX - w * 2), z: z0 + spanZ / 2, w, d });
       } else {
-        plots.push({ x: x0 + w / 2, z: z0 + d / 2, w, d });
-        plots.push({ x: x0 + w / 2, z: z0 + d * 1.5 + gap, w, d });
+        plots.push({ x: x0 + spanX / 2, z: z0 + d / 2, w, d });
+        plots.push({ x: x0 + spanX / 2, z: z0 + d * 1.5 + (spanZ - d * 2), w, d });
       }
     } else {
-      const w = span * (0.62 + r() * 0.38);
-      const d = span * (0.62 + r() * 0.38);
-      plots.push({ x: x0 + span / 2, z: z0 + span / 2, w, d });
+      const w = spanX * (0.62 + r() * 0.38);
+      const d = spanZ * (0.62 + r() * 0.38);
+      plots.push({ x: x0 + spanX / 2, z: z0 + spanZ / 2, w, d });
     }
     for (const p of plots) {
-      const base = 8 + (1 - dc) * 40;
-      const h = Math.max(7, base * (0.65 + r() * 0.75));
+      if (Math.min(p.w, p.d) < 2.6) continue;
+      // Real downtown zoning: big plots → towers, alley fronts → low shops.
+      const area = p.w * p.d;
+      const base = area > 2200 ? 30 + (1 - Math.min(1, dc)) * 30 : area > 700 ? 14 + (1 - Math.min(1, dc)) * 22 : 7 + r() * 8;
+      const h = Math.max(6, base * (0.7 + r() * 0.6));
       let style: 'concrete' | 'glass' | 'brick' | 'white';
       const sr = r();
       if (dc < 0.4) style = sr < 0.5 ? 'glass' : sr < 0.8 ? 'white' : 'concrete';
@@ -336,6 +491,7 @@ export class City {
     }
     const f = this.facade(style);
     const glassy = style === 'glass';
+    const detailMap = this.facadeDetail(style);
     const mat = new THREE.MeshStandardMaterial({
       map: f.map,
       emissiveMap: f.emissiveMap,
@@ -344,7 +500,9 @@ export class City {
       roughness: glassy ? 0.18 : 0.85,
       metalness: glassy ? 0.55 : 0.04,
       side: THREE.DoubleSide,
+      ...(detailMap ? { roughnessMap: detailMap } : {}),
     });
+    if (detailMap) this.disposables.push(detailMap);
     this.nightMaterials.push(mat);
     this.disposables.push(geo, mat);
     const mesh = new THREE.Mesh(geo, mat);
@@ -400,6 +558,7 @@ export class City {
   private buildPalms(): void {
     const rng = mulberry32(99);
     const positions: THREE.Vector3[] = [];
+    // Palms in the real parks (Legion Square) + lining real streets.
     for (const c of this.parkCenters) {
       const n = 5 + Math.floor(rng() * 4);
       for (let i = 0; i < n; i++) {
@@ -408,13 +567,13 @@ export class City {
         );
       }
     }
-    for (const bi of this.blockRange()) {
-      for (const bj of this.blockRange()) {
-        if (rng() < 0.3) {
-          positions.push(
-            new THREE.Vector3(bi * BLOCK + BLOCK / 2 + (rng() - 0.5) * 18, SIDEWALK_H, bj * BLOCK + ROAD_W / 2 + 1.3)
-          );
-        }
+    for (const b of this.realBlocks) {
+      if (b.kind !== 'built' || rng() >= 0.34) continue;
+      const mid = (b.x0 + b.x1) / 2;
+      if (rng() < 0.5) {
+        positions.push(new THREE.Vector3(mid, SIDEWALK_H, b.z0 + ROAD_W / 2 + 1.3));
+      } else {
+        positions.push(new THREE.Vector3(b.x0 + ROAD_W / 2 + 1.3, SIDEWALK_H, (b.z0 + b.z1) / 2));
       }
     }
     if (!positions.length) return;
@@ -498,12 +657,19 @@ export class City {
     this.disposables.push(poleGeo, headGeo, poleMat, headMat);
 
     const spots: Array<{ x: number; z: number; flip: boolean }> = [];
+    // Streetlights along the REAL streets, alternating sides.
     for (const c of this.roadCoords) {
-      for (let j = -GRID_HALF; j < GRID_HALF; j++) {
-        const mid = j * BLOCK + BLOCK / 2;
-        if ((j + GRID_HALF) % 2 === 0) spots.push({ x: c + ROAD_W / 2 + 0.55, z: mid, flip: false });
-        else spots.push({ x: c - ROAD_W / 2 - 0.55, z: mid, flip: true });
+      for (const zc of this.roadCoordsZ) {
+        const mid = zc + (this.lattice.half / Math.max(1, this.roadCoordsZ.length)) * 0.9;
+        spots.push({ x: c + ROAD_W / 2 + 0.55, z: mid, flip: false });
+        spots.push({ x: c - ROAD_W / 2 - 0.55, z: mid + 40, flip: true });
+      }
+    }
+    for (const c of this.roadCoordsZ) {
+      for (const xc of this.roadCoords) {
+        const mid = xc + 22;
         spots.push({ x: mid, z: c + ROAD_W / 2 + 0.55, flip: false });
+        spots.push({ x: mid + 36, z: c - ROAD_W / 2 - 0.55, flip: true });
       }
     }
     const poles = new THREE.InstancedMesh(poleGeo, poleMat, spots.length);
@@ -538,23 +704,21 @@ export class City {
   }
 
   // ------------------------------------------------------------------ queries
+  /** On a real street? (distance to the nearest N-S or E-W centerline). */
   isOnRoad(x: number, z: number): boolean {
-    if (Math.abs(x) > CITY_HALF + ROAD_W / 2 || Math.abs(z) > CITY_HALF + ROAD_W / 2) return false;
-    for (const c of this.roadCoords) {
-      if (Math.abs(x - c) <= ROAD_W / 2) return true;
-      if (Math.abs(z - c) <= ROAD_W / 2) return true;
-    }
+    if (Math.abs(x) > this.cityHalf + ROAD_W / 2 || Math.abs(z) > this.cityHalf + ROAD_W / 2) return false;
+    for (const c of this.roadCoords) if (Math.abs(x - c) <= ROAD_W / 2) return true;
+    for (const c of this.roadCoordsZ) if (Math.abs(z - c) <= ROAD_W / 2) return true;
     return false;
   }
 
   sidewalkHeight(x: number, z: number): number {
-    if (Math.abs(x) > CITY_HALF || Math.abs(z) > CITY_HALF) return 0;
-    const bx = Math.floor(x / BLOCK);
-    const bz = Math.floor(z / BLOCK);
-    const lx = x - bx * BLOCK;
-    const lz = z - bz * BLOCK;
-    const inner = BLOCK - ROAD_W; // 24
-    if (lx < ROAD_W / 2 || lx > ROAD_W / 2 + inner || lz < ROAD_W / 2 || lz > ROAD_W / 2 + inner) return 0;
+    const b = this.realBlockAt(x, z);
+    if (!b) return 0;
+    // Raised sidewalk band rings the block interior (inside the road edge).
+    const lx = Math.min(x - b.x0, b.x1 - x);
+    const lz = Math.min(z - b.z0, b.z1 - z);
+    if (lx < ROAD_W / 2 || lz < ROAD_W / 2) return 0;
     return SIDEWALK_H;
   }
 

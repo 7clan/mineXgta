@@ -10,6 +10,7 @@
  * HUD weather chip, and reacts to `onLightning` events.
  */
 import * as THREE from 'three';
+import type { GtaSource } from './gtaSource';
 
 export type WeatherState = 'clear' | 'overcast' | 'rain';
 
@@ -45,8 +46,11 @@ export class Weather {
   private pos: Float32Array;
   private drops: Drop[] = [];
   private windPhase = Math.random() * 10;
+  /** GTA source port: real GTA V rain/snow sprite sheet around the camera. */
+  private sheet: THREE.Mesh | null = null;
+  private sheetMat: THREE.MeshBasicMaterial | null = null;
 
-  constructor(scene: THREE.Scene) {
+  constructor(scene: THREE.Scene, gta?: GtaSource | null) {
     this.scene = scene;
     this.pos = new Float32Array(DROPS * 2 * 3);
     for (let i = 0; i < DROPS; i++) {
@@ -70,6 +74,27 @@ export class Weather {
     this.lines.renderOrder = 5;
     this.lines.visible = false;
     scene.add(this.lines);
+    // Real GTA V rain sprite (fxweather.ytd extraction): a scrolling
+    // camera-anchored sheet that reads as the source game's rain texture.
+    const rainTex = gta?.tex.rain ?? null;
+    if (rainTex) {
+      const rt = rainTex.clone();
+      rt.wrapS = rt.wrapT = THREE.RepeatWrapping;
+      rt.repeat.set(3, 2);
+      const sheetGeo = new THREE.PlaneGeometry(64, 40);
+      this.sheetMat = new THREE.MeshBasicMaterial({
+        map: rt,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      this.sheet = new THREE.Mesh(sheetGeo, this.sheetMat);
+      this.sheet.frustumCulled = false;
+      this.sheet.renderOrder = 6;
+      this.sheet.visible = false;
+      scene.add(this.sheet);
+    }
   }
 
   get raining(): boolean {
@@ -115,6 +140,18 @@ export class Weather {
     const show = this.intensity > 0.45;
     this.lines.visible = show;
     this.mat.opacity = Math.min(0.5, (this.intensity - 0.42) * 1.6);
+    // Real GTA V rain sheet: fades in with intensity, scrolls downward,
+    // and stays anchored in front of the camera.
+    if (this.sheet && this.sheetMat) {
+      const s = this.intensity > 0.55;
+      this.sheet.visible = s;
+      this.sheetMat.opacity = s ? Math.min(0.34, (this.intensity - 0.55) * 0.9) : 0;
+      if (s) {
+        this.sheet.position.set(cam.x, cam.y + 2, cam.z);
+        const rt = this.sheetMat.map;
+        if (rt) rt.offset.y = (rt.offset.y - dt * 1.6) % 1;
+      }
+    }
     if (!show) return;
     this.windPhase += dt * 0.5;
     const windX = WIND * (0.6 + 0.4 * Math.sin(this.windPhase));
@@ -149,5 +186,10 @@ export class Weather {
     this.scene.remove(this.lines);
     this.lines.geometry.dispose();
     this.mat.dispose();
+    if (this.sheet) {
+      this.scene.remove(this.sheet);
+      this.sheet.geometry.dispose();
+      this.sheetMat?.dispose();
+    }
   }
 }

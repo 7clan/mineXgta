@@ -1,7 +1,14 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
-import { BLOCK, GRID_HALF, LANE_OFF, ROAD_W, mulberry32 } from './constants';
+import { BLOCK, CITY_HALF, LANE_OFF, ROAD_W, mulberry32 } from './constants';
 import { World } from './types';
+
+/** Legacy uniform road grid — fallback when the real lattice is unavailable. */
+function legacyGrid(): number[] {
+  const out: number[] = [];
+  for (let k = -6; k <= 6; k++) out.push(k * BLOCK);
+  return out;
+}
 
 /**
  * Smooth GTA-style vehicles: rounded hulls, glass canopies, real wheels.
@@ -65,8 +72,31 @@ export class Vehicles {
   onExplosion?: (pos: THREE.Vector3, radius: number) => void;
   onRagdollNPCs?: (pos: THREE.Vector3, r: number) => void;
 
-  constructor(scene: THREE.Scene) {
+  private roadsX: number[];
+  private roadsZ: number[];
+
+  constructor(scene: THREE.Scene, roadsX?: number[], roadsZ?: number[]) {
     this.scene = scene;
+    // Real street lists from the GTA source lattice (fallback: legacy grid).
+    this.roadsX = roadsX && roadsX.length ? roadsX.slice() : legacyGrid();
+    this.roadsZ = roadsZ && roadsZ.length ? roadsZ.slice() : legacyGrid();
+  }
+
+  /** Nearest real cross-street centerline on an axis. */
+  private nearestCross(axis: 'x' | 'z', v: number): number {
+    const list = axis === 'x' ? this.roadsX : this.roadsZ;
+    let best = list[0] ?? 0;
+    let bd = Infinity;
+    for (const c of list) {
+      const d = Math.abs(c - v);
+      if (d < bd) { bd = d; best = c; }
+    }
+    return best;
+  }
+
+  private pickRoad(axis: 'x' | 'z'): number {
+    const list = axis === 'x' ? this.roadsX : this.roadsZ;
+    return list[Math.floor(this.rng() * list.length)] ?? 0;
   }
 
   private bodyGeo(w: number, h: number, d: number, r: number): RoundedBoxGeometry {
@@ -291,9 +321,9 @@ export class Vehicles {
         placed++;
       }
     }
-    // A couple of cars parallel-parked along roadsides.
+    // A couple of cars parallel-parked along real roadsides.
     for (let i = 0; i < 4; i++) {
-      const road = (Math.floor(this.rng() * (GRID_HALF * 2 + 1)) - GRID_HALF) * BLOCK;
+      const road = this.pickRoad('x');
       const car = this.makeCar(this.pickType(), 'parked');
       car.group.position.set(road + ROAD_W / 2 - 1.4, 0, roadsideZ * (i + 1) * 0.35 % 300 - 150);
       car.yaw = 0;
@@ -376,20 +406,21 @@ export class Vehicles {
 
   private spawnCar(_mode: 'traffic'): void {
     const car = this.makeCar(this.pickType(), 'traffic');
-    // Random road + lane + direction (right-hand traffic)
+    // Random REAL road + lane + direction (right-hand traffic)
     const vertical = this.rng() < 0.5;
-    const road = (Math.floor(this.rng() * (GRID_HALF * 2 + 1)) - GRID_HALF) * BLOCK;
     const dirRoll = Math.floor(this.rng() * 4) as 0 | 1 | 2 | 3;
     car.dir = dirRoll;
     if (vertical) {
+      const road = this.pickRoad('x');
       car.road = road;
       car.lane = road + (dirRoll === 0 ? -LANE_OFF : LANE_OFF);
-      car.group.position.set(car.lane, 0, (this.rng() - 0.5) * 360);
+      car.group.position.set(car.lane, 0, (this.rng() - 0.5) * (CITY_HALF * 1.4));
       car.yaw = dirRoll === 0 ? 0 : Math.PI;
     } else {
+      const road = this.pickRoad('z');
       car.road = road;
       car.lane = road + (dirRoll === 1 ? LANE_OFF : -LANE_OFF);
-      car.group.position.set((this.rng() - 0.5) * 360, 0, car.lane);
+      car.group.position.set((this.rng() - 0.5) * (CITY_HALF * 1.4), 0, car.lane);
       car.yaw = dirRoll === 1 ? Math.PI / 2 : -Math.PI / 2;
     }
     car.yawVis = car.yaw;
@@ -400,7 +431,7 @@ export class Vehicles {
   spawnPolice(playerPos: THREE.Vector3): Car | null {
     for (let tries = 0; tries < 14; tries++) {
       const vertical = this.rng() < 0.5;
-      const road = (Math.floor(this.rng() * (GRID_HALF * 2 + 1)) - GRID_HALF) * BLOCK;
+      const road = this.pickRoad(vertical ? 'x' : 'z');
       const dirSign = this.rng() < 0.5 ? 1 : -1;
       let x: number;
       let z: number;
@@ -411,7 +442,7 @@ export class Vehicles {
         z = road + (this.rng() < 0.5 ? LANE_OFF : -LANE_OFF);
         x = playerPos.x + dirSign * (90 + this.rng() * 60);
       }
-      if (Math.abs(x) > GRID_HALF * BLOCK - 8 || Math.abs(z) > GRID_HALF * BLOCK - 8) continue;
+      if (Math.abs(x) > CITY_HALF - 8 || Math.abs(z) > CITY_HALF - 8) continue;
       const car = this.makeCar('police', 'police');
       car.group.position.set(x, 0, z);
       const toP = playerPos.clone().sub(car.group.position);
@@ -439,9 +470,9 @@ export class Vehicles {
   /** Deliver the Rhino Tank on a road point near the player (chain tier-2 reward). */
   spawnTank(playerPos: THREE.Vector3): Car {
     const car = this.makeCar('tank', 'parked');
-    // Prefer the nearest road centerline point; fall back beside the player.
-    const roadX = Math.round(playerPos.x / BLOCK) * BLOCK;
-    const roadZ = Math.round(playerPos.z / BLOCK) * BLOCK;
+    // Prefer the nearest REAL road centerline point; fall back beside the player.
+    const roadX = this.nearestCross('x', playerPos.x);
+    const roadZ = this.nearestCross('z', playerPos.z);
     const cands: THREE.Vector3[] = [
       new THREE.Vector3(roadX + 2.4, 0, playerPos.z),
       new THREE.Vector3(roadX - 2.4, 0, playerPos.z),
@@ -452,7 +483,7 @@ export class Vehicles {
     let best = cands[cands.length - 1];
     let bd = Infinity;
     for (const c of cands) {
-      if (Math.abs(c.x) > GRID_HALF * BLOCK - 4 || Math.abs(c.z) > GRID_HALF * BLOCK - 4) continue;
+      if (Math.abs(c.x) > CITY_HALF - 4 || Math.abs(c.z) > CITY_HALF - 4) continue;
       const d = c.distanceTo(playerPos);
       if (d < bd) {
         bd = d;
@@ -822,14 +853,14 @@ export class Vehicles {
     if (car.dir === 0 || car.dir === 2) p.x += (car.lane - p.x) * Math.min(1, 3 * dt);
     else p.z += (car.lane - p.z) * Math.min(1, 3 * dt);
 
-    // Intersections: random turns
-    const nearestCross = Math.round(p.x / BLOCK) * BLOCK;
-    const nearestCrossZ = Math.round(p.z / BLOCK) * BLOCK;
+    // Intersections: random turns at REAL cross-streets
+    const nearestCross = this.nearestCross('x', p.x);
+    const nearestCrossZ = this.nearestCross('z', p.z);
     const onVertical = car.dir === 0 || car.dir === 2;
     const crossCoord = onVertical ? nearestCrossZ : nearestCross;
     const alongPos = onVertical ? p.z : p.x;
     const passed = Math.abs(alongPos - crossCoord) < 0.5 + car.speed * dt;
-    if (passed && Math.abs(crossCoord) <= GRID_HALF * BLOCK) {
+    if (passed && Math.abs(crossCoord) <= CITY_HALF) {
       const turnKey = `${car.id}:${Math.round(crossCoord)}`;
       if (car.honkT !== -999 && (car as unknown as { lastTurn?: string }).lastTurn !== turnKey) {
         (car as unknown as { lastTurn?: string }).lastTurn = turnKey;
@@ -853,7 +884,7 @@ export class Vehicles {
     }
 
     // Out of city bounds: turn around
-    if (Math.abs(p.x) > GRID_HALF * BLOCK + 6 || Math.abs(p.z) > GRID_HALF * BLOCK + 6) {
+    if (Math.abs(p.x) > CITY_HALF + 6 || Math.abs(p.z) > CITY_HALF + 6) {
       car.dir = ((car.dir + 2) % 4) as 0 | 1 | 2 | 3;
       this.relane(car);
     }

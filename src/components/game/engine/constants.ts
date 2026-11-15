@@ -1,12 +1,13 @@
 /** Project Hyperion — global tuning constants. 1 unit = 1 meter. */
 
-// ---- City layout -----------------------------------------------------------
+// ---- City layout (GTA source port: extents now cover the real downtown
+// Los Santos window projected 1:1 from the source road graph) --------------
 export const ROAD_W = 8; // road width (m)
-export const BLOCK = 32; // grid pitch: road center to road center (m)
-export const GRID_HALF = 6; // roads at k*BLOCK for k in [-GRID_HALF..GRID_HALF]
-export const CITY_HALF = GRID_HALF * BLOCK; // 192
-export const GROUND_SPAN = 480; // ground plane size (m)
-export const GROUND_CORE = 400; // finely destructible ground core (m)
+export const BLOCK = 32; // legacy grid pitch (fallback/metadata only)
+export const GRID_HALF = 6; // legacy grid half (fallback only)
+export const CITY_HALF = 270; // real lattice half-extent (m)
+export const GROUND_SPAN = 570; // ground plane size (m)
+export const GROUND_CORE = 500; // finely destructible ground core (m)
 export const LAYER0_Y = 0; // street surface height
 export const SIDEWALK_H = 0.12; // raised sidewalk slab height
 export const SIDEWALK_W = 2.6; // sidewalk band width inside each block edge

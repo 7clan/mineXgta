@@ -27,6 +27,7 @@ import {
 import { DestructionSystem } from './destruction';
 import { Input } from './input';
 import { City } from './city';
+import { GtaSource } from './gtaSource';
 import { Player } from './player';
 import { NPCs } from './npcs';
 import { Particles } from './particles';
@@ -198,7 +199,8 @@ export class HyperionGame implements World {
   vehicles: Vehicles;
   npcs: NPCs;
   particles: Particles;
-  audio = new HyperionAudio();
+  audio = new HyperionAudio(null);
+  private gta: GtaSource;
   private detachInput: () => void = () => {};
 
   private placed = new Map<string, PlacedBlock>();
@@ -355,9 +357,11 @@ export class HyperionGame implements World {
   private autosaveT = 15;
   private hasSaveFile = false;
 
-  constructor(canvas: HTMLCanvasElement, cb: GameCallbacks) {
+  constructor(canvas: HTMLCanvasElement, cb: GameCallbacks, gta: GtaSource) {
     this.canvas = canvas;
     this.cb = cb;
+    this.gta = gta;
+    this.audio = new HyperionAudio(gta);
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
@@ -404,7 +408,8 @@ export class HyperionGame implements World {
     this.moonMat = built.moonMat;
     this.sunSprite = built.sunSprite;
 
-    this.city = new City(this.scene, this.destruction);
+    // GTA source port: the city is built from the REAL road lattice.
+    this.city = new City(this.scene, this.destruction, this.gta);
     this.props = buildCityProps(this.scene, this.city);
     this.city.onCollapseStart = (b) => {
       this.audio.collapse(this.far(b.group.position));
@@ -417,9 +422,9 @@ export class HyperionGame implements World {
 
     this.player = new Player(this.scene);
     this.particles = new Particles(this.scene);
-    this.vehicles = new Vehicles(this.scene);
-    this.npcs = new NPCs(this.scene);
-    this.weather = new Weather(this.scene);
+    this.vehicles = new Vehicles(this.scene, this.city.roadCoords, this.city.roadCoordsZ);
+    this.npcs = new NPCs(this.scene, this.gta);
+    this.weather = new Weather(this.scene, this.gta);
     this.weather.onLightning = () => {
       this.lightningT = 0.24;
       this.audio.thunder(0.35 + Math.random() * 0.3);
@@ -441,7 +446,11 @@ export class HyperionGame implements World {
       this.particles.smokePuff(p, car.state === 'burning' ? 2 : 1, 0.5, 2.4);
       this.audio.fireCrackle(this.far(p));
     };
-    this.npcs.spawn(26, (bi, bj) => this.city.blockType(bi, bj) === 'built');
+    // GTA source port: peds spawn on the REAL built blocks of the lattice
+    // (density scaled by the real downtown popcycle when loaded).
+    const realBuilt = this.city.realBlocksPublic().filter((b) => b.kind === 'built');
+    const popScale = this.gta.pop && Object.keys(this.gta.pop).length ? 1.15 : 1;
+    this.npcs.spawn(Math.round(26 * popScale), realBuilt.length ? realBuilt : undefined);
     this.vehicles.spawnTraffic(20);
     this.vehicles.spawnParked(this.city.parkingLots, BLOCK);
 
@@ -1234,6 +1243,11 @@ export class HyperionGame implements World {
   }
 
   // ------------------------------------------------------------------ loop
+  /** GTA source port: background-decode the real radio tracks. */
+  loadRadio(): Promise<void> {
+    return this.audio.loadRealRadio();
+  }
+
   start(): void {
     this.clock.start();
     const loop = () => {
@@ -1929,10 +1943,14 @@ export class HyperionGame implements World {
     const p = car.group.position;
     const alongX = Math.abs(heading.x) > Math.abs(heading.z); // driving along X
     const roads = this.city.roadCoords;
+    const roadsZ = this.city.roadCoordsZ;
     let bestRoad = roads[0];
     let bestD = Infinity;
-    for (const c of roads) {
-      const d = Math.abs(c - (alongX ? p.z : p.x));
+    // Axis-aware: driving along X ⇒ snap to nearest E-W street (z axis).
+    const laneRoads = alongX ? roadsZ : roads;
+    const laneCoord = alongX ? p.z : p.x;
+    for (const c of laneRoads) {
+      const d = Math.abs(c - laneCoord);
       if (d < bestD) { bestD = d; bestRoad = c; }
     }
     if (bestD > 5) return; // off-road / crossing a lot — no sensible lane to block
@@ -1941,7 +1959,9 @@ export class HyperionGame implements World {
     const bz = alongX ? bestRoad : ahead.z;
     const pos = new THREE.Vector3(bx, 0, bz);
     // Keep it out of intersections (both axes near a centerline = crossing).
-    const cross = roads.reduce((n, c) => n + (Math.abs(c - bx) < 6.5 ? 1 : 0) + (Math.abs(c - bz) < 6.5 ? 1 : 0), 0);
+    const cross =
+      roads.reduce((n, c) => n + (Math.abs(c - bx) < 6.5 ? 1 : 0), 0) +
+      roadsZ.reduce((n, c) => n + (Math.abs(c - bz) < 6.5 ? 1 : 0), 0);
     if (cross > 1) return;
 
     // Shared roadblock geometry/materials, built once per session.
@@ -2123,14 +2143,15 @@ export class HyperionGame implements World {
     const bodyMat = new THREE.MeshStandardMaterial({ color: 0xb32014, roughness: 0.5, metalness: 0.35 });
     const capMat = new THREE.MeshStandardMaterial({ color: 0xd8d2c4, roughness: 0.45, metalness: 0.6 });
     this.hydAssets.push({ geo: bodyGeo, mat: bodyMat }, { geo: capGeo, mat: capMat });
-    // Candidates: sidewalk corners at alternating intersections (skips blocked corners)
+    // Candidates: sidewalk corners at alternating real intersections (skips blocked corners)
     const roads = this.city.roadCoords;
+    const roadsZ = this.city.roadCoordsZ;
     const edge = ROAD_W / 2 + 1.3; // mid-sidewalk offset from the road centerline
     const spots: THREE.Vector3[] = [];
     for (let ix = 0; ix < roads.length; ix += 2) {
-      for (let iz = (ix / 2) % 2 === 0 ? 1 : 0; iz < roads.length; iz += 2) {
+      for (let iz = (ix / 2) % 2 === 0 ? 1 : 0; iz < roadsZ.length; iz += 2) {
         const x = roads[ix] + edge;
-        const z = roads[iz] + edge;
+        const z = roadsZ[iz] + edge;
         if (Math.abs(x) > CITY_HALF - 6 || Math.abs(z) > CITY_HALF - 6) continue;
         spots.push(new THREE.Vector3(x, 0, z));
       }
@@ -2456,11 +2477,18 @@ export class HyperionGame implements World {
   /** Four mid-block launch ramps across the city (kept clear of POI lots). */
   private buildStuntRamps(): void {
     const R = this.city.roadCoords;
+    const RZ = this.city.roadCoordsZ;
+    const pick = (arr: number[], i: number): number =>
+      arr.length ? arr[Math.min(arr.length - 1, i)] : (i - 3) * BLOCK;
+    const midOf = (arr: number[], i: number): number => {
+      const a = pick(arr, i), b = pick(arr, Math.min(arr.length ? arr.length - 1 : 0, i + 1));
+      return b > a ? (a + b) / 2 : a + BLOCK / 2;
+    };
     const slots = [
-      { road: R[3], mid: R[4] + BLOCK / 2, alongX: true, dir: 1 },
-      { road: R[9], mid: R[8] + BLOCK / 2, alongX: true, dir: -1 },
-      { road: R[5], mid: R[8] + BLOCK / 2, alongX: false, dir: 1 },
-      { road: R[8], mid: R[2] + BLOCK / 2, alongX: false, dir: -1 },
+      { road: pick(R, 3), mid: midOf(RZ, 4), alongX: true, dir: 1 },
+      { road: pick(R, Math.max(0, R.length - 3)), mid: midOf(RZ, 8), alongX: true, dir: -1 },
+      { road: pick(RZ, 5), mid: midOf(R, 8), alongX: false, dir: 1 },
+      { road: pick(RZ, Math.max(0, RZ.length - 3)), mid: midOf(R, 2), alongX: false, dir: -1 },
     ];
     const W = 6.6;
     const L = 6.0;
@@ -3143,20 +3171,15 @@ export class HyperionGame implements World {
     const w2m = (m: number) => (m + MINIMAP_SPAN / 2) * k;
     ctx.fillStyle = '#42552f';
     ctx.fillRect(0, 0, size, size);
-    // blocks
-    for (let bi = -GRID_HALF; bi < GRID_HALF; bi++) {
-      for (let bj = -GRID_HALF; bj < GRID_HALF; bj++) {
-        const t = this.city.blockType(bi, bj);
-        ctx.fillStyle = t === 'park' ? '#4e7a37' : t === 'lot' ? '#3c3c40' : '#6e6e66';
-        ctx.fillRect(w2m(bi * BLOCK + 4), w2m(bj * BLOCK + 4), (BLOCK - 8) * k, (BLOCK - 8) * k);
-      }
+    // real blocks
+    for (const b of this.city.realBlocksPublic()) {
+      ctx.fillStyle = b.kind === 'park' ? '#4e7a37' : b.kind === 'lot' ? '#3c3c40' : '#6e6e66';
+      ctx.fillRect(w2m(b.x0 + 4), w2m(b.z0 + 4), (b.x1 - b.x0 - 8) * k, (b.z1 - b.z0 - 8) * k);
     }
-    // roads
+    // real roads
     ctx.fillStyle = '#2e2e30';
-    for (const c of this.city.roadCoords) {
-      ctx.fillRect(w2m(c - 4), 0, 8 * k, size);
-      ctx.fillRect(0, w2m(c - 4), size, 8 * k);
-    }
+    for (const c of this.city.roadCoords) ctx.fillRect(w2m(c - 4), 0, 8 * k, size);
+    for (const c of this.city.roadCoordsZ) ctx.fillRect(0, w2m(c - 4), size, 8 * k);
     // buildings footprint (lighter = taller)
     for (const b of this.city.buildings) {
       const shade = Math.min(230, 120 + b.h * 2);

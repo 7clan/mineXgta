@@ -13,7 +13,7 @@ export interface SkyUniforms {
 }
 
 export const HUD_EMIT_INTERVAL = 0.125;
-export const MINIMAP_SPAN = 480; // world meters covered by the minimap base image
+export const MINIMAP_SPAN = 570; // world meters covered by the minimap base image (real lattice window)
 export const SHAFT_LIFE = 1; // reserved for future shaft recycling tuning
 export const AIM_EPS = 0.01;
 

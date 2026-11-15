@@ -6,6 +6,7 @@ import { HUD_INITIAL, HudState } from './engine/types';
 import { Hud } from './hud';
 import { initIcons, initUIIcons } from './engine/items';
 import { hasSave } from './engine/save';
+import { loadGtaSource } from './engine/gtaSource';
 
 export default function HyperionClient() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -34,11 +35,16 @@ export default function HyperionClient() {
       gameRef.current?.setMinimap(c);
     }, 1000);
 
-    // Let the loading UI paint before the heavy city generation blocks the main thread.
+    // Let the loading UI paint, then fetch the REAL GTA source assets
+    // (road graph, water, popcycle, texture dictionaries) before the city
+    // builds from them, and kick off the real-radio decode in the background.
     const t = setTimeout(() => {
       if (disposed) return;
-      try {
-        const game = new HyperionGame(canvas, {
+      (async () => {
+        try {
+          const gta = await loadGtaSource();
+          if (disposed) return;
+          const game = new HyperionGame(canvas, {
           onState: (s) => setState(s),
           onToast: (msg) => {
             if (msg === '__OPEN_INVENTORY__') {
@@ -61,17 +67,20 @@ export default function HyperionClient() {
             game.setPaused(true);
             game.inputExitLock();
           },
-        });
+        }, gta);
         gameRef.current = game;
         setGame(game); // state (not a ref read) so Hud can safely access it during render
         // Expose for browser-automation QA (harmless in production).
         (window as unknown as { __hyperion?: HyperionGame }).__hyperion = game;
         game.start();
         setLoading(false);
+        // Real GTA V radio: decode the source tracks in the background.
+        void game.loadRadio();
       } catch (err) {
         setFatal(err instanceof Error ? err.message : String(err));
         setLoading(false);
       }
+      })();
     }, 60);
 
     return () => {
@@ -200,7 +209,7 @@ export default function HyperionClient() {
               <div className="h-full w-1/3 animate-pulse rounded bg-amber-400" />
             </div>
             <div className="mt-4 text-xs uppercase tracking-[0.3em] text-white/60">
-              Slicing the city into micro-voxels…
+              Loading Los Santos from the GTA source data…
             </div>
           </div>
         </div>

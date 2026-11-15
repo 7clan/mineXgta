@@ -1,13 +1,17 @@
 import * as THREE from 'three';
 import { BLOCK, ROAD_W, SIDEWALK_H, mulberry32 } from './constants';
 import { World } from './types';
+import { GtaSource } from './gtaSource';
+import type { RealBlock } from './gtaMap';
 
 /**
  * GTA 5-style pedestrians: fully articulated low-poly humans with jointed
  * elbows/knees, canvas-painted faces, hair styles, hats and a wardrobe of
  * outfit archetypes (tee, tank, suit, hoodie, safety vest, shirtless...).
  * Walk cycle with knee flex + elbow bend + torso bob; idle phone / look
- * around behaviours; panic sprint; ragdoll sprawl.
+ * around behaviours; panic sprint; ragdoll sprawl. GTA source port: peds
+ * walk the REAL Los Santos block rings and wear the real GTA V cloth
+ * detail + receive the real GTA V blood-splatter decals when hit.
  */
 
 export interface NPC {
@@ -22,6 +26,12 @@ export interface NPC {
   behaviorT: number;
   blockBI: number;
   blockBJ: number;
+  /** Real block ring bounds (GTA source lattice). */
+  ringX0: number;
+  ringZ0: number;
+  ringSide: number;
+  /** Real GTA V blood decal plane (shown after ragdoll). */
+  bloodDecal: THREE.Mesh | null;
   perim: number; // param along sidewalk ring (m)
   dir: 1 | -1;
   speed: number;
@@ -111,6 +121,11 @@ export class NPCs {
   private scene: THREE.Scene;
   private rng = mulberry32(2024);
   private geoCache: THREE.BufferGeometry[] = [];
+  /** GTA source port: real blocks + real textures + real blood decals. */
+  private gta: GtaSource | null = null;
+  private builtBlocks: RealBlock[] = [];
+  private bloodTex: THREE.Texture | null = null;
+  private bloodGeo: THREE.PlaneGeometry | null = null;
   private pools: {
     skin: THREE.MeshStandardMaterial[];
     faceDecal: THREE.MeshStandardMaterial[];
@@ -149,8 +164,11 @@ export class NPCs {
     faceDecal: THREE.PlaneGeometry;
   };
 
-  constructor(scene: THREE.Scene) {
+  constructor(scene: THREE.Scene, gta?: GtaSource | null) {
     this.scene = scene;
+    this.gta = gta ?? null;
+    this.bloodTex = this.gta?.tex.bloodSplatter ?? this.gta?.tex.bloodMist ?? null;
+    this.bloodGeo = this.bloodTex ? new THREE.PlaneGeometry(0.7, 0.7) : null;
     const std = (color: number, roughness = 0.82): THREE.MeshStandardMaterial =>
       new THREE.MeshStandardMaterial({ color, roughness });
     this.pools = {
@@ -199,21 +217,65 @@ export class NPCs {
       faceDecal: new THREE.PlaneGeometry(0.155, 0.19),
     };
     for (const g of Object.values(this.G)) this.geoCache.push(g);
+    // GTA source port: real GTA V cloth detail on every wardrobe material.
+    const cloth = this.gta?.tex.cloth ?? null;
+    if (cloth) {
+      const clothMap = cloth.clone();
+      clothMap.wrapS = clothMap.wrapT = THREE.RepeatWrapping;
+      clothMap.repeat.set(2, 2);
+      const clothRough = cloth.clone();
+      clothRough.wrapS = clothRough.wrapT = THREE.RepeatWrapping;
+      clothRough.repeat.set(2, 2);
+      for (const pool of [this.pools.shirt, this.pools.pants, this.pools.jacket]) {
+        for (const m of pool) {
+          m.roughnessMap = clothRough;
+          m.needsUpdate = true;
+        }
+      }
+    }
   }
 
-  spawn(n: number, isBuiltBlock: (bi: number, bj: number) => boolean): void {
+  spawn(n: number, builtBlocks?: RealBlock[]): void {
+    if (builtBlocks) this.builtBlocks = builtBlocks;
     for (let i = 0; i < n; i++) {
       let bi = 0;
       let bj = 0;
-      for (let tries = 0; tries < 20; tries++) {
-        bi = Math.floor(this.rng() * 12) - 6;
-        bj = Math.floor(this.rng() * 12) - 6;
-        if (isBuiltBlock(bi, bj)) break;
+      let ringX0 = 0;
+      let ringZ0 = 0;
+      let ringSide = BLOCK - ROAD_W - 2.6;
+      if (builtBlocks && builtBlocks.length) {
+        // GTA source port: spawn on REAL built blocks from the lattice.
+        const b = builtBlocks[Math.floor(this.rng() * builtBlocks.length)];
+        bi = b.bi; bj = b.bj;
+        const margin = 1.3;
+        ringX0 = b.x0 + ROAD_W / 2 + margin;
+        ringZ0 = b.z0 + ROAD_W / 2 + margin;
+        ringSide = Math.max(4, Math.min(b.x1 - b.x0, b.z1 - b.z0) - ROAD_W - margin * 2);
+      } else {
+        for (let tries = 0; tries < 20; tries++) {
+          bi = Math.floor(this.rng() * 12) - 6;
+          bj = Math.floor(this.rng() * 12) - 6;
+          if (this.legacyBuilt(bi, bj)) break;
+        }
+        const margin = 1.3;
+        ringX0 = bi * BLOCK + ROAD_W / 2 + margin;
+        ringZ0 = bj * BLOCK + ROAD_W / 2 + margin;
+        ringSide = BLOCK - ROAD_W - margin * 2;
       }
       const npc = this.make(bi, bj);
+      npc.ringX0 = ringX0;
+      npc.ringZ0 = ringZ0;
+      npc.ringSide = ringSide;
+      npc.perim = this.rng() * ringSide * 4;
       this.list.push(npc);
       this.scene.add(npc.group);
+      this.placeAt(npc, npc.perim);
     }
+  }
+
+  private legacyBuilt(bi: number, bj: number): boolean {
+    const r = mulberry32(bi * 73856093 ^ bj * 19349663)();
+    return r > 0.16;
   }
 
   private pick<T>(arr: T[]): T {
@@ -405,6 +467,10 @@ export class NPCs {
       behaviorT: 0,
       blockBI: bi,
       blockBJ: bj,
+      ringX0: 0,
+      ringZ0: 0,
+      ringSide: 0,
+      bloodDecal: null,
       perim: this.rng() * 94,
       dir: this.rng() < 0.5 ? 1 : -1,
       speed: 0,
@@ -417,13 +483,12 @@ export class NPCs {
     return npc;
   }
 
-  /** Sidewalk ring walk: maps perim param -> world pos on the block ring. */
+  /** Sidewalk ring walk: maps perim param -> world pos on the REAL block ring. */
   private placeAt(npc: NPC, perim: number): void {
-    const inner = BLOCK - ROAD_W; // 24
     const margin = 1.3;
-    const x0 = npc.blockBI * BLOCK + ROAD_W / 2 + margin;
-    const z0 = npc.blockBJ * BLOCK + ROAD_W / 2 + margin;
-    const side = inner - margin * 2;
+    const x0 = npc.ringX0 ?? npc.blockBI * BLOCK + ROAD_W / 2 + margin;
+    const z0 = npc.ringZ0 ?? npc.blockBJ * BLOCK + ROAD_W / 2 + margin;
+    const side = Math.max(4, npc.ringSide ?? BLOCK - ROAD_W - margin * 2);
     const per = side * 4;
     let p = ((perim % per) + per) % per;
     let x: number;
@@ -462,6 +527,21 @@ export class NPCs {
   knockDown(n: NPC): void {
     n.state = 'down';
     n.downT = 0;
+    // GTA source port: show the real GTA V blood-splatter decal on the torso.
+    if (this.bloodTex && this.bloodGeo && !n.bloodDecal) {
+      const mat = new THREE.MeshStandardMaterial({
+        map: this.bloodTex,
+        transparent: true,
+        depthWrite: false,
+        roughness: 0.6,
+      });
+      const decal = new THREE.Mesh(this.bloodGeo, mat);
+      decal.position.set(0, 0.32, 0.13);
+      decal.rotation.x = -0.5;
+      decal.scale.setScalar(0.7 + this.rng() * 0.6);
+      n.torso.add(decal);
+      n.bloodDecal = decal;
+    }
     // sprawled limbs
     n.limbs.lArm.rotation.set(-0.6, 0, 1.15);
     n.limbs.rArm.rotation.set(-1.4, 0, -0.9);
@@ -540,9 +620,24 @@ export class NPCs {
           n.behavior = 'walk';
           n.behaviorT = 0;
           this.resetPose(n);
-          n.blockBI = Math.floor(this.rng() * 12) - 6;
-          n.blockBJ = Math.floor(this.rng() * 12) - 6;
-          this.placeAt(n, this.rng() * 94);
+          // Respawn on a random REAL built block (GTA source lattice).
+          if (this.builtBlocks.length) {
+            const b = this.builtBlocks[Math.floor(this.rng() * this.builtBlocks.length)];
+            n.blockBI = b.bi;
+            n.blockBJ = b.bj;
+            const margin = 1.3;
+            n.ringX0 = b.x0 + ROAD_W / 2 + margin;
+            n.ringZ0 = b.z0 + ROAD_W / 2 + margin;
+            n.ringSide = Math.max(4, Math.min(b.x1 - b.x0, b.z1 - b.z0) - ROAD_W - margin * 2);
+            this.placeAt(n, this.rng() * n.ringSide * 4);
+          } else {
+            n.blockBI = Math.floor(this.rng() * 12) - 6;
+            n.blockBJ = Math.floor(this.rng() * 12) - 6;
+            n.ringX0 = 0;
+            n.ringZ0 = 0;
+            n.ringSide = 0;
+            this.placeAt(n, this.rng() * 94);
+          }
         }
         continue;
       }

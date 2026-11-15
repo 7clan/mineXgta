@@ -1,5 +1,10 @@
+import { GtaSource } from './gtaSource';
+
 /**
- * Project Hyperion — procedural WebAudio SFX engine (Task 2-b).
+ * Project Hyperion — procedural WebAudio SFX engine (Task 2-b) + the REAL
+ * GTA V radio (feature/gta-source-port): SFX stay synthesized live (zero
+ * assets), while the car radio now streams the actual tracks extracted
+ * from the GTA clone source audio.
  *
  * Zero audio assets, zero network: every sound is synthesized live from
  * oscillators and one cached white-noise buffer. SSR-safe: nothing touches
@@ -44,8 +49,6 @@ export class HyperionAudio {
   radioStation = 0; // 0 = off, 1..3 = stations
   /** Desired master volume — applied at unlock() and live via setMasterVolume(). */
   private vol = 0.8;
-
-  constructor() {}
 
   // ------------------------------------------------------------------ core
 
@@ -667,32 +670,92 @@ export class HyperionAudio {
 
   // ------------------------------------------------------------------ radio
 
-  /** Car radio station definitions (seeded procedural chiptune). */
+  /** Car radio station definitions — the REAL GTA V radio, playing the
+   *  actual tracks extracted as-is from the GTA clone source audio
+   *  (/x64/audio/tracks/*.awc → Opus → OGG). Falls back to the seeded
+   *  procedural chiptune when the source files are unavailable. */
   static readonly STATIONS = [
     { name: 'RADIO OFF', bpm: 0 },
-    { name: 'HYP FM 101.3', bpm: 128 },
-    { name: 'MIDNIGHT 84.5', bpm: 82 },
-    { name: 'VOXEL HARDWARE', bpm: 152 },
+    { name: 'WEST COAST CLASSICS', bpm: 128 },
+    { name: 'RADIO LOS SANTOS', bpm: 82 },
+    { name: 'NON-STOP-POP FM', bpm: 152 },
   ];
 
-  /** Start the car radio at a station (or advance into station 1). */
+  /** GTA source port: real track buffers per station (decoded OGG). */
+  private realRadio: { buffers: AudioBuffer[][]; loaded: boolean } = {
+    buffers: [[], [], []],
+    loaded: false,
+  };
+  private radioSrc: AudioBufferSourceNode | null = null;
+  private radioTrackIdx = 0;
+
+  constructor(private gtaSrc?: GtaSource | null) {}
+
+  /** Preload + decode the real GTA V radio tracks (async, best-effort). */
+  async loadRealRadio(): Promise<void> {
+    try {
+      if (!this.gtaSrc || !this.gtaSrc.radioStations.length || this.realRadio.loaded) return;
+      if (typeof window === 'undefined' || !window.AudioContext) return;
+      // ensure a context exists so decodeAudioData works
+      this.unlock();
+      if (!this.ctx) return;
+      const stations = this.gtaSrc.radioStations.slice(0, 3);
+      for (let s = 0; s < stations.length; s++) {
+        for (const track of stations[s].tracks) {
+          try {
+            const res = await fetch(track.file);
+            if (!res.ok) continue;
+            const ab = await res.arrayBuffer();
+            const buf = await this.ctx.decodeAudioData(ab);
+            this.realRadio.buffers[s].push(buf);
+          } catch { /* track unavailable — skip */ }
+        }
+      }
+      this.realRadio.loaded = true;
+    } catch { /* radio stays procedural offline */ }
+  }
+
+  /** Start the car radio at a station (real GTA V tracks when loaded). */
   startRadio(station = 1): void {
     try {
       if (!this.ctx || !this.master) return;
       this.stopRadio();
       this.radioStation = Math.max(1, Math.min(3, station));
+      const real = this.realRadio.buffers[this.radioStation - 1];
+      if (this.realRadio.loaded && real && real.length) {
+        // REAL GTA V music: play the next track of this station.
+        this.radioTrackIdx = (this.radioTrackIdx + 1) % real.length;
+        const buf = real[this.radioTrackIdx];
+        const src = this.ctx.createBufferSource();
+        src.buffer = buf;
+        const g = this.ctx.createGain();
+        g.gain.value = 0.85;
+        src.connect(g);
+        g.connect(this.master);
+        src.onended = () => {
+          if (this.radioSrc === src && this.radioStation > 0) this.startRadio(this.radioStation);
+        };
+        src.start();
+        this.radioSrc = src;
+        return;
+      }
+      // Procedural fallback scheduler
       this.radioStep = 0;
       this.radioNextT = this.ctx.currentTime + 0.08;
       this.radioTimer = setInterval(() => this.radioScheduler(), 50);
     } catch { /* noop */ }
   }
 
-  /** Stop the radio scheduler. */
+  /** Stop the radio (real source + procedural scheduler). */
   stopRadio(): void {
     try {
       if (this.radioTimer !== null) {
         clearInterval(this.radioTimer);
         this.radioTimer = null;
+      }
+      if (this.radioSrc) {
+        try { this.radioSrc.onended = null; this.radioSrc.stop(); } catch { /* already stopped */ }
+        this.radioSrc = null;
       }
     } catch { /* noop */ }
   }
